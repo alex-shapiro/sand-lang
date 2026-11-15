@@ -2186,22 +2186,18 @@ for these operations:
 - `call(callee, args).await` runs a Sand function on the calling task and
   returns its rooted result. The callee can wait on I/O, and the scheduler
   runs other tasks meanwhile. The callee takes at most 255 arguments.
-- `check_memory(bytes).await` collects garbage in place if `bytes` more heap
-  bytes exceed `max_memory`, and then fails with a memory limit error if they
-  still exceed it.
+- `check_memory(bytes).await` collects garbage in place if needed, and fails
+  with a memory limit error if `bytes` more heap bytes still exceed
+  `max_memory`.
 - `require(capability).await` checks a capability and prompts the user if the
   policy requires a prompt.
 
-Sand frames and native calls count toward `max_call_depth` together. If a
-task is cancelled during a callback, the engine runs the callee's `defer`
-blocks, drops the native future, and then runs the caller's `defer` blocks.
-The engine counts the size of each native future and its roots against
-`max_memory`. Each rooted value and each callback result stays rooted until
-the native call returns. The engine does not count the boxes of nested futures,
-so a recursive future must limit its nesting depth. A future must not make two
-requests in one poll; the engine reports two requests as an internal error. A
-timer or `select!` branch cannot interrupt a callback, because the engine
-polls the future again only after the callee returns.
+Callbacks count toward `max_call_depth`. Cancelling a task during a callback
+runs the callee's `defer` blocks, drops the future, and then runs the caller's.
+Roots and callback results stay alive until the native call returns. They count
+against `max_memory` with the future itself. Boxes of nested futures do not
+count, so a recursive future must limit its depth. A future makes at most one
+request per poll, and a timer or `select!` branch cannot interrupt a callback.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.

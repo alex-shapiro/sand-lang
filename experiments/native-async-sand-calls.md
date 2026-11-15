@@ -180,7 +180,7 @@ The VM must charge the size of each native future against `max_memory`. A native
 
 ## Part 5: Sketch of an async codec walker
 
-The sketch below illustrates a recursive async encoder. `crates/sandlang/benches/native_calls.rs` implements and tests a complete version:
+The sketch below illustrates a recursive async encoder. Commit `1f7bb03` benchmarked a complete version:
 
 ```rust
 async fn encode_value(
@@ -212,48 +212,29 @@ The walker keeps its position in local variables and recursive calls. The Rust c
 
 The engine implements Parts 1 to 4 with these differences from the proposal:
 
-- **`Later` keeps its name.** `Later::new(wait_kind, |cx| async move { ... })` passes a `NativeContext` to the function that builds the future. The future returns its result directly, so the finisher closure is gone. `stream::suspend` and `task.sleep` use the new form, and the other standard library functions call `stream::suspend` without change.
-- **The engine owns `Arc<Mutex<Vm>>` instead of `Vm`.** `sched::drive` locks the VM, runs ready tasks, and releases the lock only to poll a native future (`parking_lot::MutexGuard::unlocked`) or to await host events. `NativeContext::with_vm` takes a closure, so a future cannot keep the guard. `with_vm` panics if the engine is not polling the call, and the engine reports the panic as an internal error.
-- **A trampoline frame runs each callback.** Every program starts with the proto `CALLBACK_PROTO`. To run `context.call(callee, args)`, the scheduler pushes a frame of that proto, which calls the callee with `CallR` and then runs the new `ResumeNative` instruction. `ResumeNative` stops the fiber and passes the result to the native call. The return path of ordinary calls does not change.
-- **`check_memory` replaces `reserve`.** The name matches `Vm::check_memory`, because the call checks the limit and does not reserve memory.
-- **Each native call owns an `IoTable` slot.** The slot holds the waker that the future receives. A wake makes the task ready, and the scheduler polls the call in the task's next turn.
-- **The engine yields when the host task spends its tokio budget.** After tokio's budget of 128 operations, tokio futures return `Pending` until the host task yields. On `main`, the scheduler kept polling such futures in that state. 20,000 concurrent sleeps then took about 9.2 million polls instead of 40,000.
-- **The stdin idle flag no longer wakes the pending read.** The read's readiness depends only on the input. On `main`, the drive absorbed these wakes inside its wait. Under the new scheduler, each wake ran the task again, which made the drive spin.
-
-The engine counts the size of each native future and its root table against `max_memory`. It does not count boxes that the future allocates for recursive calls.
+- **`Later` keeps its name.** `Later::new(wait_kind, |cx| async move { ... })` replaces the finisher closure.
+- **The engine owns `Arc<Mutex<Vm>>`.** The drive releases the lock only to poll a native future or to await host events. `with_vm` works only while the engine polls the call.
+- **A trampoline frame runs each callback.** Proto 0 of every program calls the callee with `CallR` and then runs the new `ResumeNative` instruction, so ordinary returns do not change.
+- **`check_memory` replaces `reserve`,** because the call checks the limit and reserves nothing.
+- **Each fiber has one waker.** A wake makes the fiber ready, and the scheduler polls its innermost native call.
+- **The engine yields when the host spends its tokio budget.** On `main`, 20,000 concurrent sleeps took about 9.2 million polls instead of 40,000.
 
 ## Measurements
 
-We measured release builds on an Apple M-series machine on 2026-11-14. Each value is the fastest of several runs.
+Release builds on an Apple M-series machine, 2026-11-14, fastest of several runs. The prototype walker (commit `1f7bb03`) encodes 5,000 rows with one `Point` field each:
 
-The prototype codec walker in `crates/sandlang/benches/native_calls.rs` encodes 5,000 rows. Each row has one `Point` field:
+| Walker | ns per row |
+| --- | --- |
+| synchronous, as on `main` | 130 to 142 |
+| async, derived subtrees inside one `with_vm` | 112 to 120 |
+| async, one `with_vm` and one boxed future per node | 406 to 413 |
+| async, custom `Point` codec in Sand | 386 to 393 |
 
-| Operation        | ns per row | Meaning                                                                 |
-| ---------------- | ---------- | ----------------------------------------------------------------------- |
-| `sync`           | 130 to 142 | recursive native walker, as on `main`                                   |
-| `async_derived`  | 112        | async native call that walks derived subtrees inside one `with_vm` call |
-| `async_per_node` | 406        | one `with_vm` call and one boxed future for each of 9 nodes per row     |
-| `async_custom`   | 386 to 393 | async walker with a custom `Point` codec in Sand                        |
-| `sand_hook`      | 74         | Sand loop that calls the `Point` codec directly                         |
-| `native_hop`     | 87         | async native loop that calls an identity closure                        |
-| `sand_hop`       | 16         | Sand loop that calls the same closure                                   |
+- **Derived walk speed.** An async walk of derived types runs as fast as the synchronous walker.
+- **Custom field overhead.** A Rust-to-Sand-to-Rust hop costs about 70 ns, compared with about 270 ns for the continuation walker on `origin/encode-decode-traits`. A custom field adds about 280 ns per row, including the Sand hook, compared with about 435 ns.
 
-These results answer the two questions of the first prototype:
-
-- **Derived walk speed.** An async walk of derived types runs as fast as the synchronous walker. The derived-subtree shortcut puts the whole walk inside one `with_vm` call. Without the shortcut, each async node costs about 33 ns.
-- **Custom field overhead.** A Rust-to-Sand-to-Rust hop costs about 71 ns (`native_hop` minus `sand_hop`). The continuation walker on `origin/encode-decode-traits` spent about 270 ns to stop, call Sand, and resume. A custom field adds about 280 ns to a row. That figure includes the hook itself and the async overhead of the three other fields in the same struct. The continuation walker took about 435 ns for a custom field.
-
-A/B runs against `main` show no other change in the interpreter:
-
-- `cargo bench --bench vm`: geometric mean 40.7 ms to 43.2 ms on `main` and 41.0 ms to 42.2 ms on the branch.
-- `cargo bench --bench codec`: every operation is within run-to-run noise.
-- An async native function that completes on its first poll takes 121 ns per call, compared with 115 ns on `main`. The new call allocates a shared call state and locks the VM around each poll.
-- 20,000 concurrent `task.sleep(1ms)` calls take 920 to 980 ns per task, compared with 2,950 ns on `main`. The tokio budget check causes this speedup.
-- `bench/run.py`: the programs suite has a geometric mean ratio of 0.995 to `main`. Among the examples, `chat_server` is about 3% slower (770 ms to 792 ms, compared with 742 ms to 759 ms), and the other examples are within noise.
+Against `main`, the `vm` and `codec` benches and the `bench/run.py` programs show no change. An async call that completes on its first poll takes about 124 ns instead of 114 ns. `chat_server` is about 3% slower. 20,000 concurrent `task.sleep(1ms)` calls take about 950 ns per task instead of 2,950 ns.
 
 ## Remaining problems
 
-- **Raw `VmValue` across `await` points.** `VmValue` implements `Send`, so the compiler accepts a future that keeps an unrooted `VmValue` across a wait. `TODO.md` tracks this problem.
-- **Root tables only grow.** Each `root` call and each callback result adds an entry until the native call returns. A walker over a list of a million values keeps a million entries alive. The engine counts the entries against `max_memory`.
-- **Callbacks cannot be interrupted.** The engine polls a future again only after the callee returns, so a timer or `select!` branch around `context.call` takes effect only then.
-- **Concurrent mutation during callbacks.** A callback can change a collection that a native walker iterates. Each walker must fail on mutation or read a snapshot.
+`TODO.md` tracks raw `VmValue` across waits, root tables that only grow, and uncounted boxes of nested futures. A callback can also change a collection that a native walker iterates, so each walker must fail on mutation or read a snapshot.

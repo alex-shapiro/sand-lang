@@ -96,7 +96,3 @@ harness = false
 [[bench]]
 name = "codec"
 harness = false
-
-[[bench]]
-name = "native_calls"
-harness = false

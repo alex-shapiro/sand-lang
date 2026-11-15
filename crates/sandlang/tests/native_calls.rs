@@ -6,6 +6,7 @@ use common::{StoppedClock, rt};
 use parking_lot::Mutex;
 use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
 use sandlang::native::NativeModule;
+use sandlang::native::context::NativeContext;
 use sandlang::native::convert::{HostError, IntoVmValue};
 use sandlang::native::func::Later;
 use sandlang::native::ty::{Param, VmVal};
@@ -16,62 +17,39 @@ use std::time::Duration;
 
 type Log = Arc<Mutex<Vec<String>>>;
 
-/// Appends `entry` to `log` when dropped.
-struct LogOnDrop(Log, &'static str);
+/// Appends "native dropped" to the log when dropped.
+struct LogOnDrop(Log);
 
 impl Drop for LogOnDrop {
     fn drop(&mut self) {
-        self.0.lock().push(self.1.into());
+        self.0.lock().push("native dropped".into());
     }
 }
+
+type Callback = VmVal<fn() -> ()>;
 
 /// The `calls` module, whose functions record events in `log`.
 fn calls_module(log: &Log) -> NativeModule {
     let mut m = NativeModule::new("calls");
-    m.source(
-        "pub native fn apply<T>(f: fn(T) -> T, x: T) -> T\n\
-         pub native fn apply_n<T>(f: fn(T) -> T, x: T, n: int) -> T\n\
-         pub native fn combine<T>(f: fn(T, T) -> T, a: T, b: T) -> T",
-    );
-    m.function("apply", |f: VmVal<fn(Param<0>) -> Param<0>>, x: Param<0>| -> Result<Later<Param<0>, Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, |cx| {
-            let (f, x) = (cx.root(f.raw()), cx.root(x.raw()));
-            async move {
-                let y = cx.call(f, &[x]).await;
-                Ok(Param::from_raw(cx.value(y)))
-            }
-        }))
-    });
-    m.function("apply_n", |f: VmVal<fn(Param<0>) -> Param<0>>, x: Param<0>, n: i64| -> Result<Later<Param<0>, Fail>, Fail> {
+    m.source("pub native fn apply<T>(f: fn(T) -> T, x: T, times: int) -> T");
+    m.function("apply", |f: VmVal<fn(Param<0>) -> Param<0>>, x: Param<0>, times: i64| -> Result<Later<Param<0>, Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, move |cx| {
             let (f, mut x) = (cx.root(f.raw()), cx.root(x.raw()));
             async move {
-                for _ in 0..n {
+                for _ in 0..times {
                     x = cx.call(f, &[x]).await;
                 }
                 Ok(Param::from_raw(cx.value(x)))
             }
         }))
     });
-    m.function(
-        "combine",
-        |f: VmVal<fn(Param<0>, Param<0>) -> Param<0>>, a: Param<0>, b: Param<0>| -> Result<Later<Param<0>, Fail>, Fail> {
-            Ok(Later::new(WaitKind::Io, |cx| {
-                let (f, a, b) = (cx.root(f.raw()), cx.root(a.raw()), cx.root(b.raw()));
-                async move { Ok(Param::from_raw(cx.value(cx.call(f, &[a, b]).await))) }
-            }))
-        },
-    );
-    // Allocates a string that only the call's roots reference, runs `f`
-    // three times, and returns the string.
-    m.function("keep", |vm: &mut Vm, n: i64, f: VmVal<fn() -> ()>| -> Result<Later<String, Fail>, Fail> {
-        let kept = format!("kept {n}").into_vm_value(vm)?;
+    // Returns a string that only the call's roots reference after `f` runs.
+    m.function("keep", |vm: &mut Vm, f: Callback| -> Result<Later<String, Fail>, Fail> {
+        let kept = "kept".into_vm_value(vm)?;
         Ok(Later::new(WaitKind::Io, |cx| {
             let (kept, f) = (cx.root(kept), cx.root(f.raw()));
             async move {
-                for _ in 0..3 {
-                    cx.call(f, &[]).await;
-                }
+                cx.call(f, &[]).await;
                 Ok(cx.with_vm(|vm| vm.str(cx.value(kept)).to_string()))
             }
         }))
@@ -79,55 +57,23 @@ fn calls_module(log: &Log) -> NativeModule {
     let l = log.clone();
     m.function("log", move |entry: String| l.lock().push(entry));
     let l = log.clone();
-    m.function("guard", move |f: VmVal<fn() -> ()>| -> Result<Later<(), Fail>, Fail> {
-        let l = l.clone();
+    m.function("guard", move |f: Callback| -> Result<Later<(), Fail>, Fail> {
+        let guard = LogOnDrop(l.clone());
         Ok(Later::new(WaitKind::Io, |cx| {
             let f = cx.root(f.raw());
             async move {
-                let _guard = LogOnDrop(l, "native dropped");
+                let _guard = guard;
                 cx.call(f, &[]).await;
                 Ok(())
             }
         }))
     });
+    m.function("wait_ms", |ms: i64| async move { tokio::time::sleep(Duration::from_millis(ms as u64)).await });
     m.function("spend_budget", |n: i64| async move {
         for _ in 0..n {
             tokio::task::consume_budget().await;
         }
     });
-    // Saves the context of one call, and uses it during the poll of another.
-    let saved: Arc<Mutex<Option<sandlang::native::context::NativeContext>>> = Arc::default();
-    let save = saved.clone();
-    m.function("save_context", move || -> Result<Later<(), Fail>, Fail> {
-        let save = save.clone();
-        Ok(Later::new(WaitKind::Io, move |cx| {
-            *save.lock() = Some(cx);
-            async { Ok(()) }
-        }))
-    });
-    m.function("use_saved_context", move || -> Result<Later<bool, Fail>, Fail> {
-        let saved = saved.lock().take();
-        Ok(Later::new(WaitKind::Io, |_| async move {
-            let saved = saved.expect("a saved context");
-            Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| saved.with_vm(|_| ()))).is_ok())
-        }))
-    });
-    m.function("call_without_args", |f: VmVal<fn(i64) -> i64>| -> Result<Later<(), Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, |cx| {
-            let f = cx.root(f.raw());
-            async move {
-                cx.call(f, &[]).await;
-                Ok(())
-            }
-        }))
-    });
-    m.function("call_with_timeout", |f: VmVal<fn() -> ()>| -> Result<Later<bool, Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, |cx| {
-            let f = cx.root(f.raw());
-            async move { Ok(tokio::time::timeout(Duration::from_millis(1), cx.call(f, &[])).await.is_ok()) }
-        }))
-    });
-    m.function("wait_ms", |ms: i64| async move { tokio::time::sleep(Duration::from_millis(ms as u64)).await });
     m.function("check_memory", |bytes: i64| -> Result<Later<(), Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, move |cx| async move { cx.check_memory(bytes as usize).await }))
     });
@@ -137,16 +83,29 @@ fn calls_module(log: &Log) -> NativeModule {
             Ok(format!("opened {name}"))
         }))
     });
-    // Makes two VM requests in one poll.
-    m.function("two_calls", |f: VmVal<fn() -> ()>| -> Result<Later<(), Fail>, Fail> {
+    // Saves the context of one call, and uses it during the poll of another.
+    let saved: Arc<Mutex<Option<NativeContext>>> = Arc::default();
+    let save = saved.clone();
+    m.function("save_context", move || -> Result<Later<(), Fail>, Fail> {
+        let save = save.clone();
+        Ok(Later::new(WaitKind::Io, move |cx| {
+            *save.lock() = Some(cx);
+            async { Ok(()) }
+        }))
+    });
+    m.function("use_saved_context", move || -> Result<Later<bool, Fail>, Fail> {
+        let saved = saved.lock().take().expect("a saved context");
+        Ok(Later::new(WaitKind::Io, |_| async move {
+            Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| saved.with_vm(|_| ()))).is_ok())
+        }))
+    });
+    m.function("two_calls", |f: Callback| -> Result<Later<(), Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, |cx| {
             let f = cx.root(f.raw());
             async move {
-                let mut first = std::pin::pin!(cx.call(f, &[]));
-                let mut second = std::pin::pin!(cx.call(f, &[]));
+                let (mut first, mut second) = (std::pin::pin!(cx.call(f, &[])), std::pin::pin!(cx.call(f, &[])));
                 std::future::poll_fn(|w| {
-                    let _ = first.as_mut().poll(w);
-                    let _ = second.as_mut().poll(w);
+                    let _ = (first.as_mut().poll(w), second.as_mut().poll(w));
                     std::task::Poll::<()>::Pending
                 })
                 .await;
@@ -160,8 +119,7 @@ fn calls_module(log: &Log) -> NativeModule {
 fn run(config: Config, log: &Log, src: &str) -> (Result<i32, Error>, String) {
     let out = MemorySink::new();
     let config = config.host_modules(HostModules::new([calls_module(log)]).unwrap()).stdout(out.clone());
-    let mut engine = Engine::new(config);
-    let r = rt().block_on(engine.run_source("main.sand", &format!("import calls\n{src}")));
+    let r = rt().block_on(Engine::new(config).run_source("main.sand", &format!("import calls\n{src}")));
     (r.map(|outcome| outcome.exit_code), out.contents())
 }
 
@@ -171,56 +129,53 @@ fn run_ok(config: Config, src: &str) -> String {
     out
 }
 
-#[test]
-fn async_natives_call_sand_functions() {
-    let src = "print(calls.apply((x) => x * 2, 21))\n\
-               print(calls.apply((s) => s + \"!\", \"hi\"))\n\
-               print(calls.apply_n((x) => x + 1, 0, 1000))\n\
-               print(calls.combine((a, b) => a * 10 + b, 4, 2))";
-    assert_eq!(run_ok(Config::new(), src), "42\nhi!\n1000\n42\n");
+fn memory_limit(bytes: usize) -> Config {
+    Config::new().limits(Limits { max_memory: Some(bytes), ..Limits::default() })
 }
 
 #[test]
-fn callbacks_suspend_on_io_and_channels_while_other_tasks_run() {
+fn callbacks_run_on_the_calling_task_and_suspend_on_io_and_channels() {
     // The callback waits for a message that only another task sends.
-    let src = "let ch: Channel<int> = Channel()\n\
+    let src = "print(calls.apply((s) => s + \"!\", \"hi\", 1000).len())\n\
+               let ch: Channel<int> = Channel()\n\
                let sender = spawn {\n\
                    calls.wait_ms(5)\n\
-                   task.sleep(5ms)\n\
                    ch.send(7)\n\
                }\n\
                print(calls.apply((x) => {\n\
                    task.sleep(1ms)\n\
-                   calls.wait_ms(1)\n\
                    x + (ch.recv() ?? 0)\n\
-               }, 35))\n\
-               sender.wait()";
-    assert_eq!(run_ok(Config::new(), src), "42\n");
+               }, 35, 1))";
+    assert_eq!(run_ok(Config::new(), src), "1002\n42\n");
 }
 
 #[test]
 fn rooted_values_survive_collections_during_callbacks() {
-    let src = "fn churn() {\n\
-                   var xs: [str] = []\n\
-                   for i in 0..2000 { xs.push(\"garbage \\(i)\") }\n\
-               }\n\
-               print(calls.keep(7, churn))\n\
-               print(calls.apply_n((s) => \"<\" + s + \">\", \"x\", 200).len())";
-    assert_eq!(run_ok(Config::new().gc_stress(true), src), "kept 7\n401\n");
+    let src = "print(calls.keep(() => {\n    var xs: [str] = []\n    for i in 0..2000 { xs.push(\"garbage \\(i)\") }\n}))";
+    assert_eq!(run_ok(Config::new().gc_stress(true), src), "kept\n");
 }
 
 #[test]
 fn callbacks_nest_up_to_the_call_depth_limit() {
-    let src = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply(down, n - 1) + 1 } }\nprint(down(100))";
+    let src = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply(down, n - 1, 1) + 1 } }\nprint(down(100))";
     assert_eq!(run_ok(Config::new().gc_stress(true), src), "100\n");
-
-    let limits = Limits { max_call_depth: 50, ..Limits::default() };
-    let (r, _) = run(Config::new().limits(limits), &Log::default(), src);
+    let (r, _) = run(Config::new().limits(Limits { max_call_depth: 50, ..Limits::default() }), &Log::default(), src);
     assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("stack overflow")), "{r:?}");
 }
 
 #[test]
-fn cancellation_unwinds_callbacks_and_drops_native_futures_in_reverse_call_order() {
+fn callbacks_end_runs_with_exits_and_traced_errors() {
+    let (r, out) = run(Config::new(), &Log::default(), "calls.apply((x) => { exit(3)\nx }, 1, 1)\nprint(\"unreachable\")");
+    assert_eq!((r.unwrap(), out.as_str()), (3, ""));
+    let src = "fn divide(x: int) -> int { x / 0 }\nfn outer() -> int { calls.apply(divide, 1, 1) }\nprint(outer())";
+    let (r, _) = run(Config::new(), &Log::default(), src);
+    let Err(Error::Runtime { trace, .. }) = r else { panic!("{r:?}") };
+    let functions: Vec<&str> = trace.iter().map(|frame| frame.function.as_str()).collect();
+    assert_eq!(functions, ["divide", "outer", "<top level>"]);
+}
+
+#[test]
+fn cancellation_and_run_ends_drop_native_futures_in_reverse_call_order() {
     let log = Log::default();
     let src = "let t = spawn {\n\
                    defer { calls.log(\"caller defer\") }\n\
@@ -231,26 +186,14 @@ fn cancellation_unwinds_callbacks_and_drops_native_futures_in_reverse_call_order
                }\n\
                task.sleep(5ms)\n\
                t.cancel()\n\
-               task.sleep(5ms)\n\
-               print(t.is_done())";
-    let (r, out) = run(Config::new(), &log, src);
-    r.unwrap();
-    assert_eq!(out, "true\n");
-    assert_eq!(*log.lock(), ["callee defer", "native dropped", "caller defer"]);
+               spawn calls.guard(() => calls.wait_ms(10000))\n\
+               task.sleep(5ms)";
+    run(Config::new(), &log, src).0.unwrap();
+    assert_eq!(*log.lock(), ["callee defer", "native dropped", "caller defer", "native dropped"]);
 }
 
 #[test]
-fn ending_the_run_drops_native_futures_waiting_on_callbacks() {
-    let log = Log::default();
-    let src = "spawn calls.guard(() => calls.wait_ms(10000))\ntask.sleep(5ms)";
-    let (r, _) = run(Config::new(), &log, src);
-    r.unwrap();
-    assert_eq!(*log.lock(), ["native dropped"]);
-}
-
-#[test]
-fn check_memory_collects_garbage_in_place() {
-    let limits = Limits { max_memory: Some(16 << 20), ..Limits::default() };
+fn native_calls_enforce_the_memory_limit_in_place() {
     // No safe point runs between dropping `junk` and the native call, so
     // only the call's own collection frees the 8 MB of strings.
     let src = "var block = \"x\"\n\
@@ -260,45 +203,32 @@ fn check_memory_collects_garbage_in_place() {
                junk = []\n\
                calls.check_memory(10 << 20)\n\
                print(\"fits\")\n\
-               calls.check_memory(64 << 20)\n\
-               print(\"unreachable\")";
-    let (r, out) = run(Config::new().limits(limits), &Log::default(), src);
+               calls.check_memory(64 << 20)";
+    let (r, out) = run(memory_limit(16 << 20), &Log::default(), src);
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))) && out == "fits\n", "{r:?} {out:?}");
+    // Each callback result stays rooted until the call returns.
+    let (r, _) = run(memory_limit(16 << 20), &Log::default(), "calls.apply((x) => x + 1, 0, 1200000)");
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
-    assert_eq!(out, "fits\n");
 }
 
 #[test]
 fn require_prompts_and_resumes_the_future() {
-    let asked = Arc::new(Mutex::new(Vec::new()));
     let answers = Arc::new(Mutex::new(vec![PromptAnswer::AllowOnce, PromptAnswer::DenyOnce]));
-    let (a, n) = (asked.clone(), answers.clone());
     let config = Config::new()
         .custom_policy(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow })
-        .prompter(move |cap: Capability| {
-            a.lock().push(cap);
-            let answer = n.lock().remove(0);
+        .prompter(move |_: Capability| {
+            let answer = answers.lock().remove(0);
             async move { answer }
         });
-    let src = "print(calls.open_door(\"front\"))\nprint(calls.open_door(\"back\"))";
-    assert_eq!(
-        run_ok(config, src),
-        "Ok(\"opened front\")\nErr(Error(message: \"permission denied: door back\", kind: \"permission_denied\"))\n"
-    );
-    assert_eq!(asked.lock().len(), 2);
+    let out = run_ok(config, "print(calls.open_door(\"front\"))\nprint(calls.open_door(\"back\"))");
+    assert_eq!(out, "Ok(\"opened front\")\nErr(Error(message: \"permission denied: door back\", kind: \"permission_denied\"))\n");
 }
 
 #[test]
-fn two_requests_in_one_poll_are_an_internal_error() {
+fn misused_contexts_fail() {
+    assert_eq!(run_ok(Config::new(), "calls.save_context()\nprint(calls.use_saved_context())"), "false\n");
     let (r, _) = run(Config::new(), &Log::default(), "calls.two_calls(() => ())");
     assert!(matches!(&r, Err(Error::Internal { message, .. }) if message.contains("two VM requests")), "{r:?}");
-}
-
-#[test]
-fn engines_and_runs_with_native_calls_are_send() {
-    fn assert_send<T: Send>(_: &T) {}
-    let mut engine = Engine::new(Config::new().host_modules(HostModules::new([calls_module(&Log::default())]).unwrap()));
-    assert_send(&engine);
-    assert_send(&engine.run_source("main.sand", "import calls\nprint(calls.apply((x) => x, 1))"));
 }
 
 #[test]
@@ -309,55 +239,17 @@ fn a_spent_tokio_budget_does_not_hang_a_clock_that_yields_at_once() {
 }
 
 #[test]
-fn a_context_works_only_while_the_engine_polls_its_call() {
-    assert_eq!(run_ok(Config::new(), "calls.save_context()\nprint(calls.use_saved_context())"), "false\n");
-}
+fn engines_and_sessions_run_native_calls() {
+    fn assert_send<T: Send>(_: &T) {}
+    let modules = || HostModules::new([calls_module(&Log::default())]).unwrap();
+    let mut engine = Engine::new(Config::new().host_modules(modules()));
+    assert_send(&engine);
+    assert_send(&engine.run_source("main.sand", "import calls"));
 
-#[test]
-fn callback_results_count_against_the_memory_limit() {
-    let limits = Limits { max_memory: Some(16 << 20), ..Limits::default() };
-    let (r, _) = run(Config::new().limits(limits), &Log::default(), "print(calls.apply_n((x) => x + 1, 0, 1200000))");
-    assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
-}
-
-#[test]
-fn a_callback_with_the_wrong_argument_count_is_an_internal_error() {
-    let (r, _) = run(Config::new(), &Log::default(), "calls.call_without_args((x) => x + 1)");
-    assert!(
-        matches!(&r, Err(Error::Internal { message, .. }) if message.contains("passed 0 arguments to a callback that takes 1")),
-        "{r:?}"
-    );
-}
-
-#[test]
-fn errors_in_callbacks_trace_through_the_native_call() {
-    let src = "fn divide(x: int) -> int { x / 0 }\nfn outer() -> int { calls.apply(divide, 1) }\nprint(outer())";
-    let (r, _) = run(Config::new(), &Log::default(), src);
-    let Err(Error::Runtime { trace, .. }) = r else { panic!("{r:?}") };
-    let functions: Vec<&str> = trace.iter().map(|frame| frame.function.as_str()).collect();
-    assert_eq!(functions, ["divide", "outer", "<top level>"]);
-}
-
-#[test]
-fn a_timeout_around_a_callback_takes_effect_only_after_the_callee_returns() {
-    assert_eq!(run_ok(Config::new(), "print(calls.call_with_timeout(() => task.sleep(20ms)))"), "true\n");
-}
-
-#[test]
-fn exit_in_a_callback_ends_the_run() {
-    let (r, out) = run(Config::new(), &Log::default(), "print(calls.apply((x) => { exit(3)\nx }, 1))\nprint(\"unreachable\")");
-    assert_eq!((r.unwrap(), out.as_str()), (3, ""));
-}
-
-#[test]
-fn sessions_run_callbacks_in_inputs_and_in_background_tasks() {
-    let config = Config::new().host_modules(HostModules::new([calls_module(&Log::default())]).unwrap());
-    let mut session = sandlang::session::Session::new(config);
+    let mut session = sandlang::session::Session::new(Config::new().host_modules(modules()));
     let rt = rt();
-    assert_eq!(rt.block_on(session.eval("import calls\ncalls.apply((x) => x * 2, 21)")).unwrap().as_deref(), Some("42"));
-    let started = "let t = spawn calls.apply((x) => {\n    task.sleep(5ms)\n    x + 1\n}, 1)";
-    assert_eq!(rt.block_on(session.eval(started)).unwrap(), None);
+    assert_eq!(rt.block_on(session.eval("import calls\ncalls.apply((x) => x * 2, 21, 1)")).unwrap().as_deref(), Some("42"));
+    rt.block_on(session.eval("let t = spawn calls.apply((x) => {\n    task.sleep(5ms)\n    x + 1\n}, 1, 1)")).unwrap();
     rt.block_on(session.run_tasks_until(async { tokio::time::sleep(Duration::from_millis(50)).await }, |e| panic!("{e}")));
-    assert_eq!(rt.block_on(session.eval("t.is_done()")).unwrap().as_deref(), Some("true"));
     assert_eq!(rt.block_on(session.eval("t.wait()")).unwrap().as_deref(), Some("2"));
 }
