@@ -273,10 +273,11 @@ impl<T: IntoVmValue, C: From<Fail>> NativeReturn<C> for Result<T, HostError<C>> 
 impl<T: IntoVmValue, E: NativeError> NativeReturn<Ctl> for Result<Later<T, E>, E>
 where
     Result<T, E>: SandType,
+    Result<T, E::FutureError>: NativeReturn<Fail>,
 {
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         match self {
-            Ok(Later(Completion::Now(r))) => Ok(E::future_result(r, vm)?),
+            Ok(Later(Completion::Now(r))) => Ok(r.into_call_result(vm)?),
             Ok(Later(Completion::After(start))) => Err(Ctl::native_call(start)),
             Err(e) => e.stop_call(vm),
         }
@@ -307,8 +308,6 @@ pub trait NativeError: Send + Sized + 'static + sealed::NativeError {
     type FutureError: 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl>;
-    #[doc(hidden)]
-    fn future_result<T: IntoVmValue>(r: Result<T, Self::FutureError>, vm: &mut Vm) -> Result<VmValue, Fail>;
 }
 
 mod sealed {
@@ -325,18 +324,12 @@ impl NativeError for Ctl {
     fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self)
     }
-    fn future_result<T: IntoVmValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<VmValue, Fail> {
-        r?.into_vm_value(vm)
-    }
 }
 
 impl NativeError for Fail {
     type FutureError = Fail;
     fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self.into())
-    }
-    fn future_result<T: IntoVmValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<VmValue, Fail> {
-        r?.into_vm_value(vm)
     }
 }
 
@@ -345,12 +338,12 @@ impl NativeError for HostError {
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         self.into_sand_error(vm)
     }
-    fn future_result<T: IntoVmValue>(r: Result<T, HostError<Fail>>, vm: &mut Vm) -> Result<VmValue, Fail> {
-        r.into_call_result(vm)
-    }
 }
 
-impl<T: IntoVmValue + 'static, E: NativeError> Later<T, E> {
+impl<T: IntoVmValue + 'static, E: NativeError> Later<T, E>
+where
+    Result<T, E::FutureError>: NativeReturn<Fail>,
+{
     /// Suspends the calling task on the future that `build` returns for the
     /// call's [`NativeContext`]. The engine converts the future output into
     /// the Sand result.
@@ -391,13 +384,7 @@ impl<T: IntoVmValue + 'static, E: NativeError> Later<T, E> {
     where
         F: Future<Output = Result<T, E::FutureError>> + Send + 'static,
     {
-        Later(Completion::After(NativeStart::new(wait_kind, |cx| {
-            let future = build(cx.clone());
-            async move {
-                let r = future.await;
-                cx.with_vm(|vm| vm.unchecked(|vm| E::future_result(r, vm)))
-            }
-        })))
+        Later(Completion::After(NativeStart::new(wait_kind, build)))
     }
 
     /// Returns a [`Later`] that produces `r` without suspending the calling task.
@@ -491,10 +478,7 @@ macro_rules! fn_impls {
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     read_params!(vm, args, $($param),*);
                     let future = self($($param),*);
-                    Err(Ctl::native_call(NativeStart::new(WaitKind::Io, |cx| async move {
-                        let r = future.await;
-                        cx.with_vm(|vm| vm.unchecked(|vm| r.into_call_result(vm)))
-                    })))
+                    Err(Ctl::native_call(NativeStart::new(WaitKind::Io, |_| future)))
                 })
             }
         }

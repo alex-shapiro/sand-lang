@@ -6,7 +6,6 @@ use crate::engine::LimitKind;
 use crate::native::context::{CallState, NativeFuture, VmRequest};
 use crate::platform::{ClockFuture, Instant};
 use parking_lot::MutexGuard;
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -92,16 +91,13 @@ impl IoTable {
 
 /// An async native call in progress on a fiber.
 pub(crate) struct NativeCall {
-    /// `None` while the scheduler polls it.
-    future: Option<NativeFuture>,
-    call: Arc<CallState>,
+    future: NativeFuture,
+    call: Arc<Mutex<CallState>>,
     wait_kind: WaitKind,
     /// The number of frames below the call. `frames[depth - 1]` made it.
     depth: usize,
     /// Absolute stack slot receiving the call's result.
     result_slot: usize,
-    /// The waker of the fiber, which the future receives.
-    waker: Waker,
     future_bytes: usize,
     /// Memory counted in `Heap::fiber_bytes`: the future and its roots.
     bytes: usize,
@@ -114,7 +110,7 @@ impl NativeCall {
 
     /// Adds the call's roots to `roots`.
     pub fn trace(&self, roots: &mut Vec<VmValue>) {
-        roots.extend_from_slice(&self.call.exchange.lock().roots);
+        roots.extend_from_slice(&self.call.lock().roots);
     }
 }
 
@@ -356,18 +352,15 @@ impl Vm {
     }
 
     /// Starts the async native call `start` on fiber `f`.
-    fn begin_native(&mut self, shared: &SharedVm, f: &mut Fiber, start: NativeStart) {
-        let _ = start.call.vm.set(Arc::downgrade(shared));
+    fn begin_native(&mut self, f: &mut Fiber, start: NativeStart) {
         let capacity = f.natives.capacity();
         let future_bytes = std::mem::size_of_val(&*start.future);
-        let waker = self.io.waker(self.current);
         f.natives.push(NativeCall {
-            future: Some(start.future),
+            future: start.future,
             call: start.call,
             wait_kind: start.wait_kind,
             depth: f.frames.len(),
             result_slot: f.result_slot,
-            waker,
             future_bytes,
             bytes: future_bytes,
         });
@@ -377,7 +370,7 @@ impl Vm {
     /// Removes the innermost native call of `f` and drops its future.
     fn pop_native(&mut self, f: &mut Fiber) -> Option<NativeCall> {
         let native = f.natives.pop()?;
-        native.call.exchange.lock().roots = Vec::new();
+        native.call.lock().roots = Vec::new();
         self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(native.bytes);
         Some(native)
     }
@@ -432,9 +425,9 @@ impl Vm {
         f.frames.pop();
         f.stopped_in_native_call = true;
         let native = f.natives.last().expect("a native call made the callback");
-        let mut exchange = native.call.exchange.lock();
-        let reply = exchange.root(v);
-        exchange.reply = Some(reply);
+        let mut call = native.call.lock();
+        let reply = call.root(v);
+        call.reply = Some(reply);
     }
 
     /// Makes the fibers whose host events fired ready. Returns whether any
@@ -460,15 +453,13 @@ impl Vm {
     }
 }
 
-type VmGuard<'a> = MutexGuard<'a, Vm>;
-
 /// Runs `f` until it stops. Polls its innermost native call while that call
 /// is on top of its frames, and runs its frames otherwise.
-fn run_turn(vm: &mut VmGuard<'_>, shared: &SharedVm, f: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
+fn run_turn(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
     loop {
         if f.natives.last().is_some_and(|native| native.depth == f.frames.len()) {
             vm.meter.sync(*fuel);
-            let polled = poll_native(vm, f);
+            let polled = poll_native(vm, shared, f);
             *fuel = vm.meter.resync();
             if let Some(stop) = polled? {
                 return Ok(stop);
@@ -479,7 +470,7 @@ fn run_turn(vm: &mut VmGuard<'_>, shared: &SharedVm, f: &mut Fiber, fuel: &mut i
             continue;
         }
         match vm.run_slice(f, fuel)? {
-            FiberStop::Native(start) => vm.begin_native(shared, f, start),
+            FiberStop::Native(start) => vm.begin_native(f, start),
             FiberStop::NativeReturn(v) => vm.end_callback(f, v),
             stop => return Ok(stop),
         }
@@ -488,44 +479,42 @@ fn run_turn(vm: &mut VmGuard<'_>, shared: &SharedVm, f: &mut Fiber, fuel: &mut i
 
 /// Polls the innermost native call of `f` with the VM unlocked, and handles
 /// its result or request. Returns a stop if `f` must stop running.
-fn poll_native(vm: &mut VmGuard<'_>, f: &mut Fiber) -> Result<Option<FiberStop>, RunEnding> {
+fn poll_native(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber) -> Result<Option<FiberStop>, RunEnding> {
     let mut collected = false;
     loop {
+        let fid = vm.current;
+        let waker = vm.io.waker(fid);
         let native = f.natives.last_mut().expect("a native call is on top");
-        let mut future = native.future.take().expect("the scheduler polls each call once at a time");
-        let waker = &native.waker;
+        native.call.lock().lent_vm = Some(shared.clone());
+        vm.heap.fail_next_check.set(vm.retry_stress && !collected);
         // A panic in the future (a bug) becomes an internal error.
-        let stress = vm.retry_stress && !collected;
-        vm.heap.fail_next_check.set(stress);
-        native.call.polled.store(true, Ordering::Relaxed);
-        let polled = MutexGuard::unlocked(vm, || crate::unwind::catch(|| future.as_mut().poll(&mut Context::from_waker(waker))));
-        native.call.polled.store(false, Ordering::Relaxed);
+        let polled = MutexGuard::unlocked(vm, || crate::unwind::catch(|| native.future.as_mut().poll(&mut Context::from_waker(&waker))));
         vm.heap.fail_next_check.set(false);
         let (request, roots) = {
-            let mut exchange = native.call.exchange.lock();
-            (exchange.request.take(), exchange.roots.capacity())
+            let mut call = native.call.lock();
+            call.lent_vm = None;
+            (call.request.take(), call.roots.capacity())
         };
         let polled = match polled {
             Ok(polled) => polled,
             Err(msg) => {
-                let _ = crate::unwind::catch(move || drop(future));
+                let native = f.natives.pop();
+                let _ = crate::unwind::catch(move || drop(native));
                 vm.broken = true;
                 return Err(Trap::Internal { message: msg, trace: vm.trace_of(f, None) }.into());
             }
         };
-        let Poll::Pending = polled else {
-            drop(future);
+        if let Poll::Ready(result) = polled {
             let slot = native.result_slot;
             vm.pop_native(f);
-            let result = match (polled, request) {
-                (Poll::Ready(result), None) => result,
-                _ => Err(Fail::internal("a native call returned during a VM request")),
+            let result = match request {
+                None => result,
+                Some(_) => Err(Fail::internal("a native call returned during a VM request")),
             };
             f.stack[slot] = result.map_err(|fail| vm.run_ending_of(fail, |vm| vm.trace_of(f, None)))?;
             vm.enforce_limit(Some(f)).map_err(Trap::Limit)?;
             return Ok(None);
-        };
-        native.future = Some(future);
+        }
         let bytes = native.future_bytes + roots * std::mem::size_of::<VmValue>();
         vm.heap.fiber_bytes = (vm.heap.fiber_bytes + bytes).saturating_sub(native.bytes);
         native.bytes = bytes;
@@ -562,7 +551,12 @@ enum Pause<S> {
 
 /// Runs ready tasks until none is ready, a task needs a prompt, or the engine
 /// must let other tasks of the host's executor run.
-fn run_ready<U: DriveUntil>(vm: &mut VmGuard<'_>, shared: &SharedVm, until: &U, timer: &mut RunTimer) -> Result<Pause<U::Stop>, RunEnding> {
+fn run_ready<U: DriveUntil>(
+    vm: &mut MutexGuard<'_, Vm>,
+    shared: &SharedVm,
+    until: &U,
+    timer: &mut RunTimer,
+) -> Result<Pause<U::Stop>, RunEnding> {
     while let Some(fid) = vm.ready.pop_front() {
         let Some(mut f) = vm.fibers.get_mut(fid as usize).and_then(|f| f.take()) else { continue };
         if f.state != FiberState::Ready {

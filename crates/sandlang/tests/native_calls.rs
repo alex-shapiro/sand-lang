@@ -11,8 +11,11 @@ use sandlang::native::convert::{HostError, IntoVmValue};
 use sandlang::native::func::Later;
 use sandlang::native::ty::{Param, VmVal};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
+use sandlang::vm::value::VmValue;
 use sandlang::vm::{Fail, Vm, WaitKind};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 type Log = Arc<Mutex<Vec<String>>>;
@@ -93,10 +96,15 @@ fn calls_module(log: &Log) -> NativeModule {
             async { Ok(()) }
         }))
     });
-    m.function("use_saved_context", move || -> Result<Later<bool, Fail>, Fail> {
+    // Returns whether `with_vm` and a VM request through the saved context work.
+    m.function("use_saved_context", move || -> Result<Later<(bool, bool), Fail>, Fail> {
         let saved = saved.lock().take().expect("a saved context");
         Ok(Later::new(WaitKind::Io, |_| async move {
-            Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| saved.with_vm(|_| ()))).is_ok())
+            let with_vm = catch_unwind(AssertUnwindSafe(|| saved.with_vm(|_| ()))).is_ok();
+            let callee = saved.root(VmValue::Unit);
+            let mut call = std::pin::pin!(saved.call(callee, &[]));
+            let request = std::future::poll_fn(|w| Poll::Ready(catch_unwind(AssertUnwindSafe(|| call.as_mut().poll(w))).is_ok())).await;
+            Ok((with_vm, request))
         }))
     });
     m.function("two_calls", |f: Callback| -> Result<Later<(), Fail>, Fail> {
@@ -251,7 +259,7 @@ fn require_prompts_and_resumes_the_future() {
 
 #[test]
 fn a_context_works_only_while_the_engine_polls_its_call() {
-    assert_eq!(run_ok(Config::new(), "calls.save_context()\nprint(calls.use_saved_context())"), "false\n");
+    assert_eq!(run_ok(Config::new(), "calls.save_context()\nprint(calls.use_saved_context())"), "(false, false)\n");
 }
 
 #[test]

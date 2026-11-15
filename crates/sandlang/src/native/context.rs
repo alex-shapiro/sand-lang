@@ -1,14 +1,15 @@
 //! VM access for the future of an async native call.
 
 use super::convert::HostError;
+use super::func::NativeReturn;
 use crate::policy::Capability;
+use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::value::VmValue;
-use crate::vm::{Fail, Vm, WaitKind};
+use crate::vm::{Fail, SharedVm, Vm, WaitKind};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::Arc;
 use std::task::Poll;
 
 /// Handle that lets the future of an async native call use the VM, call Sand
@@ -40,7 +41,7 @@ use std::task::Poll;
 /// ```
 #[derive(Clone)]
 pub struct NativeContext {
-    call: Arc<CallState>,
+    call: Arc<Mutex<CallState>>,
 }
 
 /// Heap value that a native call keeps alive across waits. Read it with
@@ -51,16 +52,8 @@ pub struct RootedValue(u32);
 /// State that a native call shares with the scheduler.
 #[derive(Default)]
 pub(crate) struct CallState {
-    /// The VM that runs the call, set when the call starts.
-    pub vm: OnceLock<Weak<Mutex<Vm>>>,
-    /// Whether the scheduler polls the call's future.
-    pub polled: AtomicBool,
-    pub exchange: Mutex<CallExchange>,
-}
-
-/// Roots of a native call, and its request to the scheduler.
-#[derive(Default)]
-pub(crate) struct CallExchange {
+    /// The VM, while the scheduler polls the call's future.
+    pub lent_vm: Option<SharedVm>,
     /// Garbage collection roots, indexed by [`RootedValue`].
     pub roots: Vec<VmValue>,
     /// The request that the last poll made.
@@ -69,7 +62,7 @@ pub(crate) struct CallExchange {
     pub reply: Option<RootedValue>,
 }
 
-impl CallExchange {
+impl CallState {
     /// Roots `v` and returns its handle.
     pub fn root(&mut self, v: VmValue) -> RootedValue {
         self.roots.push(v);
@@ -92,18 +85,25 @@ pub(crate) type NativeFuture = Pin<Box<dyn Future<Output = Result<VmValue, Fail>
 /// An async native call that the scheduler has not started yet.
 pub(crate) struct NativeStart {
     pub future: NativeFuture,
-    pub call: Arc<CallState>,
+    pub call: Arc<Mutex<CallState>>,
     pub wait_kind: WaitKind,
 }
 
 impl NativeStart {
-    /// Builds the future of a native call with the context of the call.
-    pub fn new<F>(wait_kind: WaitKind, build: impl FnOnce(NativeContext) -> F) -> NativeStart
+    /// Builds the future of a native call with the context of the call. The
+    /// future converts its output into the Sand result.
+    pub fn new<F, R>(wait_kind: WaitKind, build: impl FnOnce(NativeContext) -> F) -> NativeStart
     where
-        F: Future<Output = Result<VmValue, Fail>> + Send + 'static,
+        F: Future<Output = R> + Send + 'static,
+        R: NativeReturn<Fail> + 'static,
     {
-        let call = Arc::new(CallState::default());
-        let future = Box::pin(build(NativeContext { call: call.clone() }));
+        let cx = NativeContext { call: Arc::default() };
+        let call = cx.call.clone();
+        let output = build(cx.clone());
+        let future = Box::pin(async move {
+            let r = output.await;
+            cx.with_vm(|vm| vm.unchecked(|vm| r.into_call_result(vm)))
+        });
         NativeStart { future, call, wait_kind }
     }
 }
@@ -116,18 +116,18 @@ impl NativeContext {
     ///
     /// # Panics
     ///
-    /// Panics if the engine is not polling the call's future, for example in
-    /// a task spawned on another executor, in another call, or in a `Drop`
-    /// implementation.
+    /// Panics if the engine is not polling the call's future, for example
+    /// after the call returns, during another call, or in a `Drop`
+    /// implementation. Do not send the context to another thread.
     pub fn with_vm<R>(&self, f: impl FnOnce(&mut Vm) -> R) -> R {
-        let vm = self.call.vm.get().filter(|_| self.call.polled.load(Ordering::Relaxed)).and_then(Weak::upgrade);
+        let vm = self.call.lock().lent_vm.clone();
         let mut vm = vm.as_deref().and_then(Mutex::try_lock).expect("`NativeContext::with_vm` runs only while the engine polls the call");
         f(&mut vm)
     }
 
     /// Keeps `v` alive until the native call returns.
     pub fn root(&self, v: VmValue) -> RootedValue {
-        self.call.exchange.lock().root(v)
+        self.call.lock().root(v)
     }
 
     /// Returns the rooted value `r`, which the call of this context rooted.
@@ -136,7 +136,7 @@ impl NativeContext {
     ///
     /// Panics if the call has returned.
     pub fn value(&self, r: RootedValue) -> VmValue {
-        self.call.exchange.lock().roots[r.0 as usize]
+        self.call.lock().roots[r.0 as usize]
     }
 
     /// Calls the Sand function `callee` with `args` on the calling task, and
@@ -146,13 +146,14 @@ impl NativeContext {
     /// If the task is cancelled, the engine drops the future during the call.
     /// The callee takes at most 255 arguments.
     pub async fn call(&self, callee: RootedValue, args: &[RootedValue]) -> RootedValue {
+        assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
         let request = {
-            let exchange = self.call.exchange.lock();
-            let value = |r: RootedValue| exchange.roots[r.0 as usize];
+            let call = self.call.lock();
+            let value = |r: RootedValue| call.roots[r.0 as usize];
             VmRequest::Call { callee: value(callee), args: args.iter().copied().map(value).collect() }
         };
         self.request(request).await;
-        self.call.exchange.lock().reply.take().expect("the scheduler returns the callee's result")
+        self.call.lock().reply.take().expect("the scheduler returns the callee's result")
     }
 
     /// Returns a memory-limit error if `extra` additional heap bytes exceed
@@ -171,9 +172,15 @@ impl NativeContext {
     /// policy or the user denies it.
     pub async fn require(&self, capability: &Capability) -> Result<(), HostError<Fail>> {
         loop {
-            match self.with_vm(|vm| vm.permit(capability)) {
+            let permit = self.with_vm(|vm| {
+                let permit = vm.permit(capability);
+                if permit.is_ok() {
+                    vm.forget_once_answers();
+                }
+                permit
+            });
+            match permit {
                 Ok(allowed) => {
-                    self.with_vm(Vm::forget_once_answers);
                     return if allowed {
                         Ok(())
                     } else {
@@ -191,9 +198,10 @@ impl NativeContext {
         let mut request = Some(request);
         std::future::poll_fn(move |_| match request.take() {
             Some(request) => {
-                let mut exchange = self.call.exchange.lock();
-                assert!(exchange.request.is_none(), "a native call made two VM requests in one poll");
-                exchange.request = Some(request);
+                let mut call = self.call.lock();
+                assert!(call.lent_vm.is_some(), "`NativeContext` requests run only while the engine polls the call");
+                assert!(call.request.is_none(), "a native call made two VM requests in one poll");
+                call.request = Some(request);
                 Poll::Pending
             }
             None => Poll::Ready(()),
