@@ -97,8 +97,9 @@ Two problems would remain:
 - **A handle can become stale.** During an `await`, Sand code runs and can
   trigger a collection. The collector does not see the future's handle. It can
   free the object and give its slot to a new object. Sand is safe Rust, so the
-  result is not undefined behavior. It is a wrong answer: the handle reads a
-  different object. The research branch reproduced this case.
+  conflict results in incorrect rather than undefined behavior: the handle
+  reads a different object than what was expected. The research branch reproduced
+  this case.
 - **The future cannot keep `&mut Vm` across an `await`.** The VM needs
   `&mut Vm` to run the Sand function during that `await`.
 
@@ -107,14 +108,14 @@ A future pinned to one thread also conflicts with SPEC §16, which promises that
 the VM stores that future, the VM and the `Engine` become `!Send`. Only
 `unsafe impl Send` could restore `Send`, and the safe-Rust rule forbids it.
 
-## Part 1: One future type for every async native
+## Part 1: Replace the future type for async natives
 
 The new future type replaces `Suspension`, the type that async natives return
-on `main`. Every async native then follows one path through the scheduler.
+on `main`. Each async native then follows one path through the scheduler.
 
-### What exists on `main`
+### Existing future type
 
-The VM already polls the futures of async natives:
+A future on `main` can wait on external events but cannot access the VM:
 
 1. An async native returns a `Suspension`, which holds a boxed future.
 2. The VM puts the `Suspension` in its `IoTable`, a table of pending
@@ -122,20 +123,17 @@ The VM already polls the futures of async natives:
 3. Each slot of the table has a waker. An I/O event wakes the slot.
 4. The scheduler polls each woken future between slices of Sand execution
    (`IoTable::poll_ready`, `crates/sandlang/src/vm/sched.rs`).
-5. A completed future gives a _finisher closure_. The scheduler runs the
+5. A completed future gives a _finisher_ closure. The scheduler runs the
    finisher with `&mut Vm`, and the task continues with the result.
-
-A future on `main` can only wait for an external event. It cannot use the VM
-until it completes.
 
 ### The new future type
 
-A future of the new type returns `Pending` for one of two reasons:
+The new future returns `Pending` for one of two reasons:
 
-- **It waits for an external event**, such as I/O. A waker reports the event,
-  as on `main`.
-- **It asks the VM to run a Sand function.** The VM runs the function, and
-  then polls the future again.
+- **It is waiting for an external event**, such as I/O. A waker reports the
+  event, as on `main`.
+- **It asks the VM to run a Sand function.** The VM runs the function, then
+  polls the future again.
 
 An I/O native is a special case. Its future awaits the I/O, and then uses the
 VM once at the end, through `cx.with_vm` (Part 2). That last `cx.with_vm` does
@@ -153,10 +151,9 @@ type.
 
 ### How a call into Sand works
 
-1. A Sand task calls the native. The native returns a future instead of a
-   value.
-2. The VM stores the future in the task, next to the task's Sand frames. The
-   future is not on the Rust stack.
+1. A Sand task calls an async native function.
+2. The VM stores the future in the task, next to the task's Sand frames.
+   The future is not on the Rust stack.
 3. The VM polls the future.
 4. If the future awaits `cx.call(f, args)`, the poll returns `Pending`, with a
    request to call `f`.
@@ -188,7 +185,7 @@ A lock that changes owner at each poll solves this in safe Rust:
    and releases the lock.
 4. After the poll, the scheduler takes the lock again.
 
-All of this happens on one thread, so the lock is never contended.
+All of this happens within a single thread, so the lock is never contended.
 
 The compiler enforces the rule against VM access across an `await`. A
 `MutexGuard` is `!Send`. If a future keeps a guard across an `await`, the
