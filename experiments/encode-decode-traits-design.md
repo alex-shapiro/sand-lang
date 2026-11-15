@@ -9,7 +9,7 @@ We propose to make `Encode` and `Decode` ordinary traits that users can implemen
 The design has five goals:
 
 - `Encode` and `Decode` follow the same rules as every other trait.
-- `Encode` and `Decode` implementations are arbitrarily composable and nestable.
+- `Encode` and `Decode` implementations are composable and nestable
 - A user can define `Encode` and `Decode` for any of their types: concrete and generic types, defined in Sand or in Rust.
 - A script can encode any `Encode` value as JSON text, and decode JSON text into any `Decode` type.
 - A script can encode any `Encode` value as a host `Value`, and decode a host `Value` as a `Decode` type.
