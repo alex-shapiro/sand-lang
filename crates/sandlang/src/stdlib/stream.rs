@@ -42,7 +42,9 @@ pub(crate) fn suspend<T: Send + 'static, R: IntoVmValue + 'static>(
 ) -> Suspended<R> {
     Ok(Later::new(wait_kind, |cx| async move {
         let r = fut.await?;
-        cx.with_vm(|vm| ok(vm, r))
+        // The I/O already happened, so a memory limit here must not end the
+        // run before the engine collects garbage after the call.
+        cx.with_vm(|vm| vm.unchecked(|vm| ok(vm, r)))
     }))
 }
 

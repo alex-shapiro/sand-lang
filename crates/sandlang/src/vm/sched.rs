@@ -524,12 +524,16 @@ fn run_turn(vm: &mut VmGuard<'_>, shared: &SharedVm, f: &mut Fiber, fuel: &mut i
 /// Polls the innermost native call of `f` with the VM unlocked, and handles
 /// its result or request. Returns a stop if `f` must stop running.
 fn poll_native(vm: &mut VmGuard<'_>, f: &mut Fiber) -> Result<Option<FiberStop>, RunEnding> {
+    let mut collected = false;
     loop {
         let native = f.natives.last_mut().expect("a native call is on top");
         let mut future = native.future.take().expect("the scheduler polls each call once at a time");
         let waker = &native.waker;
         // A panic in the future (a bug) becomes an internal error.
+        let stress = vm.retry_stress && !collected;
+        vm.heap.fail_next_check.set(stress);
         let polled = MutexGuard::unlocked(vm, || crate::unwind::catch(|| future.as_mut().poll(&mut Context::from_waker(waker))));
+        vm.heap.fail_next_check.set(false);
         let (request, roots) = {
             let mut exchange = native.call.exchange.lock();
             (exchange.request.take(), exchange.roots.capacity())
@@ -571,7 +575,10 @@ fn poll_native(vm: &mut VmGuard<'_>, f: &mut Fiber) -> Result<Option<FiberStop>,
                 vm.begin_callback(f, callee, &args)?;
                 return Ok(None);
             }
-            Some(VmRequest::Collect) => vm.collect_all_garbage(Some(f)),
+            Some(VmRequest::Collect) => {
+                collected = true;
+                vm.collect_all_garbage(Some(f));
+            }
             Some(VmRequest::Prompt(cap)) => return Ok(Some(FiberStop::Prompt(cap))),
         }
     }

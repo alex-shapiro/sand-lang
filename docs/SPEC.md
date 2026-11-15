@@ -2290,9 +2290,11 @@ To check a sandbox capability inside a function that takes `&mut Vm`, call
 runs the function again from the start after a permission prompt or a garbage
 collection during a memory or resource check. `Config::retry_stress` tests this
 requirement: it fails the first memory or resource check in each call of a
-function that takes `&mut Vm`.
+function that takes `&mut Vm`, and in each poll of a `Later` future.
 Return-value conversion does not fail on the memory limit; instead, the engine
-collects garbage and checks the memory limit after the call completes.
+collects garbage and checks the memory limit after the call completes. A
+`Later` future that allocates in `with_vm` must first call
+`check_memory(bytes).await`.
 
 | Rust type                         | Sand type                                             |
 | --------------------------------- | ----------------------------------------------------- |
