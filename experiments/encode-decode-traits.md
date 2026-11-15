@@ -67,12 +67,13 @@ Requiring `Encode` as a supertrait of `Decode` would block decode-only types suc
 
 The checker derives `Encode` and `Decode` automatically for built-in data types, `never`, and every Sand struct or enum whose parts satisfy the required bounds. Functions, tasks, and channels are excluded because they represent active runtime state rather than data.
 
-A custom `impl Encode` or `impl Decode` block replaces the derived implementation under standard trait coherence rules.
+A custom `impl Encode` or `impl Decode` block replaces the derived implementation for its type constructor under standard trait coherence rules. For example, `impl Encode for Wrapper<int>` replaces the derived `impl<T: Encode> Encode for Wrapper<T>`, so `Wrapper<str>` does not implement `Encode`.
 
-We rejected three alternatives:
+We rejected four alternatives:
 
 - **Explicit `derive` annotations.** Automatic derivation matches `Eq`, `Ord`, and `Hash` in Sand.
 - **Field attributes.** Custom `impl` blocks already express field renames and omissions without adding attribute syntax. Field attributes can be added later if needed.
+- **Rejecting concrete type arguments on custom `impl` blocks.** Banning `impl Encode for Wrapper<int>` would add a codec-only exception to trait rules and block instantiation-specific codecs.
 - **Excluding `never`.** Other traits with methods exclude `never`. Including `never` in `Encode` and `Decode` lets scripts use empty generic containers such as `[never]` and `Result<int, never>`. Encoding `never` is unreachable, and decoding `never` returns a parse error.
 
 ### Single-value streaming through `Encoder` and `Decoder`
@@ -96,13 +97,14 @@ pub trait Decode {
 
 An `Encoder` accepts a single value during its callback. Omitting a write, writing a second value, or using the `Encoder` after the callback returns produces an `"invalid"` error.
 
-A `Decoder` reads at most a single value during its callback. If the method omits a read, the source skips the unread input value. If a read fails, the entire decode fails with that read error.
+A `Decoder` reads at most a single value during its callback. Before reading, a custom `decode` method can call `decoder.kind()` to inspect the kind of the next input value and branch on untagged inputs such as `int` or `str`. If the method omits a read, the source skips the unread input value. If a read fails, the entire decode fails with that read error.
 
-We rejected three alternatives:
+We rejected four alternatives:
 
 - **Intermediate `Json` or `Value` trees.** Converting through `Json` or `Value` allocates intermediate trees and ties the traits to a single data model. Streaming directly preserves format-specific types such as raw `bytes` in `Value`.
 - **Infallible `encode`.** Returning `Result<()>` lets custom `encode` methods and format sinks report invalid values cleanly.
 - **Rewindable `Decoder` retries.** If a read fails partway through a value, rewinding the input cannot undo side effects from nested callbacks that already ran.
+- **Omitting `decoder.kind()`.** Without a kind query or retries, a Sand `decode` method could read only a single expected type and could not decode untagged inputs across formats.
 
 ### Trait bounds in local functions and field defaults
 
@@ -113,16 +115,20 @@ We rejected two alternatives:
 - **Keeping either restriction.** Keeping the local-function restriction would break existing scripts with local generic codec helpers. Keeping the field-default restriction would prevent generic structs from calling trait methods inside defaults.
 - **Lifting the restrictions only for `Encode` and `Decode`.** Special-casing the codec traits would violate the goal that `Encode` and `Decode` follow the same rules as every other trait.
 
-### Decoding structs through `init`
+### Structs with `init` constructors
 
 For structs that declare an `init` constructor, the compiler derives `Decode` from `init`'s parameters and calls `init`. The derived implementation also requires `init`'s trait bounds and passes their dictionaries to `init`. Missing `Option` parameters default to `None`, and missing parameters with defaults run their defaults. The decoder ignores `init`'s visibility, matching field-based decoding.
 
-We rejected four alternatives:
+If `init`'s parameter names or types differ from the struct's fields, the compiler omits derived `Encode`. Asymmetric structs still compile, and callers get a compile error if they encode the struct without a custom `Encode` implementation.
+
+We rejected six alternatives:
 
 - **Omitting derived `Decode` for structs with `init`.** Requiring manual `Decode` implementations adds repetitive code to every validated type.
 - **Omitting derived `Decode` if `init` requires trait dictionaries.** Propagating `init`'s bounds lets generic validated structs derive `Decode` without manual implementations.
 - **Writing fields directly without calling `init`.** Skipping `init` breaks validation rules that the constructor enforces.
 - **Requiring `pub` on `init`.** Field-based decoding already populates private fields, so requiring `pub` on `init` would penalize constructor validation.
+- **Deriving `Encode` even if `init` parameters differ from the fields.** Derived `Encode` writes fields while derived `Decode` reads `init` parameters, so the derived decoder would reject the encoded output.
+- **Rejecting the struct definition if `init` parameters differ from the fields.** Because derivation is automatic, a definition-site error would also reject structs that never use `Encode` or `Decode`.
 
 ### Rejecting duplicate struct fields
 
@@ -172,27 +178,3 @@ We rejected two alternatives:
 Keeping dedicated `Json` branches in the walkers would violate the goal that `Json` follows the same rules as every other type.
 
 Converting a `Json` value to a host `Value` now produces plain `Value` data such as `Value::Int(3)` instead of `Value::Variant` wrappers.
-
-## Open Choices
-
-### 1. Concrete type arguments in custom implementations
-
-In Sand, `impl Encode for Wrapper<int>` replaces the derived `impl<T: Encode> Encode for Wrapper<T>`. `Wrapper<str>` then does not implement `Encode`.
-
-- **Option A: Allow concrete type arguments.** `Encode` and `Decode` follow the same rule as every other trait. Authors can define codecs for specific instantiations such as `Wrapper<int>`.
-- **Option B: Reject concrete type arguments on custom `Encode` and `Decode` blocks.** Authors cannot accidentally drop derived codecs for other instantiations. However, this rule adds a codec-only exception to traits and blocks instantiation-specific codecs.
-
-### 2. Inspecting the next value kind from `Decoder`
-
-A Sand `decode` method cannot retry a failed read, so it must choose a single target type up front. Manual Rust `Decode` implementations can still decode untagged inputs such as `int` or `str` because `DecodeSource` reports the kind of the next value.
-
-- **Option A: Keep `Decoder` limited to typed reads.** `Decoder` stays minimal. Sand `decode` methods can read only a single expected type.
-- **Option B: Add `decoder.kind()` to `Decoder`.** Sand `decode` methods can inspect the next value's kind before reading.
-
-### 3. `init` parameters that differ from struct fields
-
-Derived `Encode` writes a struct's fields, whereas derived `Decode` reads `init`'s parameters. If their names or types differ, the derived decoder rejects the encoded output.
-
-- **Option A: Derive both traits independently.** `Encode` writes fields and `Decode` calls `init`. Authors write a custom implementation if they want the type to round-trip.
-- **Option B: Omit derived `Encode` if `init` parameters differ from the fields.** Asymmetric structs still compile. Callers get a compile error if they encode the struct without a custom `Encode` implementation.
-- **Option C: Reject the struct definition.** Because derivation is automatic, a definition-site error would also reject structs that never use `Encode` or `Decode`.
