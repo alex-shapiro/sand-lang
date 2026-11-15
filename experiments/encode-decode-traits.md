@@ -19,7 +19,7 @@ The design has six goals:
 
 The compiler resolves `Encode` and `Decode` from static types and passes trait dictionaries to generic functions. We delete the `reflect` keyword because `Decode` dictionaries supply the target type structure instead. A host function that decodes into a type parameter requires `Decode` instead of `reflect`.
 
-An alternative approach is to look up custom implementations at runtime from heap value tags, as `main` does during JSON encoding. That approach fails for generic types because heap values erase type arguments. For example, an empty `[Email]` list and an inline `None` of type `Email?` do not record `Email` at runtime. Recording type arguments on every value would add hidden descriptors to every generic call. It would also allocate heap objects for inline values like `None`. Runtime value tags also cannot guide `Decode`, which starts from raw input before any value exists.
+An alternative approach is to look up custom implementations at runtime from heap value tags. That approach fails for generic types. Today, heap values erase type arguments. For example, an empty `[Email]` list and an inline `None` of type `Email?` do not record `Email` at runtime. Recording type arguments on every value would add hidden descriptors to every generic call. It would also allocate heap objects for inline values like `None`. Runtime value tags also cannot guide `Decode`, which starts from raw input before any value exists.
 
 Passing dictionaries adds a hidden argument only to generic calls with an `Encode` or `Decode` bound.
 
@@ -53,7 +53,7 @@ Structural dictionaries store declarative templates that build child dictionarie
 We rejected two alternatives for supplying child dictionaries to the walker:
 
 - **Eagerly nested dictionaries.** Storing child dictionaries inside parent dictionaries creates cyclic constants for recursive types such as `Tree`. It also expands without bound for polymorphically recursive types such as `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }`.
-- **Generated Sand lookup functions.** Calling a Sand helper function to fetch child dictionaries adds about 90 ns per uncached part. Types that use only native defaults would still pay that callback cost.
+- **Generated Sand lookup functions.** Calling a Sand helper function to fetch child dictionaries adds about 90 ns per uncached child dictionary. Types that use only native defaults would still pay that callback cost.
 
 ## Language Design
 
@@ -169,3 +169,35 @@ We rejected two alternatives:
 Keeping dedicated `Json` branches in the walkers would violate the goal that `Json` follows the same rules as every other type.
 
 Converting a `Json` value to a host `Value` now produces plain `Value` data such as `Value::Int(3)` instead of `Value::Variant` wrappers. Encoding or decoding `Json` also copies between the VM heap and the Rust `Json` enum.
+
+## Open Choices
+
+### 1. Concrete type arguments in custom implementations
+
+In Sand, `impl Encode for Wrapper<int>` replaces the derived `impl<T: Encode> Encode for Wrapper<T>`. `Wrapper<str>` then does not implement `Encode`.
+
+- **Option A: Allow concrete type arguments.** `Encode` and `Decode` follow the same rule as every other trait. Authors can define codecs for specific instantiations such as `Wrapper<int>`.
+- **Option B: Reject concrete type arguments on custom `Encode` and `Decode` blocks.** Authors cannot accidentally drop derived codecs for other instantiations. However, this rule adds a codec-only exception to traits and blocks instantiation-specific codecs.
+
+### 2. Inspecting the next value kind from `Decoder`
+
+A Sand `decode` method cannot retry a failed read, so it must choose a single target type up front. Manual Rust `Decode` implementations can still decode untagged inputs such as `int` or `str` because `DecodeSource` reports the kind of the next value.
+
+- **Option A: Keep `Decoder` limited to typed reads.** `Decoder` stays minimal. Sand `decode` methods can read only a single expected type.
+- **Option B: Add `decoder.kind()` to `Decoder`.** Sand `decode` methods can inspect the next value's kind before reading.
+
+### 3. `init` parameters that differ from struct fields
+
+Derived `Encode` writes a struct's fields, whereas derived `Decode` reads `init`'s parameters. If their names or types differ, the derived decoder rejects the encoded output.
+
+- **Option A: Derive both traits independently.** `Encode` writes fields and `Decode` calls `init`. Authors write a custom implementation if they want the type to round-trip.
+- **Option B: Omit derived `Encode` if `init` parameters differ from the fields.** Asymmetric structs still compile. Callers get a compile error if they encode the struct without a custom `Encode` implementation.
+- **Option C: Reject the struct definition.** Because derivation is automatic, a definition-site error would also reject structs that never use `Encode` or `Decode`.
+
+### 4. Rust values vs. VM heap handles in `native::Encode` and `native::Decode`
+
+The VM walker operates on VM heap values, whereas host `Value` conversion operates on Rust values.
+
+- **Option A: Define the traits over Rust values.** Authors write a single implementation per manual type, and host code converts Rust values directly to `Value`. However, manual codecs copy values such as `Json` trees between the VM heap and Rust. Derived native types also generate separate VM and Rust implementations.
+- **Option B: Put both a heap method and a Rust-value method on each trait.** The walker reads heap values in place without copying. Authors of manual native types must implement their codec twice.
+- **Option C: Define the traits over VM heap handles, and use `serde` for host Rust values.** Manual codecs avoid heap copies, and derived native types need only the VM implementation. Host Rust types use `serde` instead of `native::Encode` for `Value` conversion. We would then add a `serde` serializer and deserializer for `Value`.
