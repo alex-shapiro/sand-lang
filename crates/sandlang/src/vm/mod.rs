@@ -13,7 +13,7 @@ pub mod sched;
 pub mod value;
 
 use crate::engine::{LimitKind, Limits};
-use crate::native::context::NativeStart;
+use crate::native::context::AsyncNativeCall;
 use crate::native::convert::HostError;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use bytecode::*;
@@ -42,7 +42,7 @@ impl HostFn {
         }
     }
 }
-/// A VM that the scheduler lends to native call futures while it polls them.
+/// Shared [`Vm`] handle lent to async native futures during a poll.
 pub(crate) type SharedVm = Arc<Mutex<Vm>>;
 
 #[derive(Clone)]
@@ -95,8 +95,8 @@ pub(crate) enum CtlKind {
     Fail(Fail),
     /// Prompt the user for the capability, and then retry the call.
     NeedPermission(Capability),
-    /// Suspend the task on an async native call.
-    Native(NativeStart),
+    /// Suspend the calling task on an async native call.
+    AsyncNative(AsyncNativeCall),
     /// Wait for the scheduler event that [`Vm::block`] registered as
     /// generation `wait_gen`. The call returns the value that wakes the task.
     Blocked {
@@ -178,9 +178,9 @@ impl Fail {
 }
 
 impl Ctl {
-    /// Suspends the calling task on the async native call `start`.
-    pub(crate) fn native_call(start: NativeStart) -> Ctl {
-        Ctl(Box::new(CtlKind::Native(start)))
+    /// Suspends the calling task on `call`.
+    pub(crate) fn native_call(call: AsyncNativeCall) -> Ctl {
+        Ctl(Box::new(CtlKind::AsyncNative(call)))
     }
 
     /// Prompts the user for `cap`.
@@ -192,8 +192,7 @@ impl Ctl {
         &self.0
     }
 
-    /// Returns `true` if a garbage collection can resolve the failure of a
-    /// native call.
+    /// Returns `true` if garbage collection can resolve this native-call failure.
     pub(crate) fn collection_may_help(&self) -> bool {
         match self.kind() {
             CtlKind::Collect => true,
@@ -244,7 +243,7 @@ impl std::fmt::Debug for CtlKind {
         match self {
             CtlKind::Fail(fail) => fail.fmt(f),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            CtlKind::Native(start) => write!(f, "Native({:?})", start.wait_kind),
+            CtlKind::AsyncNative(call) => write!(f, "AsyncNative({:?})", call.wait_kind),
             CtlKind::Blocked { wait_gen } => write!(f, "Blocked({wait_gen})"),
             CtlKind::Racing { wait_gen, .. } => write!(f, "Racing({wait_gen})"),
             CtlKind::Yield => write!(f, "Yield"),
@@ -349,8 +348,8 @@ pub struct Fiber {
     pub waiters: Vec<(u32, u64)>,
     /// Stale `waiters` are pruned when it reaches this length.
     pub waiters_prune_at: usize,
-    /// Async native calls in progress, innermost last.
-    pub(crate) natives: Vec<sched::NativeCall>,
+    /// Active async native calls on this fiber, ordered from outermost to innermost.
+    pub(crate) native_calls: Vec<sched::ActiveNativeCall>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
     /// Whether the fiber stopped in or just after a native call. Its
@@ -594,7 +593,7 @@ pub struct Vm {
     pub main_fiber: u32,
     pub live_tasks: usize,
     pub host: Host,
-    /// The host-event wakers of the fibers, by fiber id.
+    /// Host-event wakers indexed by fiber ID.
     fiber_wakers: Vec<Arc<sched::FiberWaker>>,
     pub gen_counter: u64,
     /// Fuel accounting (see `meter`).
@@ -618,9 +617,9 @@ pub struct Vm {
     /// made); shared, since strings are immutable. GC roots.
     ascii_strs: Vec<VmValue>,
 
-    /// Set by an internal error (a bug), including a Rust panic caught in the
-    /// interpreter, a native or a native call future: the VM is memory safe
-    /// but may be inconsistent, so a REPL session discards it.
+    /// Marks the VM inconsistent after an internal error or caught Rust panic
+    /// in the interpreter, a native function, or a native future. Memory stays
+    /// safe, and REPL sessions discard a broken VM.
     pub(crate) broken: bool,
     /// Testing aid that fails the first memory or resource check in each native call and retryable instruction. See [`crate::engine::Config::retry_stress`].
     pub(crate) retry_stress: bool,
@@ -681,8 +680,8 @@ impl Fiber {
             + self.frames.capacity() * std::mem::size_of::<Frame>()
             + self.race.capacity() * std::mem::size_of::<VmValue>()
             + self.waiters.capacity() * std::mem::size_of::<(u32, u64)>()
-            + self.natives.capacity() * std::mem::size_of::<sched::NativeCall>()
-            + self.natives.iter().map(|native| native.bytes).sum::<usize>()
+            + self.native_calls.capacity() * std::mem::size_of::<sched::ActiveNativeCall>()
+            + self.native_calls.iter().map(|active_call| active_call.tracked_bytes).sum::<usize>()
     }
 }
 
@@ -1395,7 +1394,7 @@ impl Vm {
                     race_contenders: 0,
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
-                    natives: Vec::new(),
+                    native_calls: Vec::new(),
                     pending_error: None,
                     stopped_in_native_call: false,
                 });
@@ -1428,7 +1427,7 @@ impl Vm {
     /// window is a GC root before the new task writes every slot of it, so
     /// it must not hold handles of objects freed since.
     fn recycle_fiber(&mut self, mut f: Box<Fiber>) {
-        self.drop_natives(&mut f, 0);
+        self.drop_native_calls(&mut f, 0);
         let small = f.stack.capacity() <= MAX_SPARE_STACK_SLOTS && f.frames.capacity() <= MAX_SPARE_FRAMES;
         if self.spare_fibers.len() >= MAX_SPARE_FIBERS || !small || f.waiters.capacity() > MIN_PRUNE {
             self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
@@ -1590,10 +1589,10 @@ impl Vm {
         racer.race_contenders > 0
     }
 
-    /// Drops the frames of `f` above the innermost one with deferred code
-    /// pending, and the native calls of that frame and above it, and resumes
-    /// that frame at its cleanup pad; false if no frame has any. Frames below
-    /// the top stopped in a call; so did the top one if `in_call`.
+    /// Unwinds `f` to the innermost frame with a pending cleanup pad, drops any
+    /// frames and async native calls above that pad, and sets its instruction
+    /// pointer to the pad. Returns `false` if every frame lacks a pending pad.
+    /// Pass `in_call = true` if the top frame stopped inside a call.
     pub(crate) fn unwind_to_pad(&mut self, f: &mut Fiber, in_call: bool) -> bool {
         let n = f.frames.len();
         for i in (0..n).rev() {
@@ -1602,7 +1601,7 @@ impl Vm {
             if let Some(pad) = self.prog.protos[fr.proto as usize].cleanup_at(pos) {
                 fr.ip = pad as u32;
                 f.frames.truncate(i + 1);
-                self.drop_natives(f, i);
+                self.drop_native_calls(f, i);
                 return true;
             }
         }
@@ -1641,11 +1640,9 @@ impl Vm {
         self.collect_garbage_with(current, true);
     }
 
-    /// GC roots: globals, constants, pinned values and the fibers' live stack
-    /// windows, closures, tasks, race lists and native call roots. Clears dead
-    /// slots of stacks so that they never hold handles to objects freed later.
-    /// Shrinks stacks left large by deep recursion and recounts
-    /// `heap.fiber_bytes`.
+    /// Collects all garbage-collection roots from globals, constants, pinned
+    /// values, and active fibers. Also clears dead stack slots, shrinks
+    /// oversized fiber stacks, and updates `heap.fiber_bytes`.
     fn gc_roots(&mut self, current: Option<&mut Fiber>) -> Vec<VmValue> {
         let mut roots: Vec<VmValue> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());
@@ -1666,8 +1663,8 @@ impl Vm {
             roots.extend(f.frames.iter().map(|fr| fr.closure_value()));
             roots.push(f.task);
             roots.extend(f.race.iter().copied());
-            for native in &f.natives {
-                native.trace(roots);
+            for active_call in &f.native_calls {
+                active_call.trace(roots);
             }
             fiber_bytes += f.footprint();
         };

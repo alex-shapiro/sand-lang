@@ -2172,25 +2172,29 @@ compiler rejects it in these places:
 - a `NativeObject`
 
 `IntoVmValue::into_vm_value` and `Vm` allocation methods return a raw
-`VmValue`. The compiler does not check `VmValue` across a wait. Do not hold a
-raw `VmValue` across a wait; root it with `NativeContext::root` instead.
+`VmValue`. The compiler does not check `VmValue` across a wait. Keep only
+`RootedValue` handles from `NativeContext::root` across a wait.
 
-`Later::new(wait_kind, build)` passes a `NativeContext` to `build`, which
-returns the future. The future runs on the calling task. Through the context,
-it uses the VM with `with_vm` (only while the engine polls the call), keeps
-values alive across waits with `root` and `value`, and calls Sand functions
-with `call`. `step(f)` runs `f` with the VM under the restart rule of a
-function that takes `&mut Vm`: after a memory or resource limit error or a
-permission prompt, the engine collects garbage or asks the user, and runs `f`
-again. A callee can wait on I/O while other tasks run, and takes at most 255
-arguments.
+`Later::new(wait_kind, build)` passes a `NativeContext` to `build` and runs the
+returned future on the calling task. `NativeContext` provides four operations:
 
-Each callback uses two frames of `max_call_depth`. Cancelling a task during a
-callback runs the callee's `defer` blocks, drops the future, and then runs the
-caller's. Roots and callback results stay alive until the native call returns,
-and count against `max_memory` with the future itself. Boxes of nested futures
-do not count, and polling them uses the Rust stack, so a recursive future must
-limit its depth. A timer or `select!` branch cannot interrupt a callback.
+- `with_vm(f)` runs `f` with `&mut Vm` while the engine polls the call.
+- `root(value)` and `value(rooted)` keep heap values alive across waits until
+  the native call returns.
+- `step(f)` runs `f` with `&mut Vm` under the `&mut Vm` restart rule. After a
+  memory or resource limit error, the engine collects garbage and runs `f`
+  again. After a permission prompt, the engine asks the user and runs `f` again
+  from the start.
+- `call(callee, args)` calls a Sand function with at most 255 arguments on the
+  calling task. The scheduler can suspend the callee on I/O while other tasks
+  run. A timer or `select!` branch around `call` cannot interrupt the callee.
+
+Each callback uses two frames toward `max_call_depth`. If a task is cancelled
+during a callback, the engine runs the callee's `defer` blocks, drops the
+native future, and runs the caller's `defer` blocks. The engine charges the
+top-level future and its root table against `max_memory`. It polls nested
+futures on the Rust stack without charging their boxes, so a recursive future
+must bound its depth.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
@@ -2265,12 +2269,13 @@ returns a Sand `Result` or aborts the run on failure:
   request to the scheduler, such as a permission prompt.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
   the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, build)`
-  sets the `WaitKind` of host I/O waits. Use `WaitKind::User` if the task
-  waits for a user action so that idle wait time does not count toward
+  sets the `WaitKind` of host I/O waits. Pass `WaitKind::User` if the task
+  waits for user input so the engine excludes idle wait time from
   `max_wall_time` (§16.2). An async native function uses `WaitKind::Io`. If
   `E` is `Ctl` or `Fail`, the future returns `Result<T, Fail>`. If `E` is
-  `HostError`, the future returns `Result<T, HostError<Fail>>`. The engine
-  does not run the future again after a memory limit error.
+  `HostError`, the future returns `Result<T, HostError<Fail>>`. An unchecked
+  memory-limit error inside the future ends the run; call
+  `NativeContext::step` to retry after garbage collection.
 - A future makes scheduler requests only through its `NativeContext`. Its
   output is a type that converts to a Sand value, `Result<T, Fail>`, or
   `Result<T, HostError<Fail>>`.
@@ -2281,11 +2286,10 @@ To check a sandbox capability inside a function that takes `&mut Vm`, call
 `&mut Vm` must check capabilities and limits before any side effect. The engine
 runs the function again from the start after a permission prompt or a garbage
 collection during a memory or resource check. `Config::retry_stress` tests this
-requirement: it fails the first memory or resource check in each call of a
-function that takes `&mut Vm`, and in each poll of a `Later` future.
-Return-value conversion does not fail on the memory limit; instead, the engine
-collects garbage and checks the memory limit after the call completes. A
-`Later` future runs its checks and allocations with `NativeContext::step`.
+requirement by failing the first memory or resource check in each `&mut Vm`
+call and in each poll of a `Later` future. During return-value conversion, the
+engine defers the memory check until the call finishes and then collects
+garbage if needed.
 
 | Rust type                         | Sand type                                             |
 | --------------------------------- | ----------------------------------------------------- |

@@ -57,12 +57,11 @@ pub enum FiberStop {
     Done(VmValue),
     /// Out of fuel: preempted.
     Preempt,
-    /// Waiting on a scheduler event or on a host event.
+    /// Waiting on a scheduler or host event.
     Blocked,
-    /// An async native call started. The call's result goes to
-    /// `Fiber::result_slot`.
-    Native(NativeStart),
-    /// A callback of the innermost native call returned this value.
+    /// Started an async native call whose result goes to `Fiber::result_slot`.
+    AsyncNative(AsyncNativeCall),
+    /// Finished a callback for the innermost async native call.
     NativeReturn(VmValue),
     Prompt(Capability),
     /// `task.yield_now()`.
@@ -1811,9 +1810,9 @@ impl Vm {
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
                 Ok(Some(FiberStop::Prompt(cap)))
             }
-            CtlKind::Native(start) => {
+            CtlKind::AsyncNative(call) => {
                 fiber.result_slot = slot;
-                Ok(Some(FiberStop::Native(start)))
+                Ok(Some(FiberStop::AsyncNative(call)))
             }
             CtlKind::Racing { wait_gen, tasks, contenders } => {
                 fiber.result_slot = slot;

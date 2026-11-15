@@ -86,8 +86,8 @@ pub trait IntoVmValue: SandType {
 /// }
 /// ```
 ///
-/// Make a helper generic over `C` to share it between a native function and the
-/// future of a [`Later`](super::func::Later):
+/// Make a helper generic over `C` to share it between a native function and a
+/// [`Later`](super::func::Later) future:
 ///
 /// ```
 /// # use sandlang::native::convert::HostError;
@@ -139,8 +139,8 @@ impl<C: From<Fail>> HostError<C> {
         }
     }
 
-    /// Returns the control signal that stops the call, or the recoverable
-    /// error.
+    /// Splits `self` into a control signal `Ok(c)` or a recoverable
+    /// `Err(HostError<Fail>)`.
     pub(crate) fn into_abort(self) -> Result<C, HostError<Fail>> {
         match *self.0 {
             HostErrorKind::Error { kind, message } => Err(HostError::new(kind, message)),

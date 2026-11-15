@@ -588,9 +588,7 @@ pub enum Op {
     /// Ends a cleanup pad: leaves the frame and continues unwinding a
     /// cancelled task (`Proto::cleanups`).
     Unwind,
-    /// Ends the callback that an async native call requested: passes the
-    /// callee's result in register 0 back to the native call. Only the
-    /// [`CALLBACK_PROTO`] contains it.
+    /// Returns register 0 from [`CALLBACK_PROTO`] to the waiting async native call.
     ResumeNative,
 
     // Data structures.
@@ -1126,11 +1124,10 @@ impl Op {
     }
 }
 
-/// The proto that runs a Sand callback for an async native call. Every
-/// program starts with it.
+/// Prototype index of the trampoline that runs Sand callbacks for async native calls.
 pub const CALLBACK_PROTO: u32 = 0;
 
-/// Most arguments that an async native call passes to a callback.
+/// Maximum argument count for a callback started from an async native call.
 pub const MAX_CALLBACK_ARGS: usize = u8::MAX as usize;
 
 /// Prototype name for helper functions that evaluate field defaults and populate sets during `json.decode` (omitted from stack traces).
@@ -1178,15 +1175,16 @@ pub struct Cleanup {
 }
 
 impl Proto {
-    /// The instruction where a [`CALLBACK_PROTO`] frame starts to call a
-    /// callee with `argc` arguments.
+    /// Returns the entry instruction offset in [`CALLBACK_PROTO`] for `argc` arguments.
     pub(crate) fn callback_entry(argc: usize) -> u32 {
         2 * argc as u32
     }
 
-    /// Builds [`CALLBACK_PROTO`]. The callee is in register 0 and its
-    /// arguments follow it. At [`Proto::callback_entry`], the frame calls the
-    /// callee and then passes its result to the native call.
+    /// Builds the [`CALLBACK_PROTO`] trampoline prototype.
+    ///
+    /// Register 0 holds the callee and registers `1..=argc` hold the arguments.
+    /// Jumping to [`Proto::callback_entry`] calls the callee and executes
+    /// [`Op::ResumeNative`].
     pub(crate) fn callback() -> Proto {
         let code: Vec<Op> =
             (0..=MAX_CALLBACK_ARGS as u8).flat_map(|argc| [Op::CallR { callee: 0, base: 1, dst: 0, argc }, Op::ResumeNative]).collect();

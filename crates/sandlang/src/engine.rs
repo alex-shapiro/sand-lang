@@ -460,12 +460,13 @@ impl Config {
         self.gc_stress = on;
         self
     }
-    /// Testing aid: fails the first memory or resource check in each native
-    /// call, each poll of an async native call, and each retryable
-    /// instruction. A failed check triggers garbage collection and runs the
-    /// call or instruction again. Use this option to verify that functions and
-    /// instructions check limits before side effects and refund fuel on retry,
-    /// and that futures run checks with `NativeContext::step`.
+    /// Testing aid that fails the first memory or resource check in each
+    /// synchronous native call, each async native poll, and each retryable
+    /// instruction. After a forced failure, the engine collects garbage and
+    /// retries the operation. Enable this option to verify that native
+    /// functions and instructions check limits before side effects and refund
+    /// fuel on retry. It also verifies that async native futures run checks
+    /// through [`NativeContext::step`](crate::native::context::NativeContext::step).
     pub fn retry_stress(mut self, on: bool) -> Self {
         self.retry_stress = on;
         self

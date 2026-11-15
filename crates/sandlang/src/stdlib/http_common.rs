@@ -465,7 +465,7 @@ fn read_body<R: IntoVmValue + 'static>(
     vm: &mut Vm,
     body: VmVal<Body>,
     what: BodyRead,
-    done: fn(&mut Vm, Option<Vec<u8>>) -> stream::OkResult<R>,
+    convert: fn(&mut Vm, Option<Vec<u8>>) -> stream::PostIoResult<R>,
 ) -> Suspended<R> {
     let body = body.get(&vm.heap)?;
     let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };
@@ -506,7 +506,7 @@ fn read_body<R: IntoVmValue + 'static>(
     };
     stream::suspend(WaitKind::Io, op, move |vm, (data, res)| {
         drop(res);
-        done(vm, data)
+        convert(vm, data)
     })
 }
 

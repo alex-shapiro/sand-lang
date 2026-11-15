@@ -25,49 +25,45 @@ Untrusted code violates a valid policy.
 
 The host cannot rely on engine limits, stability, or control.
 
-- [ ] ❓ _Embedding._ Reject a raw `VmValue` that a native function holds
-      across a wait. The compiler rejects typed VM handles in a future because
-      they are not `Send`. However, `IntoVmValue::into_vm_value` and `Vm`
-      allocation methods return a raw `VmValue`. `VmValue` is `Send` because the
-      heap stores it. The compiler therefore accepts a function that allocates a
-      `VmValue` before a wait and reads it after the wait. `NativeContext::value`
-      and `with_vm` return raw values, and every `NativeContext::call` is a
-      wait during which a collection can run, so async walkers hit this
-      easily. After a garbage collection during the wait, the read returns the
-      data of another object without an error. If the collector shrank the
-      heap, the read or the next collection causes a panic. The engine reports
-      the panic as an internal error. A `panic = "abort"` build stops the
-      process. A `RootedValue` has the same gap: read through another call's
-      context, it returns that call's root. Options: a host value type that is
-      not `Send`, or a generation check on each heap slot.
-- [ ] ❓ _Embedding._ Detect a callback that changes a collection while an
-      async native walker iterates it. `NativeContext::call` lets Sand code
-      run in the middle of a walk. Options: fail on mutation like CPython, or
-      walk a snapshot.
-- [ ] ❓ _Embedding._ Let a native call release roots before it returns.
-      Each `NativeContext::root` call and each callback result stays rooted,
-      with its whole object graph, until the call returns. A native loop of
-      20,000 callbacks that each return a 1 KB string fails a 16 MB
-      `max_memory` limit that the same loop in Sand passes. Options:
-      `NativeContext::unroot`, or scoped roots that a callback result reuses.
-- [ ] ❓ _Memory._ Count the boxes that an async native future allocates for
-      recursive calls against `max_memory`. The engine counts only the size
-      of the top-level future and its root table. A recursive walker
-      allocates one box for each nesting level of its input.
-- [ ] ❓ _Embedding._ Give native functions a narrow call context in place of
-      `&mut Vm`. With `&mut Vm`, a native function can call public scheduler and
-      collector methods such as `Vm::collect_all_garbage`. Inside
-      `NativeContext::with_vm`, that call frees the live values of the calling
-      task, because its fiber is outside `Vm::fibers` during the poll. Typed
-      accessors also return raw `VmValue` slices. A narrow context exposes only
-      host call operations.
-- [ ] ❓ _Embedding._ Let a cancelled native future update VM state. The
-      engine drops the future while it holds the VM lock, so a `Drop` that
-      calls `with_vm` panics and the run ends with an internal error.
-- [ ] ❓ _Embedding._ Yield to the host executor while the engine computes
-      with a clock that does not advance. `YIELD_EVERY` compares readings of
-      the host `Clock`, so with a manual or replay clock the engine never
-      yields, and other tasks of the host starve for the whole run.
+- [ ] ❓ _Embedding._ Reject a raw `VmValue` held across a wait. The compiler
+      rejects typed VM handles in a future because they implement `!Send`.
+      `VmValue` implements `Send` because the heap stores it. The compiler
+      therefore accepts a future that keeps a `VmValue` across a wait.
+      `NativeContext::value` and `with_vm` return raw `VmValue`s, and
+      `NativeContext::call` can trigger garbage collection during a walk. After
+      garbage collection, reading a stale `VmValue` returns an unrelated object
+      or panics. The engine reports a panic as an internal error, and a
+      `panic = "abort"` build aborts the process. Passing a `RootedValue` to
+      another call's context also reads the wrong root table. Options: a `!Send`
+      handle type, or a generation check on each heap slot.
+- [ ] ❓ _Embedding._ Detect collection changes during an async native walk.
+      `NativeContext::call` runs Sand code that can mutate the collection during
+      iteration. Options: fail on mutation like CPython, or iterate a snapshot.
+- [ ] ❓ _Embedding._ Let a native call release roots before it returns. Each
+      `NativeContext::root` call and each callback result keeps its whole object
+      graph in the call's root table until the call returns. A loop in a native
+      future that runs 20,000 callbacks returning 1 KB strings exceeds a 16 MB
+      `max_memory` limit. The same loop in Sand fits within 16 MB. Options:
+      `NativeContext::unroot`, or scoped roots that callback results reuse.
+- [ ] ❓ _Memory._ Charge boxed recursive futures against `max_memory`. The
+      engine counts only the top-level native future and its root table. A
+      recursive walker allocates a boxed future for each nesting level of its
+      input.
+- [ ] ❓ _Embedding._ Replace `&mut Vm` in native functions with a narrow call
+      context. `&mut Vm` exposes scheduler and collector methods such as
+      `Vm::collect_all_garbage`. During `NativeContext::with_vm`, the scheduler
+      keeps the calling fiber outside `Vm::fibers`. Calling
+      `Vm::collect_all_garbage` there frees the calling task's live values.
+      Typed accessors also return raw `VmValue` slices. A narrow context exposes
+      only host call operations.
+- [ ] ❓ _Embedding._ Let a cancelled native future update VM state on drop. The
+      engine holds the VM lock while dropping a cancelled future. Calling
+      `with_vm` inside `Drop` panics, so the engine ends the run with an
+      internal error.
+- [ ] ❓ _Embedding._ Yield to the host executor under a fixed host clock.
+      `YIELD_EVERY` checks elapsed time on the host `Clock`. Under a manual or
+      replay clock, elapsed time stays zero and the engine starves other tasks
+      on the host executor.
 - [ ] ❓ _Memory._ Share standard library and host module bytecode across
       programs. `compile_program` copies the snapshot `Program` into each
       `CompiledProgram`. A copy takes about 74 KB for `print(1)` and 173 KB

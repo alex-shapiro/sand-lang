@@ -4086,10 +4086,10 @@ fn later_new_futures_and_later_ready_return_vm_handles() {
     use sandlang::vm::WaitKind;
     let mut m = NativeModule::new("handles");
     m.function("after_wait", |_: &mut Vm, n: i64| -> Result<Later<VmVal<String>, Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, move |mut cx| async move {
+        Ok(Later::new(WaitKind::Io, move |mut context| async move {
             tokio::task::yield_now().await;
-            let v = cx.step(|vm| format!("made {n}").into_vm_value(vm)).await?;
-            Ok(VmVal::<String>::from_raw(v))
+            let value = context.step(|vm| format!("made {n}").into_vm_value(vm)).await?;
+            Ok(VmVal::<String>::from_raw(value))
         }))
     });
     m.function("now", |vm: &mut Vm, n: i64| -> Result<Later<VmVal<String>, Fail>, Fail> {

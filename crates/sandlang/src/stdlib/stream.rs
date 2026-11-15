@@ -30,21 +30,20 @@ impl<C> From<IoFailure> for HostError<C> {
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// Result of the `ok` step of [`suspend`], which runs with the VM after the I/O.
-pub(crate) type OkResult<T> = Result<T, HostError<Fail>>;
+/// Result produced on the VM after an async I/O operation succeeds.
+pub(crate) type PostIoResult<T> = Result<T, HostError<Fail>>;
 
-/// Suspends the calling task on `fut` with `wait_kind`. If `fut` returns `Ok`,
-/// runs `ok` with the VM to produce the Sand result.
+/// Suspends the calling task on `fut` with `wait_kind`. After `fut` returns
+/// `Ok(value)`, runs `convert` with the VM to build the Sand result.
 pub(crate) fn suspend<T: Send + 'static, R: IntoVmValue + 'static>(
     wait_kind: WaitKind,
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
-    ok: impl FnOnce(&mut Vm, T) -> OkResult<R> + Send + 'static,
+    convert: impl FnOnce(&mut Vm, T) -> PostIoResult<R> + Send + 'static,
 ) -> Suspended<R> {
-    Ok(Later::new(wait_kind, |cx| async move {
-        let r = fut.await?;
-        // The I/O already happened, so a memory limit here must not end the
-        // run before the engine collects garbage after the call.
-        cx.with_vm(|vm| vm.unchecked(|vm| ok(vm, r)))
+    Ok(Later::new(wait_kind, |context| async move {
+        let output = fut.await?;
+        // Defer the memory-limit check until the call finishes so completed I/O returns its result before garbage collection.
+        context.with_vm(|vm| vm.unchecked(|vm| convert(vm, output)))
     }))
 }
 
@@ -65,11 +64,11 @@ pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Fail> {
     Ok(String::from_utf8(data).ok())
 }
 
-pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> OkResult<Vec<u8>> {
+pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> PostIoResult<Vec<u8>> {
     Ok(data.unwrap_or_default())
 }
 
-pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> OkResult<Option<String>> {
+pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> PostIoResult<Option<String>> {
     let Some(line) = line else { return Ok(None) };
     utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", message))
 }

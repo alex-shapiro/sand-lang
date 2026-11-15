@@ -577,7 +577,7 @@ impl Session {
         {
             let mut vm = st.vm.lock();
             vm.begin_session_run(call);
-            // Waiting for input may take any time.
+            // Exclude user-input wait time from the wall-time limit.
             vm.deadline = None;
         }
         let drive_result = sched::drive(&st.vm, UntilIdle { waits_for_io: true }).await;

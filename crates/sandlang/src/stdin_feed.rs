@@ -177,8 +177,7 @@ impl StdinChannel {
         self.changed.notify_waiters();
     }
 
-    /// Records whether the engine is idle. Does not wake the read, whose
-    /// readiness depends only on the input.
+    /// Sets `engine_idle` and notifies host waiters without waking `read_waker`.
     fn set_engine_idle(&self, idle: bool) {
         self.state.lock().engine_idle = idle;
         self.changed.notify_waiters();

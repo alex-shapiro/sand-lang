@@ -102,7 +102,7 @@ enum Read {
 fn read_stdin<R: IntoVmValue + 'static>(
     vm: &mut Vm,
     what: Read,
-    done: fn(&mut Vm, Option<Vec<u8>>) -> stream::OkResult<R>,
+    convert: fn(&mut Vm, Option<Vec<u8>>) -> stream::PostIoResult<R>,
 ) -> Suspended<R> {
     if !vm.permit(&Capability::Stdin)? {
         return Err(HostError::new("permission_denied", "permission denied: read standard input"));
@@ -112,7 +112,7 @@ fn read_stdin<R: IntoVmValue + 'static>(
     if what == Read::Line
         && let Some(data) = buffered_line(vm)
     {
-        return Ok(Later::ready(done(vm, data)));
+        return Ok(Later::ready(convert(vm, data)));
     }
     let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
@@ -128,11 +128,11 @@ fn read_stdin<R: IntoVmValue + 'static>(
     let wait_kind = vm.host.stdin.as_ref().map_or(WaitKind::Io, |channel| channel.wait_kind);
     stream::suspend(wait_kind, read, move |vm, (data, res)| {
         drop(res);
-        done(vm, data)
+        convert(vm, data)
     })
 }
 
-fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> stream::OkResult<Option<String>> {
+fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> stream::PostIoResult<Option<String>> {
     line_read(vm, line, "stdin: input is not valid UTF-8")
 }
 

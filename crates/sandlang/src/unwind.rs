@@ -1,10 +1,11 @@
-//! Defence in depth: a Rust panic reachable from a script (in the VM, a
-//! native or an I/O future) must not unwind into the host. Engine entry
-//! points run their futures inside [`CatchUnwind`]; the scheduler runs each
-//! interpreter slice and native call poll through [`catch`], per slice so that
-//! native calls cost nothing extra. A panic becomes an error whose message
-//! starts with `internal error:`. With `panic = "abort"` the process still
-//! aborts.
+//! Defense in depth against Rust panics triggered by a script. A panic in the
+//! VM, a native function, or a native future must not unwind into the host.
+//! Engine entry points wrap their futures in [`CatchUnwind`]. The scheduler
+//! wraps each interpreter slice and each native-future poll in [`catch`].
+//! Catching panics once per slice avoids per-call overhead on synchronous
+//! native calls. The engine converts a caught panic into an error prefixed with
+//! `internal error:`. Under `panic = "abort"`, a panic still aborts the
+//! process.
 
 use std::any::Any;
 use std::future::Future;

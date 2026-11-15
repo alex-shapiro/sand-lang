@@ -131,7 +131,7 @@ In the branch benchmarks, the all-Sand Design D1 prototype took up to about 7 ti
 
 The native walker requires a full schema of the target type. The compiler builds static schemas for closed types such as `[User]`. Generic functions receive type information only at runtime.
 
-In `codec/composed.rs`, the VM builds schemas at runtime from compile-time templates. Multiple engines can share a compiled `Program` through `Arc`. The VM therefore caches up to 1,024 runtime schemas behind a lock on `Program`. Copying each generic function per type argument would let the compiler build every schema at compile time. That change would increase bytecode size and compile time.
+In `codec/composed.rs`, the VM builds schemas at runtime from compile-time templates. Multiple engines can share a compiled `Program` through `Arc`. The VM therefore caches up to 1,024 runtime schemas under a lock on `Program`. Copying each generic function per type argument would let the compiler build every schema at compile time. That change would increase bytecode size and compile time.
 
 ## How Findings 1 and 2 force dual codecs
 
