@@ -297,3 +297,10 @@ fn a_spent_tokio_budget_does_not_hang_a_clock_that_yields_at_once() {
 fn a_context_works_only_while_the_engine_polls_its_call() {
     assert_eq!(run_ok(Config::new(), "calls.save_context()\nprint(calls.use_saved_context())"), "false\n");
 }
+
+#[test]
+fn callback_results_count_against_the_memory_limit() {
+    let limits = Limits { max_memory: Some(16 << 20), ..Limits::default() };
+    let (r, _) = run(Config::new().limits(limits), &Log::default(), "print(calls.apply_n((x) => x + 1, 0, 1200000))");
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
+}

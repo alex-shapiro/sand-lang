@@ -2196,7 +2196,8 @@ Sand frames and native calls count toward `max_call_depth` together. If a
 task is cancelled during a callback, the engine runs the callee's `defer`
 blocks, drops the native future, and then runs the caller's `defer` blocks.
 The engine counts the size of each native future and its roots against
-`max_memory`. A future must not make two requests in one poll, and must not
+`max_memory`. Each rooted value and each callback result stays rooted until
+the native call returns. A future must not make two requests in one poll, and must not
 wait on host I/O while it waits on a request; the engine reports two requests
 as an internal error.
 

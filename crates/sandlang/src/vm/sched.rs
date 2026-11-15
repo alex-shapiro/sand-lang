@@ -529,12 +529,12 @@ fn poll_native(vm: &mut VmGuard<'_>, f: &mut Fiber) -> Result<Option<FiberStop>,
         vm.heap.fiber_bytes = (vm.heap.fiber_bytes + bytes).saturating_sub(native.bytes);
         native.bytes = bytes;
         let wait_kind = native.wait_kind;
+        vm.enforce_limit(Some(f)).map_err(Trap::Limit)?;
         match request {
             None => {
                 f.wait_gen = vm.next_gen();
                 f.host_wait = Some(wait_kind);
                 vm.io.waiting += 1;
-                vm.enforce_limit(Some(f)).map_err(Trap::Limit)?;
                 return Ok(Some(FiberStop::Blocked));
             }
             Some(VmRequest::Call { callee, args }) => {
