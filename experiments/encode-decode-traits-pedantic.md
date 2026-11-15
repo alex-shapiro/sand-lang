@@ -1,6 +1,6 @@
 # Design: `Encode` and `Decode` as ordinary traits
 
-**Status: proposal for review.** This document describes planned changes. Nothing in it is implemented. Code citations refer to `main` at commit `8a51c46`, with paths relative to `crates/sandlang/` unless a path says otherwise. [Design decisions](#design-decisions) records the choices that the owner made during review. [Open questions](#open-questions) lists the choices that remain.
+This is a pedantic, implementation-heavy version of the main encode-decode-traits.md design doc. Where it disagrees with the main doc, prefer the main doc. Where it exceeds the specificity of the main doc, treat the increased specificity as a plausible candidate rather than as a must-follow instruction.
 
 ## Summary
 

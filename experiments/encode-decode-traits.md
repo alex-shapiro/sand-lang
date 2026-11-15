@@ -104,13 +104,23 @@ We rejected three alternatives:
 - **Infallible `encode`.** Returning `Result<()>` lets custom `encode` methods and format sinks report invalid values cleanly.
 - **Rewindable `Decoder` retries.** If a read fails partway through a value, rewinding the input cannot undo side effects from nested callbacks that already ran.
 
+### Trait bounds in local functions and field defaults
+
+Local generic functions and struct field defaults can use trait bounds with methods across all traits. Because `Encode` and `Decode` now declare methods, existing checker restrictions on traits with methods would otherwise block them in both places. A derived `Decode` implementation also requires any trait bounds that the struct's field defaults use.
+
+We rejected two alternatives:
+
+- **Keeping either restriction.** Keeping the local-function restriction would break existing scripts with local generic codec helpers. Keeping the field-default restriction would prevent generic structs from calling trait methods inside defaults.
+- **Lifting the restrictions only for `Encode` and `Decode`.** Special-casing the codec traits would violate the goal that `Encode` and `Decode` follow the same rules as every other trait.
+
 ### Decoding structs through `init`
 
-For structs that declare an `init` constructor, the compiler derives `Decode` from `init`'s parameters and calls `init`. Missing `Option` parameters default to `None`, and missing parameters with defaults run their defaults. The decoder ignores `init`'s visibility, matching field-based decoding.
+For structs that declare an `init` constructor, the compiler derives `Decode` from `init`'s parameters and calls `init`. The derived implementation also requires `init`'s trait bounds and passes their dictionaries to `init`. Missing `Option` parameters default to `None`, and missing parameters with defaults run their defaults. The decoder ignores `init`'s visibility, matching field-based decoding.
 
-We rejected three alternatives:
+We rejected four alternatives:
 
 - **Omitting derived `Decode` for structs with `init`.** Requiring manual `Decode` implementations adds repetitive code to every validated type.
+- **Omitting derived `Decode` if `init` requires trait dictionaries.** Propagating `init`'s bounds lets generic validated structs derive `Decode` without manual implementations.
 - **Writing fields directly without calling `init`.** Skipping `init` breaks validation rules that the constructor enforces.
 - **Requiring `pub` on `init`.** Field-based decoding already populates private fields, so requiring `pub` on `init` would penalize constructor validation.
 
@@ -121,6 +131,12 @@ During decoding, a duplicate struct field or `init` parameter returns a `"parse"
 Overwriting earlier struct fields would hide malformed input and run wasted callbacks for overwritten fields. `serde` also rejects duplicate struct fields.
 
 ## Host and Standard Library Design
+
+### Requiring `Encode` for host `Value` conversion
+
+Every conversion from a Sand value to a host `Value` requires `T: Encode`. We delete `Value::Opaque` and synchronous `Vm::to_value`. Async native functions convert values asynchronously. Synchronous native functions take pre-converted `Value` parameters bounded by `Encode`. The engine rejects host calls to functions whose return type does not implement `Encode`. A top-level script whose result does not implement `Encode` returns `Value::Unit`.
+
+We rejected keeping `Value::Opaque` and an untyped synchronous `Vm::to_value`. An unbounded type parameter lacks an `Encode` dictionary, and a synchronous call cannot await a Sand callback. An untyped `Vm::to_value` would therefore ignore custom `Encode` implementations and require a second heap walker.
 
 ### Explicit opt-in and Rust traits for native types
 
@@ -153,39 +169,3 @@ We rejected two alternatives:
 Keeping dedicated `Json` branches in the walkers would violate the goal that `Json` follows the same rules as every other type.
 
 Converting a `Json` value to a host `Value` now produces plain `Value` data such as `Value::Int(3)` instead of `Value::Variant` wrappers. Encoding or decoding `Json` also copies between the VM heap and the Rust `Json` enum.
-
-## Open Choices
-
-### 1. Host `Value` conversion for types without `Encode`
-
-Converting a Sand value to a host `Value` cannot both accept unbounded types and run custom `Encode` methods. An unbounded type parameter lacks an `Encode` dictionary, and a synchronous host function cannot await a Sand callback.
-
-- **Option A: Keep `Value::Opaque` and synchronous `Vm::to_value`.** Hosts can inspect values of any type. In exchange, `Vm::to_value` ignores custom `Encode` implementations and keeps a second heap walker.
-- **Option B: Require `T: Encode` for every conversion to `Value`.** We delete `Value::Opaque` and synchronous `Vm::to_value`. Async native functions call `NativeContext::to_value`. Synchronous native functions declare `T: Encode` on a converted parameter wrapper so the engine converts the argument before the Rust body runs. Host calls to functions with non-`Encode` return types are rejected before execution, and top-level scripts with non-`Encode` results return `Value::Unit`.
-
-**Recommendation:** Option B.
-
-### 2. Trait bounds on local functions and field defaults
-
-Because `Encode` and `Decode` declare methods, two existing checker restrictions on traits with methods apply to them. Local generic functions cannot require traits with methods, and struct field defaults cannot use trait bounds with methods.
-
-For local functions:
-
-- **Option A: Keep the restriction.** Existing scripts with local generic codec helpers fail to compile.
-- **Option B: Lift the restriction for all traits.** The compiler passes hidden dictionaries to local generic functions and allocates a closure if the function is used as a value.
-
-For struct field defaults:
-
-- **Option A: Keep the restriction for now.** Field defaults rarely need to encode or decode a type parameter, and `main` already prevents decoding type parameters inside field defaults.
-- **Option B: Lift the restriction.** Field default helpers receive the struct's bound dictionaries during both construction and decoding.
-
-**Recommendation:** Option B for local functions, and Option A for field defaults.
-
-### 3. Trait bounds on `init` during decoding
-
-An `init` constructor inherits the trait bounds of its struct and can require dictionaries such as `T: Num`.
-
-- **Option A: Propagate `init` bounds to derived `Decode`.** The derived `Decode` implementation requires the bounds of `init`, and the decode walker passes their dictionaries to `init`.
-- **Option B: Omit derived `Decode` if `init` requires dictionaries.** Structs whose `init` uses trait methods must implement `Decode` manually.
-
-**Recommendation:** Option A.
