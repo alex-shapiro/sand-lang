@@ -227,8 +227,7 @@ call was a side effect. Memory checks therefore become `await` points:
 4. The VM polls the future again. The reservation then succeeds, or the run
    ends with a memory error.
 
-A permission prompt works in the same way, through
-`cx.require(capability).await`.
+A permission prompt works in the same way, through `cx.require(capability).await`.
 
 This part removes the copies of state and the logs of changes that the codec
 branch needed for each step. Those existed only because the VM could run a
