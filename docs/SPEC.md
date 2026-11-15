@@ -2183,7 +2183,7 @@ with `call`. `step(f)` runs `f` with the VM under the restart rule of a
 function that takes `&mut Vm`: after a memory or resource limit error or a
 permission prompt, the engine collects garbage or asks the user, and runs `f`
 again. A callee can wait on I/O while other tasks run, and takes at most 255
-arguments. A raw `VmValue` is valid until the next wait.
+arguments.
 
 Each callback uses two frames of `max_call_depth`. Cancelling a task during a
 callback runs the callee's `defer` blocks, drops the future, and then runs the

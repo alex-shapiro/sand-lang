@@ -64,6 +64,10 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ _Embedding._ Let a cancelled native future update VM state. The
       engine drops the future while it holds the VM lock, so a `Drop` that
       calls `with_vm` panics and the run ends with an internal error.
+- [ ] ❓ _Embedding._ Yield to the host executor while the engine computes
+      with a clock that does not advance. `YIELD_EVERY` compares readings of
+      the host `Clock`, so with a manual or replay clock the engine never
+      yields, and other tasks of the host starve for the whole run.
 - [ ] ❓ _Memory._ Share standard library and host module bytecode across
       programs. `compile_program` copies the snapshot `Program` into each
       `CompiledProgram`. A copy takes about 74 KB for `print(1)` and 173 KB

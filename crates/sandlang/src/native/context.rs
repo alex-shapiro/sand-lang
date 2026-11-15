@@ -1,7 +1,6 @@
 //! VM access for the future of an async native call.
 
 use super::func::{NativeError, NativeReturn};
-use crate::engine::LimitKind;
 use crate::policy::Capability;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::value::VmValue;
@@ -123,7 +122,9 @@ impl NativeContext {
     /// Runs `f` with the VM.
     ///
     /// A raw [`VmValue`] from the VM is valid until the next wait. Root it
-    /// with [`NativeContext::root`] to keep it across a wait.
+    /// with [`NativeContext::root`] to keep it across a wait. An allocation
+    /// that reaches `max_memory` ends the run; allocate with
+    /// [`NativeContext::step`] instead.
     ///
     /// # Panics
     ///
@@ -202,14 +203,18 @@ impl NativeContext {
                 Err(Err(error)) => break Err(error),
                 Err(Ok(ctl)) => ctl,
             };
-            let memory_limit = matches!(ctl.kind(), CtlKind::Fail(fail) if fail.as_limit() == Some(LimitKind::Memory));
-            if !collected && (memory_limit || matches!(ctl.kind(), CtlKind::Collect)) {
+            if !collected && ctl.collection_may_help() {
                 collected = true;
                 self.request(VmRequest::Collect).await;
                 continue;
             }
             match ctl.into_kind() {
-                CtlKind::NeedPermission(cap) => self.request(VmRequest::Prompt(cap)).await,
+                CtlKind::NeedPermission(cap) => {
+                    // Like a function that takes `&mut Vm`, the step starts
+                    // again from scratch after a prompt.
+                    collected = false;
+                    self.request(VmRequest::Prompt(cap)).await;
+                }
                 CtlKind::Fail(fail) => break Err(fail.into()),
                 other => break Err(Fail::internal(format!("a native step made the scheduler request {other:?}")).into()),
             }
@@ -221,7 +226,7 @@ impl NativeContext {
     /// Stores `request` for the scheduler and waits until the scheduler polls
     /// the future again.
     fn request(&mut self, request: VmRequest) -> PendingRequest<'_> {
-        PendingRequest { cx: self, request: Some(request), stored: false }
+        PendingRequest { cx: self, request: Some(request) }
     }
 }
 
@@ -231,7 +236,6 @@ impl NativeContext {
 struct PendingRequest<'a> {
     cx: &'a mut NativeContext,
     request: Option<VmRequest>,
-    stored: bool,
 }
 
 impl Future for PendingRequest<'_> {
@@ -239,14 +243,12 @@ impl Future for PendingRequest<'_> {
 
     fn poll(mut self: Pin<&mut Self>, w: &mut Context<'_>) -> Poll<()> {
         let Some(request) = self.request.take() else {
-            self.stored = false;
             return Poll::Ready(());
         };
         let mut call = self.cx.call.lock();
         assert!(call.lent_vm.is_some(), "`NativeContext` requests run only while the engine polls the call");
         call.request = Some(request);
         drop(call);
-        self.stored = true;
         // A combinator that polls its children with its own waker polls this
         // future again only after a wake.
         w.waker().wake_by_ref();
@@ -256,8 +258,8 @@ impl Future for PendingRequest<'_> {
 
 impl Drop for PendingRequest<'_> {
     fn drop(&mut self) {
-        if self.stored {
-            self.cx.call.lock().request = None;
-        }
+        // Only one request future exists per context, so a stored request
+        // that the scheduler has not taken yet is this one.
+        self.cx.call.lock().request = None;
     }
 }

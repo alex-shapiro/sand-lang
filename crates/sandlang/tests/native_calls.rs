@@ -41,32 +41,28 @@ struct WakeGated<F> {
     gate: Arc<Gate>,
 }
 
-/// The waker of a [`WakeGated`] future.
+/// The waker of a [`WakeGated`] future. The engine polls the outer future
+/// again after each callback, so the gate does not forward wakes.
 struct Gate {
     woken: AtomicBool,
-    outer: Mutex<Option<Waker>>,
 }
 
 impl Wake for Gate {
     fn wake(self: Arc<Self>) {
         self.woken.store(true, Ordering::SeqCst);
-        if let Some(outer) = self.outer.lock().take() {
-            outer.wake();
-        }
     }
 }
 
 impl<F> WakeGated<F> {
     fn new(inner: F) -> WakeGated<F> {
-        WakeGated { inner: Box::pin(inner), gate: Arc::new(Gate { woken: AtomicBool::new(true), outer: Mutex::new(None) }) }
+        WakeGated { inner: Box::pin(inner), gate: Arc::new(Gate { woken: AtomicBool::new(true) }) }
     }
 }
 
 impl<F: Future> Future for WakeGated<F> {
     type Output = F::Output;
 
-    fn poll(mut self: Pin<&mut Self>, w: &mut std::task::Context<'_>) -> Poll<F::Output> {
-        *self.gate.outer.lock() = Some(w.waker().clone());
+    fn poll(mut self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<F::Output> {
         if !self.gate.woken.swap(false, Ordering::SeqCst) {
             return Poll::Pending;
         }
@@ -156,7 +152,13 @@ fn calls_module(log: &Log) -> NativeModule {
     m.function("open_door", |name: String| -> Result<Later<String, HostError>, HostError> {
         Ok(Later::new(WaitKind::Io, |mut cx| async move {
             let door = Capability::Custom { name: "door".into(), detail: name.clone() };
-            cx.step(|vm| vm.require(&door)).await?;
+            // A resource check before the prompt makes `retry_stress` request a
+            // collection first.
+            cx.step(|vm| {
+                vm.resource_slot()?;
+                vm.require(&door)
+            })
+            .await?;
             Ok(format!("opened {name}"))
         }))
     });
@@ -332,16 +334,20 @@ fn callback_results_count_against_the_memory_limit() {
 }
 
 #[test]
-fn require_prompts_and_resumes_the_future() {
-    let answers = Arc::new(Mutex::new(vec![PromptAnswer::AllowOnce, PromptAnswer::DenyOnce]));
-    let config = Config::new()
-        .custom_policy(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow })
-        .prompter(move |_: Capability| {
-            let answer = answers.lock().remove(0);
-            async move { answer }
-        });
-    let out = run_ok(config, "print(calls.open_door(\"front\"))\nprint(calls.open_door(\"back\"))");
-    assert_eq!(out, "Ok(\"opened front\")\nErr(Error(message: \"permission denied: door back\", kind: \"permission_denied\"))\n");
+fn steps_prompt_and_resume_the_future() {
+    for stress in [false, true] {
+        let answers = Arc::new(Mutex::new(vec![PromptAnswer::AllowOnce, PromptAnswer::DenyOnce]));
+        let config = Config::new()
+            .retry_stress(stress)
+            .custom_policy(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow })
+            .prompter(move |_: Capability| {
+                let answer = answers.lock().remove(0);
+                async move { answer }
+            });
+        let out = run_ok(config, "print(calls.open_door(\"front\"))\nprint(calls.open_door(\"back\"))");
+        let denied = "Err(Error(message: \"permission denied: door back\", kind: \"permission_denied\"))";
+        assert_eq!(out, format!("Ok(\"opened front\")\n{denied}\n"), "retry stress: {stress}");
+    }
 }
 
 #[test]

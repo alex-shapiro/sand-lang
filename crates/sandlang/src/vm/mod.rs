@@ -192,6 +192,16 @@ impl Ctl {
         &self.0
     }
 
+    /// Returns `true` if a garbage collection can resolve the failure of a
+    /// native call.
+    pub(crate) fn collection_may_help(&self) -> bool {
+        match self.kind() {
+            CtlKind::Collect => true,
+            CtlKind::Fail(fail) => fail.as_limit() == Some(LimitKind::Memory),
+            _ => false,
+        }
+    }
+
     pub(crate) fn into_kind(self) -> CtlKind {
         *self.0
     }
