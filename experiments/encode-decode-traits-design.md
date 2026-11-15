@@ -171,7 +171,7 @@ During trait declaration, the type checker processes each registered `TypeKind`:
 
 - **Built-in kinds.** The checker creates a structural implementation for each built-in kind. It requires every type argument to implement the trait. For `List`, the checker creates `impl<T: Encode> Encode for [T] {}`.
 - **`Struct` and `Enum` kinds.** If the list includes `Struct` or `Enum`, the checker derives a structural implementation for each eligible struct or enum. Its existing derivation pass computes the bounds on each type parameter from the field and payload types. For `struct Pair<A, B> { first: A, second: [B] }`, the checker generates `impl<A: Encode, B: Encode> Encode for Pair<A, B> {}`.
-- **Derivation conditions.** Each registered kind can include an eligibility rule that the checker evaluates. For `Decode`, the rule on `Struct` skips structs with `init` constructors. Because registration supplies the rule, the checker treats all derived traits uniformly.
+- **Derivation conditions.** Each registered kind can include an eligibility rule that the checker evaluates. For `Decode`, the rule on `Struct` skips structs with `init` constructors. Because registration supplies the rule, the checker selects the rule from registration data, not from the trait name.
 
 If a user writes a custom implementation for a type, the checker skips deriving that trait for the type.
 
@@ -182,7 +182,7 @@ The checker registers structural implementations as ordinary implementations. It
 Two checks keep the registration and the walker in agreement:
 
 - **Exhaustive `TypeKind` matching.** Each walker matches on the `TypeKind` stored in `ImplShape`. Rust requires that match to cover every `TypeKind` variant. If a developer adds a new variant, the Rust compiler reports an incomplete match in the walker.
-- **Supertrait verification.** The checker verifies supertrait bounds on all implementations, including structural implementations. Because `Decode` requires `Encode`, every kind registered for `Decode` must also implement `Encode`. If `Decode` registers an extra kind, the checker rejects the prelude during every test run.
+- **Supertrait verification.** The checker verifies supertrait bounds on all implementations, including structural implementations. Because `Decode` requires `Encode`, every kind registered for `Decode` must also be registered for `Encode`. If `Decode` registers an extra kind, the checker rejects the prelude during every test run.
 
 ### Completeness for built-in types
 
@@ -287,7 +287,7 @@ Recursive types create cycles between dictionaries and implementation shapes. Co
 
 The walker breaks dictionary cycles by building each part's dictionary only if the walk visits that part:
 
-- **Constant dictionaries.** `PartTemplate::Constant` stores an integer index into the constant pool. The VM resolves that index during the walk. Before lowering an `ImplShape`'s part templates, the compiler reserves the constant slot for that shape. Recursive references emit that reserved index. Every constant in the pool therefore remains a finite tree.
+- **Constant dictionaries.** `PartTemplate::Constant` stores an integer index into the constant pool. The VM resolves that index during the walk. Before lowering an `ImplShape`'s part templates, the compiler reserves the constant slot for that shape. Recursive references emit that reserved index. The constant pool therefore stays acyclic.
 - **Runtime dictionaries.** For generic `Tree<T>`, `children` uses the finite template `Tuple([list_method, list_shape, Tuple([tree_method, tree_shape, Bound(0)])])`. The walker builds `[Tree<T>]`'s dictionary at `children`. It then builds each child `Tree<T>` dictionary as it visits that child.
 - **Polymorphic recursion.** A generic type can recurse with a nested type argument, such as `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }`. `Deep`'s template builds `Nest<[T]>`'s dictionary from `T`'s dictionary at each `Deep` layer. The runtime depth of the value limits dictionary construction.
 
@@ -335,11 +335,11 @@ Two-pass decoding preserves two guarantees. First, the walker validates the enti
 
 ### Synchronous fast path
 
-If a walk records zero holes, the native function returns immediately. It returns a synchronous result without allocating a future. Skipping the async future poll saves about 112 ns per call.
+If a walk records zero holes, the native function returns immediately. It returns a synchronous result without allocating a future. An async native call whose future is ready at its first poll costs about 112 ns. A synchronous native call costs about 10 ns.
 
 ## Part 6: Type checker and compiler changes
 
-1. **Native default methods.** The parser and checker accept `native fn` methods inside `trait` declarations. On `main`, they accept `native fn` only inside `impl` blocks.
+1. **Native default methods.** The checker treats a `native fn` method in a `trait` declaration as a native default method. On `main`, a trait declaration cannot give a method a native default body.
 2. **Structural implementations from registered kinds.** The checker generates structural implementations from each native default's `TypeKind` list, as Part 2 describes. It registers them as ordinary implementations. Prelude registration for `Decode` excludes structs with `init` constructors. For `Hash`, the checker continues to exclude structs with `var` fields on its existing derivation path.
 3. **Part templates.** For each structural implementation, the checker builds trait-evidence trees for all parts. The compiler lowers those trees to `PartTemplate` constants.
 4. **Structural implementations for `never`.** Under SPEC §5.1 on `main`, `never` implements only traits without methods. Expressions such as `json.encode([])` require `[never]: Encode`. Registering `TypeKind::Never` gives `never` a structural implementation with shape kind `Never`. The decode walker always returns an error for `TypeKind::Never`. Because `never` has zero runtime values, the encode walker never visits a `Never` part.
