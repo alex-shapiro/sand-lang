@@ -134,21 +134,24 @@ Overwriting earlier struct fields would hide malformed input and run wasted call
 
 ### Requiring `Encode` for host `Value` conversion
 
-Every conversion from a Sand value to a host `Value` requires `T: Encode`. We delete `Value::Opaque` and synchronous `Vm::to_value`. Async native functions convert values asynchronously. Synchronous native functions take pre-converted `Value` parameters bounded by `Encode`. The engine rejects host calls to functions whose return type does not implement `Encode`. A top-level script whose result does not implement `Encode` returns `Value::Unit`.
+A `Value` can outlive a run, but encoding to or decoding from `Value` happens only inside an active `Vm`. Each conversion to `Value` requires `T: Encode`. We delete `Value::Opaque`, synchronous `Vm::to_value`, and outside-VM `value::Encode`. Async native functions convert values asynchronously. Synchronous native functions take pre-converted `Value` parameters bounded by `Encode`. The engine rejects host calls to functions whose return type does not implement `Encode`. A top-level script whose result does not implement `Encode` returns `Value::Unit`.
 
-We rejected keeping `Value::Opaque` and an untyped synchronous `Vm::to_value`. An unbounded type parameter lacks an `Encode` dictionary, and a synchronous call cannot await a Sand callback. An untyped `Vm::to_value` would therefore ignore custom `Encode` implementations and require a second heap walker.
+We rejected two alternatives:
+
+- **Outside-VM codec traits on Rust types.** Custom Sand codecs, constructors, and defaults require an active `Vm` to execute Sand code. Outside-VM Rust traits therefore cannot honor Sand's codec rules.
+- **Keeping `Value::Opaque` and an untyped synchronous `Vm::to_value`.** An unbounded type parameter lacks an `Encode` dictionary, and a synchronous call cannot await a Sand callback. An untyped `Vm::to_value` would therefore ignore custom `Encode` implementations and require a second heap walker.
 
 ### Explicit opt-in and Rust traits for native types
 
 Native Rust types opt in to each trait through `#[sand(encode, decode)]` for derived codecs or `#[sand(encode = "manual", decode = "manual")]` for hand-written Rust implementations. Opaque `SandObject` types support only the manual form because the macro cannot inspect their fields.
 
-Manual implementations use the Rust traits `native::Encode` and `native::Decode` to write to `EncodeSink` and read from `DecodeSource` directly in Rust. `native::Encode` replaces `value::Encode` so a single Rust trait serves both codecs and host `Value` conversion. Native types with type parameters cannot implement `Encode` or `Decode`.
+Manual implementations implement the Rust traits `native::Encode` and `native::Decode` over `&mut Vm` and `VmVal<Self>`. They read and write the VM heap in place through `EncodeSink` and `DecodeSource` without copying into Rust values. Derived native types use the VM walker directly and do not generate Rust codec code. Native types with type parameters cannot implement `Encode` or `Decode`.
 
 We rejected four alternatives:
 
 - **Automatic derivation for all bound Rust types.** Explicit opt-in avoids exposing internal Rust struct layouts as unintended wire formats.
-- **Writing custom codecs for native types in Sand.** Running manual codecs in Rust avoids heap conversions and async VM callbacks.
-- **Keeping `value::Encode` separate from `native::Encode`.** Unifying the traits avoids maintaining two serialization implementations per host type.
+- **Writing custom codecs for native types in Sand.** Running manual codecs in Rust avoids async VM callbacks.
+- **Defining `native::Encode` and `native::Decode` over owned Rust values.** Operating on `&Self` and `Self` instead of `VmVal<Self>` would copy heap values such as `Json` trees into Rust on every manual codec call.
 - **Supporting generic native types.** Encoding or decoding erased Sand type parameters from Rust would force trait dictionaries and async VM callbacks into the Rust trait signatures. The standard library defines zero public generic native types.
 
 ### Fallible `json.encode` and infallible `json.to_json`
@@ -164,11 +167,11 @@ We rejected two alternatives:
 
 ### `json.Json` as an ordinary native type
 
-`json.Json` implements `Encode` and `Decode` manually in Rust as an ordinary native type. Its implementation reads and writes its underlying data model rather than relying on `Json` branches inside the walkers.
+`json.Json` implements `Encode` and `Decode` manually in Rust as an ordinary native type. Its implementation reads and writes the VM heap in place through `EncodeSink` and `DecodeSource` rather than relying on `Json` branches inside the walkers.
 
 Keeping dedicated `Json` branches in the walkers would violate the goal that `Json` follows the same rules as every other type.
 
-Converting a `Json` value to a host `Value` now produces plain `Value` data such as `Value::Int(3)` instead of `Value::Variant` wrappers. Encoding or decoding `Json` also copies between the VM heap and the Rust `Json` enum.
+Converting a `Json` value to a host `Value` now produces plain `Value` data such as `Value::Int(3)` instead of `Value::Variant` wrappers.
 
 ## Open Choices
 
@@ -193,11 +196,3 @@ Derived `Encode` writes a struct's fields, whereas derived `Decode` reads `init`
 - **Option A: Derive both traits independently.** `Encode` writes fields and `Decode` calls `init`. Authors write a custom implementation if they want the type to round-trip.
 - **Option B: Omit derived `Encode` if `init` parameters differ from the fields.** Asymmetric structs still compile. Callers get a compile error if they encode the struct without a custom `Encode` implementation.
 - **Option C: Reject the struct definition.** Because derivation is automatic, a definition-site error would also reject structs that never use `Encode` or `Decode`.
-
-### 4. Rust values vs. VM heap handles in `native::Encode` and `native::Decode`
-
-The VM walker operates on VM heap values, whereas host `Value` conversion operates on Rust values.
-
-- **Option A: Define the traits over Rust values.** Authors write a single implementation per manual type, and host code converts Rust values directly to `Value`. However, manual codecs copy values such as `Json` trees between the VM heap and Rust. Derived native types also generate separate VM and Rust implementations.
-- **Option B: Put both a heap method and a Rust-value method on each trait.** The walker reads heap values in place without copying. Authors of manual native types must implement their codec twice.
-- **Option C: Define the traits over VM heap handles, and use `serde` for host Rust values.** Manual codecs avoid heap copies, and derived native types need only the VM implementation. Host Rust types use `serde` instead of `native::Encode` for `Value` conversion. We would then add a `serde` serializer and deserializer for `Value`.
