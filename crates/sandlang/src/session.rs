@@ -294,10 +294,8 @@ impl Session {
         let mut until = std::pin::pin!(until);
         let runnable = self.state.as_mut().is_some_and(|state| {
             state.recover();
-            {
-                let vm = state.vm.lock();
-                !vm.ready.is_empty() || vm.host_wait_kind().is_some()
-            }
+            let vm = state.vm.lock();
+            !vm.ready.is_empty() || vm.host_wait_kind().is_some()
         });
         let output = if runnable {
             // Poll background tasks until `until` completes or the tasks stop.
@@ -354,8 +352,9 @@ impl Session {
     pub fn cancel_tasks(&mut self) -> usize {
         let Some(st) = self.state.as_mut() else { return 0 };
         st.recover();
-        let n = st.vm.lock().live_tasks;
-        st.vm.lock().abandon_tasks();
+        let mut vm = st.vm.lock();
+        let n = vm.live_tasks;
+        vm.abandon_tasks();
         st.deferred_prompt = None;
         n
     }
@@ -544,8 +543,11 @@ impl Session {
         let Session { state, exit_code, call, .. } = self;
         let st = state.as_mut().expect("session not started");
         st.recover();
-        st.vm.lock().begin_session_run(call);
-        st.vm.lock().deadline = deadline;
+        {
+            let mut vm = st.vm.lock();
+            vm.begin_session_run(call);
+            vm.deadline = deadline;
+        }
         st.running = true;
         let main_result = sched::run_main(&st.vm, proto).await;
         st.running = false;

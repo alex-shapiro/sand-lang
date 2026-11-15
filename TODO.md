@@ -34,11 +34,16 @@ The host cannot rely on engine limits, stability, or control.
       and `with_vm` return raw values, and every `NativeContext::call` is a
       wait during which a collection can run, so async walkers hit this
       easily. After a garbage collection during the wait, the read returns the
-      data of another object without an error. If the collector shrank the heap, the read or the
+      data of another object without an error. A `RootedValue` has the same
+      gap: read through another call's context, it returns that call's root. If the collector shrank the heap, the read or the
       next collection causes a panic. The engine reports the panic as an
       internal error. A `panic = "abort"` build stops the process. Options: a
       host value type that is not `Send`, or a generation check on each heap
       slot.
+- [ ] ❓ _Embedding._ Detect a callback that changes a collection while an
+      async native walker iterates it. `NativeContext::call` lets Sand code
+      run in the middle of a walk. Options: fail on mutation like CPython, or
+      walk a snapshot.
 - [ ] ❓ _Embedding._ Let a native call release roots before it returns.
       Each `NativeContext::root` call and each callback result adds an entry
       to the call's root table until the call returns. A walker over a list

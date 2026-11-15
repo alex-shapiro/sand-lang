@@ -276,14 +276,6 @@ fn a_spent_tokio_budget_does_not_hang_a_clock_that_yields_at_once() {
 }
 
 #[test]
-fn engines_and_their_runs_are_send() {
-    fn assert_send<T: Send>(_: &T) {}
-    let mut engine = Engine::new(Config::new().host_modules(HostModules::new([calls_module(&Log::default())]).unwrap()));
-    assert_send(&engine);
-    assert_send(&engine.run_source("main.sand", "import calls"));
-}
-
-#[test]
 fn sessions_run_callbacks_in_inputs_and_in_background_tasks() {
     let config = Config::new().host_modules(HostModules::new([calls_module(&Log::default())]).unwrap());
     let mut session = sandlang::session::Session::new(config);

@@ -2176,28 +2176,20 @@ compiler rejects it in these places:
 raw `VmValue` across a wait; root it with `NativeContext::root` instead.
 
 `Later::new(wait_kind, build)` passes a `NativeContext` to `build`, which
-returns the future. The future runs on the calling task and uses the context
-for these operations:
+returns the future. The future runs on the calling task. Through the context,
+it uses the VM with `with_vm` (only while the engine polls the call), keeps
+values alive across waits with `root` and `value`, calls Sand functions with
+`call`, collects garbage in place with `check_memory`, and asks for permission
+with `require`. A callee can wait on I/O while other tasks run, and takes at
+most 255 arguments. A raw `VmValue` is valid until the next wait.
 
-- `with_vm(f)` runs `f` with `&mut Vm`. It panics unless the engine is polling
-  the call's future. A raw `VmValue` from the VM is valid until the next wait.
-- `root(value)` returns a `Send` `RootedValue` that keeps `value` alive until
-  the native call returns. `value(rooted)` reads it.
-- `call(callee, args).await` runs a Sand function on the calling task and
-  returns its rooted result. The callee can wait on I/O, and the scheduler
-  runs other tasks meanwhile. The callee takes at most 255 arguments.
-- `check_memory(bytes).await` collects garbage in place if needed, and fails
-  with a memory limit error if `bytes` more heap bytes still exceed
-  `max_memory`.
-- `require(capability).await` checks a capability and prompts the user if the
-  policy requires a prompt.
-
-Callbacks count toward `max_call_depth`. Cancelling a task during a callback
-runs the callee's `defer` blocks, drops the future, and then runs the caller's.
-Roots and callback results stay alive until the native call returns. They count
-against `max_memory` with the future itself. Boxes of nested futures do not
-count, so a recursive future must limit its depth. A future makes at most one
-request per poll, and a timer or `select!` branch cannot interrupt a callback.
+Each callback uses two frames of `max_call_depth`. Cancelling a task during a
+callback runs the callee's `defer` blocks, drops the future, and then runs the
+caller's. Roots and callback results stay alive until the native call returns,
+and count against `max_memory` with the future itself. Boxes of nested futures
+do not count, and polling them uses the Rust stack, so a recursive future must
+limit its depth. A future makes at most one request per poll, and a timer or
+`select!` branch cannot interrupt a callback.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
