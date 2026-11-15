@@ -185,7 +185,7 @@ Ordinary trait method calls read only the method closures and supertrait diction
 
 Each `ImplShape` holds two fields:
 
-- **Type kind.** The kind tells the walker how to represent the type. Struct kinds also store field identifiers and default values. Native value kinds also store their text parser.
+- **Type kind.** The kind tells the walker how to represent the type. Struct kinds also store field identifiers and field defaults. Native value kinds also store their text parser.
 - **Part templates.** This list holds a `PartTemplate` for each part so the walker can build that part's dictionary.
 
 ### Part templates
@@ -239,7 +239,7 @@ save(Page(items: [Email(address: "a@b.c")]))
 - **Step 2: Runtime `Page<T>` dictionary.** `save` calls `json.encode(page)`, which needs the `Encode` dictionary for `Page<T>`. Because `T` is generic, `save` builds a 3-item tuple at runtime:
   1. The native encoder method.
   2. The constant `ImplShape` for `Page`.
-  3. `T`'s `Encode` dictionary from Step 1, which holds `Email`'s dictionary.
+  3. `T`'s `Encode` dictionary from Step 1. In this call, it is `Email`'s dictionary.
 - **Step 3: `Page` part template.** `Page`'s `ImplShape` holds a `PartTemplate` for `items`. That template tells the walker to build a 3-item `[T]` dictionary tuple:
   1. The native encoder method.
   2. The constant `ImplShape` for lists.
@@ -348,11 +348,11 @@ See [Open question 2](#open-questions) on keeping both restrictions in this bran
 
 ## Updates to `SPLIT.md` tasks 14, 15, and 18
 
-`SPLIT.md` divides the embedding and codec work into numbered tasks:
+`SPLIT.md` divides the work of a source branch into numbered changesets:
 
 - **Task 14: `Value` and `Vm::to_value`.** Pull request #41 implemented Task 14. This design updates two of its choices:
   - `Vm::to_value` takes an `Encode` dictionary so it can detect custom `Encode` implementations.
-  - The encode walker replaces the three separate heap walkers on `main`: `json.encode`, `json.to_json`, and `Vm::to_value`. Both `json.encode` and `json.to_json` format its `Value` output.
+  - The encode walker replaces the three separate heap walkers on `main`: `json.encode`, `json.to_json`, and `Vm::to_value`. `json.encode` writes its `Value` output as JSON text. `json.to_json` converts its `Value` output to `Json`.
 - **Task 15: `Encode` and `Decode` as ordinary traits.** Task 15 takes this new title and covers Parts 1 through 7 of this design:
   - `json.decode` parses JSON text to a `Value` before running the decode walker.
   - Task 15 drops a separate `value::Decode` Rust trait. Instead, Task 16 implements `serde` traits on `Value` so hosts can decode into Rust types.
