@@ -6,7 +6,7 @@
 
 We propose making `Encode` and `Decode` ordinary traits with native default methods. Users can implement both traits for concrete and generic types. The compiler erases type arguments from functions. Callers pass trait dictionaries to generic functions as hidden arguments. See [Why `Encode` and `Decode` need dictionaries](#why-encode-and-decode-need-dictionaries) for a comparison with `main`.
 
-Each trait declares a native Rust walker as its default method. The type checker generates ordinary implementations for built-in types, structs, and enums. Those generated implementations use the default methods. Users can write custom implementations for their own types to override the generated ones.
+Each trait declares a native Rust walker as its default method. The type checker generates ordinary implementations for built-in types, structs, and enums. Those generated implementations use the default methods. Users can write custom implementations for their own types to override generated defaults.
 
 During a walk, the walker looks up each part's implementation in trait dictionaries. For a part that uses the native default, the walker processes that part in Rust. For a part with a custom implementation, the walker runs a callback to the custom method.
 
@@ -42,7 +42,7 @@ The VM runs `Encode` and `Decode` like any other trait with native default metho
 - **Walker.** A walker is a Rust routine that visits a value and its parts in turn. The encode walker reads a Sand value from the VM. The decode walker builds a Sand value in the VM.
 - **Hole.** During a walk, the walker records a hole for any part or field default that requires a callback.
 - **`Value`.** `sandlang::value::Value` is a host-owned Rust type that represents a Sand value outside the VM. A Rust host can build a `Value` or keep a `Value` after a VM run ends.
-- **Callback.** An async native function can call a Sand function through a callback, added in commit `8a51c46`. In `experiments/native-async-sand-calls.md`, we measured each callback round trip at about 90 ns.
+- **Callback.** An async native function can call a Sand function through a callback. We added callbacks in commit `8a51c46`. In `experiments/native-async-sand-calls.md`, we measured each callback round trip at about 90 ns.
 - **Triage report.** In `experiments/encode-decode-design-causes.md` on branch `encode-decode-design-causes`, we analyzed the speed and complexity problems in earlier codec designs.
 
 ## Why `Encode` and `Decode` need dictionaries
@@ -104,7 +104,7 @@ Storing an interned type-argument ID in each `Obj` slot on the heap would add ab
 
 From general knowledge, other languages balance type erasure and runtime metadata in four ways:
 
-- The Java compiler erases type arguments at compile time, like Sand.
+- The Java compiler also erases type arguments at compile time.
 - The C# and .NET runtimes store generic type arguments on every object. Callers also pass runtime type metadata to generic code.
 - The Swift compiler passes type metadata to generic functions as hidden arguments.
 - The Rust and C++ compilers emit a separate copy of each generic function per concrete type. Each compiled copy knows all concrete types.
@@ -115,7 +115,7 @@ With dictionaries, callers pass metadata only to functions that require traits w
 
 ## Limits of the previous draft
 
-By looking up implementations in standard dictionaries, we remove all four special cases from the previous draft. In the previous draft, the encode walker looked up custom implementations from runtime value types, which worked only for concrete types:
+By looking up implementations in standard dictionaries, we remove all four special cases from the previous draft. In the previous draft, the encode walker looked up custom implementations from runtime value types. That lookup worked only for concrete types and required four special cases:
 
 - **Dictionary exception in the checker.** The checker skipped dictionaries for `Encode` and `Decode` despite their declared methods.
 - **Method slots on type definitions.** The checker stored custom `encode` and `decode` method slots on each type definition.
@@ -259,7 +259,7 @@ Here, the user defines a custom `Encode` implementation on `Email`. The checker 
 - **Step 2: Dynamic `Page<T>` dictionary.** Inside `format_page`, the call `json.encode(page)` needs `Page<T>: Encode`. For generic `T`, `format_page` builds a 3-item `Page<T>` dictionary tuple at runtime:
   1. Slot 0 stores the native encoder method.
   2. Slot 1 stores the constant `ImplShape` for `Page`.
-  3. Slot 2 stores `T`'s `Encode` dictionary from Step 1, which is `Email`'s dictionary in this call.
+  3. Slot 2 stores `T`'s `Encode` dictionary from Step 1. In this call, slot 2 holds `Email`'s dictionary.
 - **Step 3: `Page` part template.** `Page`'s `ImplShape` stores a `PartTemplate` for `items`. That template tells the walker how to build a 3-item `[T]` dictionary tuple:
   1. Slot 0 stores the native encoder method.
   2. Slot 1 stores the constant `ImplShape` for lists.
@@ -338,7 +338,7 @@ If every visited part uses the native default, the native function returns a syn
 2. **Custom and structural implementations.** We allow user `impl` blocks on `Encode` and `Decode` under `docs/SPEC.md` §4.9. The checker generates structural implementations from each native default's `TypeKind` list, as Part 2 specifies. For `Hash`, the checker keeps its existing rule for `var` fields.
 3. **Part templates.** The checker builds part trait-evidence trees. The compiler lowers them to `PartTemplate` constants, as Part 3 specifies.
 4. **Structural implementations for `never`.** By registering `TypeKind::Never`, we give `never` a structural implementation with shape kind `Never`. Under `docs/SPEC.md` §5.1 on `main`, `never` implements only traits with empty bodies. Expressions such as `json.encode([])` require `[never]: Encode`. The decode walker always returns an error for `TypeKind::Never`. Because `never` is uninhabited, `[never]: Encode` only meets type bounds on empty containers.
-5. **Dictionary parameters for native functions.** Generic native functions such as `json.encode<T: Encode>` receive `T`'s dictionary through a new `TraitDict<N>` parameter wrapper. A Rust native function takes `TraitDict<N>` to read a bound dictionary, following the pattern of `Num<N>`.
+5. **Dictionary parameters for native functions.** Generic native functions such as `json.encode<T: Encode>` receive `T`'s dictionary through a new `TraitDict<N>` parameter wrapper. A Rust native function takes `TraitDict<N>` to read a bound dictionary. `TraitDict<N>` follows the design of `Num<N>`.
 6. **Removal of `reflect`.** `Decode` dictionaries store `ImplShape` metadata. Decoders read target type structure from those dictionaries instead of `reflect` type descriptors. On `main`, only the `json` module uses `reflect` in the standard library. We delete `reflect` from the language.
 
 The checker applies its two existing rules for traits with methods to `Encode` and `Decode`:
@@ -372,18 +372,18 @@ In `SPLIT.md`, we divide the work of a source branch into numbered changesets:
 
 - **Changeset 14: `Value` and `Vm::to_value`.** We merged Changeset 14 in pull request #41. Here, we update two of its parts:
   - Callers pass an `Encode` dictionary to `Vm::to_value` so it can detect custom `Encode` implementations.
-  - We replace the three separate walkers on `main` (`json.encode`, `json.to_json`, and `Vm::to_value`) with the single encode walker. `json.encode` formats the `Value` output as JSON text. `json.to_json` converts the `Value` output to `Json`.
+  - We replace the three separate walkers on `main` with the single encode walker. `json.encode` formats the `Value` output as JSON text. `json.to_json` converts the `Value` output to `Json`.
 - **Changeset 15: `Encode` and `Decode` as ordinary traits.** We rename Changeset 15 to this title to cover Parts 1 through 7 of this design:
   - In `json.decode`, we parse JSON text into a `Value` and then run the decode walker.
-  - We defer host-side `Value` decoding to Changeset 16, which adds `serde` traits on `Value` for Rust hosts.
+  - We defer host-side `Value` decoding to Changeset 16. Changeset 16 adds `serde` traits on `Value` for Rust hosts.
 - **Changeset 18: Host function calls.** In Changeset 18, the engine decodes each host `Value` argument with the decode walker. Host-callable script functions take concrete parameter types. The compiler emits a constant `Decode` dictionary for each parameter.
 
 ## Costs and risks
 
 - **Dictionary passing.** Callers pass a dictionary to generic functions with `T: Encode` bounds. Callers pass a constant for concrete types. For constructed generic types, callers build a tuple at runtime. In the triage report, we measured generic trait calls at about 12 ns above direct calls.
 - **Per-part dispatch.** For each part, the walker resolves the part dictionary and checks its method function. For concrete types, the walker loads program constants directly from `Constant` templates.
-- **Intermediate `Value` allocation.** Both `json.encode` and `json.decode` build an intermediate `Value` tree. On `main`, `json.encode` writes JSON text directly from Sand values. On `main`, `json.decode` builds Sand values directly from JSON text. We will benchmark both functions to measure the time difference.
-- **Memory accounting across callbacks.** The walkers count `Value` memory against `max_memory` during each structural pass. During a Sand callback, the VM tracks callback roots in `max_memory` while the in-progress `Value` tree stays outside that count. In `TODO.md`, we track callback root growth under "Let an async native function release roots during a call." We also track sub-future memory under "Charge boxed recursive futures against `max_memory`."
+- **Intermediate `Value` allocation.** Both `json.encode` and `json.decode` build an intermediate `Value` tree. On `main`, `json.encode` writes JSON text directly from Sand values. Likewise, `json.decode` on `main` builds Sand values directly from JSON text. We will benchmark both functions to measure the time difference.
+- **Memory accounting across callbacks.** The walkers count `Value` memory against `max_memory` during each structural pass. During a Sand callback, the VM counts callback roots against `max_memory`. The in-progress `Value` tree stays outside `max_memory` until the callback returns. In `TODO.md`, we track callback root growth under "Let an async native function release roots during a call." We also track sub-future memory under "Charge boxed recursive futures against `max_memory`."
 - **Net codebase size.** We expect this design to reduce total code size. We will report the measured line delta in the pull request.
 
   We delete four subsystems:
@@ -403,7 +403,7 @@ In `SPLIT.md`, we divide the work of a source branch into numbered changesets:
 ## Rejected alternatives
 
 - **Runtime lookup table.** A runtime table indexed by trait and type would duplicate dictionary dispatch. Because the compiler erases type arguments, runtime lookup from values works only for concrete types. Callers of a decoder would also have to pass runtime type descriptors.
-- **Generated Sand methods for all derived implementations.** Swift uses this model, in which compiler-generated methods call a trait method for every part. In the triage report, Sand-only codecs took 2.3 to 7 times as long as native walkers.
+- **Generated Sand methods for all derived implementations.** Swift uses this model. Under it, compiler-generated methods call a trait method for every part. In the triage report, Sand-only codecs took 2.3 to 7 times as long as native walkers.
 - **Dual generated Sand codecs and native walkers.** With two codec paths, developers must keep output, error paths, and retry behavior identical across both. In the triage report, we audited `origin/encode-decode-traits`. Over a quarter of its 8,210 added lines kept those two paths aligned.
 
 ## Reusable parts from the previous draft
