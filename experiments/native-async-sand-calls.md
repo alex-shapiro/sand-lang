@@ -212,28 +212,34 @@ The walker keeps its position in local variables and recursive calls. The Rust c
 
 The engine implements Parts 1 to 4 with these differences from the proposal:
 
-- **`Later` keeps its name.** `Later::new(wait_kind, |cx| async move { ... })` replaces the finisher closure.
-- **The engine owns `Arc<Mutex<Vm>>`.** The drive releases the lock only to poll a native future or to await host events. `with_vm` works only while the engine polls the call.
+- **`Later` keeps its name.** `Later::new(wait_kind, |mut cx| async move { ... })` replaces the finisher closure.
+- **The engine owns `Arc<Mutex<Vm>>`.** The drive releases the lock only to poll a native future or to await host events. `with_vm` and every request work only while the engine polls the call.
 - **A trampoline frame runs each callback.** Proto 0 of every program calls the callee with `CallR` and then runs the new `ResumeNative` instruction, so ordinary returns do not change.
-- **`check_memory` replaces `reserve`,** because the call checks the limit and reserves nothing.
-- **Each fiber has one waker.** A wake makes the fiber ready, and the scheduler polls its innermost native call.
+- **`step` replaces `reserve` and `require`.** `context.step(f)` runs `f` under the restart rule of a synchronous native function: after a memory or resource limit error or a prompt, the engine collects garbage or asks the user, and runs `f` again.
+- **Requests are exclusive.** `call` and `step` take `&mut self`, so a future waits on at most one request. A request that a losing `select!` branch drops withdraws itself.
+- **Each fiber has one waker.** A drop guard on the waiting call counts host waits, so the idle check reads two counters.
 - **The engine yields when the host spends its tokio budget.** On `main`, 20,000 concurrent sleeps took about 9.2 million polls instead of 40,000.
 
 ## Measurements
 
-Release builds on an Apple M-series machine, 2026-11-14, fastest of several runs. The prototype walker (commit `1f7bb03`) encodes 5,000 rows with one `Point` field each:
+Release builds on an Apple M-series machine, 2026-11-15, fastest of several runs. The prototype walker (commit `1f7bb03`, rebuilt against the final API) encodes 5,000 rows with one `Point` field each:
 
 | Walker | ns per row |
 | --- | --- |
-| synchronous, as on `main` | 130 to 142 |
-| async, derived subtrees inside one `with_vm` | 112 to 120 |
-| async, one `with_vm` and one boxed future per node | 406 to 413 |
-| async, custom `Point` codec in Sand | 386 to 393 |
+| synchronous, as on `main` | 98 to 142 |
+| async, derived subtrees inside one `with_vm` | 98 to 119 |
+| async, one `with_vm` and one boxed future per node | 470 |
+| async, custom `Point` codec in Sand | 457 to 460 |
 
 - **Derived walk speed.** An async walk of derived types runs as fast as the synchronous walker.
-- **Custom field overhead.** A Rust-to-Sand-to-Rust hop costs about 70 ns, compared with about 270 ns for the continuation walker on `origin/encode-decode-traits`. A custom field adds about 280 ns per row, including the Sand hook, compared with about 435 ns.
+- **Custom field overhead.** A Rust-to-Sand-to-Rust hop costs about 90 ns, compared with about 270 ns for the continuation walker on `origin/encode-decode-traits`. A custom field adds about 340 to 360 ns per row, including the Sand hook, compared with about 435 ns.
 
-Against `main`, the `vm` and `codec` benches and the `bench/run.py` programs show no change. An async call that completes on its first poll takes about 124 ns instead of 114 ns. `chat_server` is about 3% slower. 20,000 concurrent `task.sleep(1ms)` calls take about 950 ns per task instead of 2,950 ns.
+Against `main`:
+
+- The `vm` and `codec` benches and the `bench/run.py` programs show no change.
+- An async call that completes on its first poll takes 112 ns, compared with 114 ns.
+- 20,000 concurrent `task.sleep(1ms)` calls take about 1,000 ns per task, compared with 2,880 ns.
+- With 50,000 tasks waiting on long sleeps, 20,000 yielding async calls take 0.36 s, compared with 0.77 s.
 
 ## Remaining problems
 
