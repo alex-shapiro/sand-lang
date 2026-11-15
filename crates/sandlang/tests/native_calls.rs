@@ -342,3 +342,22 @@ fn errors_in_callbacks_trace_through_the_native_call() {
 fn a_timeout_around_a_callback_takes_effect_only_after_the_callee_returns() {
     assert_eq!(run_ok(Config::new(), "print(calls.call_with_timeout(() => task.sleep(20ms)))"), "true\n");
 }
+
+#[test]
+fn exit_in_a_callback_ends_the_run() {
+    let (r, out) = run(Config::new(), &Log::default(), "print(calls.apply((x) => { exit(3)\nx }, 1))\nprint(\"unreachable\")");
+    assert_eq!((r.unwrap(), out.as_str()), (3, ""));
+}
+
+#[test]
+fn sessions_run_callbacks_in_inputs_and_in_background_tasks() {
+    let config = Config::new().host_modules(HostModules::new([calls_module(&Log::default())]).unwrap());
+    let mut session = sandlang::session::Session::new(config);
+    let rt = rt();
+    assert_eq!(rt.block_on(session.eval("import calls\ncalls.apply((x) => x * 2, 21)")).unwrap().as_deref(), Some("42"));
+    let started = "let t = spawn calls.apply((x) => {\n    task.sleep(5ms)\n    x + 1\n}, 1)";
+    assert_eq!(rt.block_on(session.eval(started)).unwrap(), None);
+    rt.block_on(session.run_tasks_until(async { tokio::time::sleep(Duration::from_millis(50)).await }, |e| panic!("{e}")));
+    assert_eq!(rt.block_on(session.eval("t.is_done()")).unwrap().as_deref(), Some("true"));
+    assert_eq!(rt.block_on(session.eval("t.wait()")).unwrap().as_deref(), Some("2"));
+}
