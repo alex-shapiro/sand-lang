@@ -427,7 +427,7 @@ module.function("Conn.encode", |vm: &mut Vm, conn: VmVal<Conn>, encoder: VmVal<E
 });
 ```
 
-The handles add two conveniences, built on the interfaces:
+The method names in this example are illustrative. The handles add two conveniences, built on the interfaces:
 
 - `write_value` writes a host `Value`. A host can then encode a Rust type through the Rust trait `value::Encode` (`src/value.rs:243-275`).
 - `read_value` reads the next value as a host `Value`, with the "next kind" request.
@@ -589,7 +589,7 @@ Each item below names an existing component and what this design takes from it.
 
 - The encode sink interface. Changeset 14 rejected an earlier sink interface, so `main` has none.
 - The `Value` source. On `main`, no code converts a `Value` into a heap value.
-- The `Encoder` and `Decoder` prelude types.
+- The `Encoder` and `Decoder` prelude types, and the Rust handles that give native method bodies access to the sink and the source.
 - Native default methods in traits, and their registration.
 - The computation of structural implementations through trait resolution.
 - The shape table and part templates.
@@ -601,6 +601,7 @@ Each item below names an existing component and what this design takes from it.
 - **Existing JSON behavior.** We keep the existing output in `tests/spec/std_json.test`, except for the changes that this document lists: the callback order and the `Value` form of `Json`. We will add each planned error-message change to this document.
 - **New spec tests:**
   - Custom `Encode` and `Decode` implementations on structs and enums.
+  - A host module with native `Encode` and `Decode` methods for an opaque object type, including a native body that writes a host `Value` and one that reads with the "next kind" request.
   - Generic custom implementations, such as `impl<T: Encode> Encode for Box<T>`.
   - A custom implementation with a bound on another trait, such as `impl<T: Describe> Encode for Box<T>`, inside a struct with a structural implementation.
   - A concrete custom implementation, such as `impl Encode for W<int>`, and the error for `W<str>: Encode`.
