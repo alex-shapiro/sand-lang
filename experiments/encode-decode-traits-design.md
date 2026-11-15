@@ -4,14 +4,12 @@
 
 ## Summary
 
-We propose to make `Encode` and `Decode` ordinary traits that users can implement. Each trait declares a native Rust walker as the default body of its method. The type checker generates implementations for built-in types, structs, and enums, and these implementations use the native default. A user can write a custom implementation for a type that the user's module declares.
-
-The compiler passes dictionaries for `Encode` and `Decode` to generic functions, as it does for every trait with methods. The walker reads these dictionaries to find the implementation of each part of a value. It processes a part that uses the native default in Rust. For a part with a custom implementation, it calls the Sand method through a callback, waits for the result, and continues from the same position.
+We propose to make `Encode` and `Decode` ordinary traits that users can implement. Each trait declares a native Rust default method that serves as the auto-derived implementation. A user who defines custom types can use the default methods or write custom implementations.
 
 The design has five goals:
 
 - `Encode` and `Decode` follow the same rules as every other trait.
-- `Encode` and `Decode` implementations are composable and nestable.
+- `Encode` and `Decode` implementations are arbitrarily composable and nestable.
 - A user can define `Encode` and `Decode` for any of their types: concrete and generic types, defined in Sand or in Rust.
 - A script can encode any `Encode` value as JSON text, and decode JSON text into any `Decode` type.
 - A script can encode any `Encode` value as a host `Value`, and decode a host `Value` as a `Decode` type.
