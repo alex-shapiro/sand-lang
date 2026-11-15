@@ -2179,7 +2179,7 @@ raw `VmValue` across a wait; root it with `NativeContext::root` instead.
 returns the future. The future runs on the calling task. Through the context,
 it uses the VM with `with_vm` (only while the engine polls the call), keeps
 values alive across waits with `root` and `value`, calls Sand functions with
-`call`, collects garbage in place with `check_memory`, and asks for permission
+`call`, allocates with `allocate`, and asks for permission
 with `require`. A callee can wait on I/O while other tasks run, and takes at
 most 255 arguments. A raw `VmValue` is valid until the next wait.
 
@@ -2284,8 +2284,8 @@ requirement: it fails the first memory or resource check in each call of a
 function that takes `&mut Vm`, and in each poll of a `Later` future.
 Return-value conversion does not fail on the memory limit; instead, the engine
 collects garbage and checks the memory limit after the call completes. A
-`Later` future that allocates in `with_vm` must first call
-`check_memory(bytes).await`.
+`Later` future allocates with `NativeContext::allocate`, which collects
+garbage in place and runs the step again after a memory limit error.
 
 | Rust type                         | Sand type                                             |
 | --------------------------------- | ----------------------------------------------------- |

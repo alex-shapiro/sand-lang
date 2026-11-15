@@ -2,6 +2,7 @@
 
 use super::convert::HostError;
 use super::func::NativeReturn;
+use crate::engine::LimitKind;
 use crate::policy::Capability;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::value::VmValue;
@@ -158,15 +159,19 @@ impl NativeContext {
         self.call.lock().reply.take().expect("the scheduler returns the callee's result")
     }
 
-    /// Returns a memory-limit error if `extra` additional heap bytes exceed
-    /// the limit after garbage collection. The async form of
-    /// [`Vm::check_memory`]: it does not restart the native call.
-    pub async fn check_memory(&self, extra: usize) -> Result<(), Fail> {
-        if self.with_vm(|vm| vm.check_memory(extra)).is_ok() {
-            return Ok(());
+    /// Runs `f` with the VM, like [`NativeContext::with_vm`], for a step that
+    /// allocates on the heap. If `f` fails on the memory limit, the engine
+    /// collects all garbage and runs `f` once more, as it restarts a
+    /// synchronous native function. `f` must check limits before any side
+    /// effect.
+    pub async fn allocate<R>(&self, mut f: impl FnMut(&mut Vm) -> Result<R, Fail>) -> Result<R, Fail> {
+        match self.with_vm(&mut f) {
+            Err(fail) if fail.as_limit() == Some(LimitKind::Memory) => {
+                self.request(VmRequest::Collect).await;
+                self.with_vm(f)
+            }
+            r => r,
         }
-        self.request(VmRequest::Collect).await;
-        self.with_vm(|vm| vm.check_memory(extra))
     }
 
     /// Checks `capability` like [`Vm::require`], and asks the user if the

@@ -92,8 +92,15 @@ fn calls_module(log: &Log) -> NativeModule {
             tokio::task::consume_budget().await;
         }
     });
-    m.function("check_memory", |bytes: i64| -> Result<Later<(), Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, move |cx| async move { cx.check_memory(bytes as usize).await }))
+    // Allocates a string of `bytes` bytes and returns its length.
+    m.function("allocate", |bytes: i64| -> Result<Later<i64, Fail>, Fail> {
+        Ok(Later::new(WaitKind::Io, move |cx| async move {
+            cx.allocate(|vm| {
+                let text = "x".repeat(bytes as usize).into_vm_value(vm)?;
+                Ok(vm.str(text).len() as i64)
+            })
+            .await
+        }))
     });
     m.function("open_door", |name: String| -> Result<Later<String, HostError>, HostError> {
         Ok(Later::new(WaitKind::Io, |cx| async move {
@@ -237,7 +244,7 @@ fn ending_the_run_drops_native_futures_waiting_on_callbacks() {
 }
 
 #[test]
-fn check_memory_collects_garbage_in_place() {
+fn allocate_collects_garbage_in_place() {
     // No safe point runs between dropping `junk` and the native call, so
     // only the call's own collection frees the 8 MB of strings.
     let src = "var block = \"x\"\n\
@@ -245,12 +252,11 @@ fn check_memory_collects_garbage_in_place() {
                var junk: [str] = []\n\
                for i in 0..8000 { junk.push(\"\\(i)\" + block) }\n\
                junk = []\n\
-               calls.check_memory(10 << 20)\n\
-               print(\"fits\")\n\
-               calls.check_memory(64 << 20)";
+               print(calls.allocate(10 << 20))\n\
+               calls.allocate(64 << 20)";
     let (r, out) = run(memory_limit(16 << 20), &Log::default(), src);
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
-    assert_eq!(out, "fits\n");
+    assert_eq!(out, "10485760\n");
 }
 
 #[test]

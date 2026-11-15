@@ -4088,7 +4088,7 @@ fn later_new_futures_and_later_ready_return_vm_handles() {
     m.function("after_wait", |_: &mut Vm, n: i64| -> Result<Later<VmVal<String>, Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, move |cx| async move {
             tokio::task::yield_now().await;
-            let v = cx.with_vm(|vm| format!("made {n}").into_vm_value(vm))?;
+            let v = cx.allocate(|vm| format!("made {n}").into_vm_value(vm)).await?;
             Ok(VmVal::<String>::from_raw(v))
         }))
     });
