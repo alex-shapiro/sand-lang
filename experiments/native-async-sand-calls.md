@@ -2,7 +2,7 @@
 
 We propose letting async native Rust functions call Sand functions. Each async native function returns a Rust future. The VM stores that future on the calling task and polls it.
 
-**Status: unimplemented proposal.** Every cost figure in this document is an estimate. This design builds on the async-adapter outline from the callback study on `origin/claude/sandlang-native-callbacks-research-i6bf14`. That study proposed lending VM access to an `async` block only between `await` points. It also proposed storing heap values in a rooted container.
+**Status: implemented on `async-native-sand-calls`.** [Implementation](#implementation) lists where the code differs from this proposal, and [Measurements](#measurements) replaces the cost estimates. This design builds on the async-adapter outline from the callback study on `origin/claude/sandlang-native-callbacks-research-i6bf14`. That study proposed lending VM access to an `async` block only between `await` points. It also proposed storing heap values in a rooted container.
 
 ## Precedent: piccolo async sequences
 
@@ -124,9 +124,9 @@ A `'static` future requires lifetime-free types, leaving two ways to lend VM acc
 
 ### Mechanism
 
-An `Arc<Mutex<VmState>>` transfers VM access in safe Rust:
+An `Arc<Mutex<Vm>>` transfers VM access in safe Rust:
 
-1. An `Arc<Mutex<VmState>>` owns the VM state. The scheduler locks the mutex while running Sand bytecode.
+1. An `Arc<Mutex<Vm>>` owns the VM state. The scheduler locks the mutex while running Sand bytecode.
 2. Before polling native futures, the scheduler releases the lock.
 3. Inside a poll, `context.with_vm(|vm| ...)` locks the mutex, runs the closure, and drops the guard.
 4. After polling finishes, the scheduler locks the mutex again.
@@ -161,7 +161,7 @@ In a global root table, each native function must remove its own entries explici
 
 A Sand callback can perform side effects, so the VM cannot safely restart an async native function from the start. Async native functions therefore await memory reservations in place:
 
-1. Before allocating heap memory, the future calls `context.reserve(byte_count).await`.
+1. Before allocating heap memory, the future calls `context.check_memory(byte_count).await`.
 2. If the heap exceeds `max_memory`, the poll returns `Pending` with a garbage-collection request.
 3. Because Part 3 roots every value stored across an `await` point, the VM collects garbage in place and keeps the waiting future.
 4. The scheduler polls the future again. If collection freed enough memory, the reservation returns `Poll::Ready`; otherwise, the VM fails the task with a memory error.
@@ -180,7 +180,7 @@ The VM must charge the size of each native future against `max_memory`. A native
 
 ## Part 5: Sketch of an async codec walker
 
-The untested sketch below illustrates a recursive async encoder:
+The sketch below illustrates a recursive async encoder. `crates/sandlang/benches/native_calls.rs` implements and tests a complete version:
 
 ```rust
 async fn encode_value(
@@ -208,25 +208,52 @@ async fn encode_value(
 
 The walker keeps its position in local variables and recursive calls. The Rust compiler generates the state machine that saves and restores local variables across each `await` point.
 
-## Estimated costs
+## Implementation
 
-Every cost below is an unmeasured estimate:
+The engine implements Parts 1 to 4 with these differences from the proposal:
 
-- **Heap allocation per recursive async call.** Rust requires `Box::pin` for recursive `async` calls. The type schema marks purely derived subtrees in advance, so the walker can skip `Box::pin` for them. A synchronous recursive helper can walk those subtrees using local stack variables.
-- **Mutex operations for VM access.** Locking and unlocking an uncontended `Mutex<VmState>` still executes atomic instructions. A walker should batch multiple heap reads inside each `context.with_vm` closure.
-- **Two mutex operations per poll batch.** The scheduler releases the mutex before polling ready futures and locks it again afterward. `IoTable::poll_ready` already polls ready futures in batches, so a single release covers the whole batch. Host I/O takes far longer than two atomic operations.
+- **`Later` keeps its name.** `Later::new(wait_kind, |cx| async move { ... })` passes a `NativeContext` to the function that builds the future. The future returns its result directly, so the finisher closure is gone. `stream::suspend` and `task.sleep` use the new form, and the other standard library functions call `stream::suspend` without change.
+- **The engine owns `Arc<Mutex<Vm>>` instead of `Vm`.** `sched::drive` locks the VM, runs ready tasks, and releases the lock only to poll a native future (`parking_lot::MutexGuard::unlocked`) or to await host events. `NativeContext::with_vm` takes a closure, so a future cannot keep the guard. `with_vm` panics if the engine is not polling the call, and the engine reports the panic as an internal error.
+- **A trampoline frame runs each callback.** Every program starts with the proto `CALLBACK_PROTO`. To run `context.call(callee, args)`, the scheduler pushes a frame of that proto, which calls the callee with `CallR` and then runs the new `ResumeNative` instruction. `ResumeNative` stops the fiber and passes the result to the native call. The return path of ordinary calls does not change.
+- **`check_memory` replaces `reserve`.** The name matches `Vm::check_memory`, because the call checks the limit and does not reserve memory.
+- **Each native call owns an `IoTable` slot.** The slot holds the waker that the future receives. A wake makes the task ready, and the scheduler polls the call in the task's next turn.
+- **The engine yields when the host task spends its tokio budget.** After tokio's budget of 128 operations, tokio futures return `Pending` until the host task yields. On `main`, the scheduler kept polling such futures in that state. 20,000 concurrent sleeps then took about 9.2 million polls instead of 40,000.
+- **The stdin idle flag no longer wakes the pending read.** The read's readiness depends only on the input. On `main`, the drive absorbed these wakes inside its wait. Under the new scheduler, each wake ran the task again, which made the drive spin.
 
-## Open questions
+The engine counts the size of each native future and its root table against `max_memory`. It does not count boxes that the future allocates for recursive calls.
 
-- **Preventing raw `VmValue` across `await` points.** `VmValue` implements `Send` on `main`. The Rust compiler therefore allows a future to keep an unrooted `VmValue` across an `await` point. Current async native functions have the same gap.
-- **Scope of the scheduler refactor.** On `main`, the interpreter is a `&mut Vm` method that borrows the whole VM across an execution slice. To suspend a task, the interpreter returns `FiberStop::Async` from `crates/sandlang/src/vm/interp.rs`. Part 2 moves VM state into `Arc<Mutex<VmState>>` so the scheduler can release the lock before polling. We have not yet measured the size of that refactor.
-- **Migrating existing async native functions.** Replacing `Suspension` removes `Later::new` and its finisher closure. Authors must update every async native function in the standard library and host modules to use the new future API.
-- **Concurrent mutation during callbacks.** A custom Sand callback can mutate a collection while a native walker iterates over it. As in the callback study, each native caller must either fail on concurrent mutation like CPython or read from a snapshot.
-- **Drop order on cancellation.** Cancelling a task or unwinding through `defer` blocks drops active frames. The VM must drop interleaved native futures and Sand frames in reverse call order.
+## Measurements
 
-## First prototype and benchmark
+We measured release builds on an Apple M-series machine on 2026-11-14. Each value is the fastest of several runs.
 
-To test this design, build a minimal prototype of Parts 1 through 4. Include a single async native function that awaits a Sand call, and run two benchmarks:
+The prototype codec walker in `crates/sandlang/benches/native_calls.rs` encodes 5,000 rows. Each row has one `Point` field:
 
-- **Custom field overhead.** Time a single custom field inside a codec walk. Compare that time against the roughly 270 ns continuation hop on `origin/encode-decode-traits`.
-- **Derived walk speed.** Time a walk over purely derived types. Compare that time against the recursive native decoder on `main`.
+| Operation        | ns per row | Meaning                                                                 |
+| ---------------- | ---------- | ----------------------------------------------------------------------- |
+| `sync`           | 130 to 142 | recursive native walker, as on `main`                                   |
+| `async_derived`  | 112        | async native call that walks derived subtrees inside one `with_vm` call |
+| `async_per_node` | 406        | one `with_vm` call and one boxed future for each of 9 nodes per row     |
+| `async_custom`   | 386 to 393 | async walker with a custom `Point` codec in Sand                        |
+| `sand_hook`      | 74         | Sand loop that calls the `Point` codec directly                         |
+| `native_hop`     | 87         | async native loop that calls an identity closure                        |
+| `sand_hop`       | 16         | Sand loop that calls the same closure                                   |
+
+These results answer the two questions of the first prototype:
+
+- **Derived walk speed.** An async walk of derived types runs as fast as the synchronous walker. The derived-subtree shortcut puts the whole walk inside one `with_vm` call. Without the shortcut, each async node costs about 33 ns.
+- **Custom field overhead.** A Rust-to-Sand-to-Rust hop costs about 71 ns (`native_hop` minus `sand_hop`). The continuation walker on `origin/encode-decode-traits` spent about 270 ns to stop, call Sand, and resume. A custom field adds about 280 ns to a row. That figure includes the hook itself and the async overhead of the three other fields in the same struct. The continuation walker took about 435 ns for a custom field.
+
+A/B runs against `main` show no other change in the interpreter:
+
+- `cargo bench --bench vm`: geometric mean 40.7 ms to 43.2 ms on `main` and 41.0 ms to 42.2 ms on the branch.
+- `cargo bench --bench codec`: every operation is within run-to-run noise.
+- An async native function that completes on its first poll takes 121 ns per call, compared with 115 ns on `main`. The new call allocates a shared call state and locks the VM around each poll.
+- 20,000 concurrent `task.sleep(1ms)` calls take 920 to 980 ns per task, compared with 2,950 ns on `main`. The tokio budget check causes this speedup.
+- `bench/run.py`: the programs suite has a geometric mean ratio of 0.995 to `main`. Among the examples, `chat_server` is about 3% slower (770 ms to 792 ms, compared with 742 ms to 759 ms), and the other examples are within noise.
+
+## Remaining problems
+
+- **Raw `VmValue` across `await` points.** `VmValue` implements `Send`, so the compiler accepts a future that keeps an unrooted `VmValue` across a wait. `TODO.md` tracks this problem.
+- **Root tables only grow.** Each `root` call and each callback result adds an entry until the native call returns. A walker over a list of a million values keeps a million entries alive. The engine counts the entries against `max_memory`.
+- **Requests combined with host waits.** A future that both requests a Sand call and waits on a host event in the same poll, for example with `select!`, can miss the host wake. The engine detects two requests in one poll, but it cannot detect a waker that a request hides.
+- **Concurrent mutation during callbacks.** A callback can change a collection that a native walker iterates. Each walker must fail on mutation or read a snapshot.
