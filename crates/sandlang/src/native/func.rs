@@ -454,11 +454,11 @@ macro_rules! fn_impls {
                     f($($param),*)
                 }
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
-                    let r = {
+                    let output = {
                         read_params!(vm, args, $($param),*);
                         call(&self, $($param),*)
                     };
-                    vm.unchecked(|vm| r.into_call_result(vm))
+                    vm.unchecked(|vm| output.into_call_result(vm))
                 })
             }
         }
@@ -477,8 +477,8 @@ macro_rules! fn_impls {
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     read_params!(vm, args, $($param),*);
                     vm.arm_retry_stress();
-                    let r = self(vm, $($param),*);
-                    vm.unchecked(|vm| r.into_call_result(vm))
+                    let output = self(vm, $($param),*);
+                    vm.unchecked(|vm| output.into_call_result(vm))
                 })
             }
         }

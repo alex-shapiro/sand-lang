@@ -126,11 +126,14 @@ fn prepare_stdin_read(vm: &mut Vm) -> Result<(), HostError> {
     Ok(vm.flush_before_input()?)
 }
 
+/// Result of an off-heap standard input read.
+type StdinReadOutput = Result<Option<Vec<u8>>, IoFailure>;
+
 /// Reserves I/O memory for a standard input read. Returns its [`WaitKind`] and read future.
 fn start_stdin_read(
     vm: &mut Vm,
     mode: StdinReadMode,
-) -> Result<(WaitKind, impl Future<Output = Result<Option<Vec<u8>>, IoFailure>> + Send + 'static), HostError> {
+) -> Result<(WaitKind, impl Future<Output = StdinReadOutput> + Send + 'static), HostError> {
     let stdin = vm.host.stdin.clone();
     // Count the off-heap read buffer against the I/O memory limit during the read.
     let mut reservation = match mode {

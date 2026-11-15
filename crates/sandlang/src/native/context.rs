@@ -127,9 +127,9 @@ impl NativeContext {
     ///
     /// # Panics
     ///
-    /// Panics if the caller invokes `with_vm` outside a poll of this call's
-    /// future or inside another `with_vm` closure. Keep `NativeContext` on the
-    /// thread that polls the future.
+    /// Panics during a re-entrant `with_vm` call. Also panics outside an active
+    /// poll of this call's future. Keep `NativeContext` on the thread that polls
+    /// the future.
     pub fn with_vm<R>(&self, f: impl FnOnce(&mut Vm) -> R) -> R {
         let vm = self.state.lock().lent_vm.clone();
         let mut vm = vm
@@ -255,8 +255,7 @@ impl Future for VmRequestFuture<'_> {
         assert!(state.lent_vm.is_some(), "poll `NativeContext` requests only while the engine polls this call");
         state.request = Some(request);
         drop(state);
-        // Combinators such as `FuturesUnordered` skip a child until the child wakes its waker.
-        // Mark this child ready for the scheduler's next poll of the outer future.
+        // Wake the task waker for outer combinators that track child readiness.
         task_context.waker().wake_by_ref();
         Poll::Pending
     }

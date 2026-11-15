@@ -44,7 +44,7 @@ Authors on `origin/encode-decode-traits` built and measured a continuation-based
 
 ## Design goals
 
-Authors write callback-capable native functions as `async` Rust functions. Inside the function, the author awaits `context.call(sand_fn, args)` to run `sand_fn` on the current task. That call returns `sand_fn`'s rooted result. While the VM runs `sand_fn`, it maintains four properties:
+Authors write callback-capable native functions as `async` Rust functions. Inside the function, the author awaits `context.call(sand_fn, args)` to run `sand_fn` on the current task. That call returns `sand_fn`'s rooted result. During a callback, the engine maintains four properties:
 
 - The scheduler can suspend `sand_fn` on async I/O.
 - The garbage collector traces every value rooted by the native function.
@@ -64,7 +64,7 @@ On `main`, an async native future waits only on host I/O. Only its finisher clos
 
 Even on the VM thread, async futures must satisfy three constraints:
 
-- **Garbage collection invalidates unrooted handles.** While a future awaits a Sand call, the Sand code can trigger garbage collection. An untraced handle in the future can then point to a freed or reused heap slot. In safe Rust, a read through that stale handle returns an unrelated heap object. The callback study reproduced this bug.
+- **Garbage collection invalidates unrooted handles.** During a Sand callback, Sand code can trigger garbage collection. An untraced handle in the future can then point to a freed or reused heap slot. In safe Rust, a read through that stale handle returns an unrelated heap object. The callback study reproduced this bug.
 - **The interpreter needs `&mut Vm` during a Sand call.** The interpreter takes `&mut Vm` to run `sand_fn`. A future must release `&mut Vm` before each `await` point.
 - **`Engine` requires `Send`.** Under SPEC §16, `Engine` implements `Send`. A `!Send` future inside `Vm` makes both `Vm` and `Engine` `!Send`. Only `unsafe impl Send` can restore `Send` on those types. Sand's 100% safe-Rust rule forbids `unsafe` code.
 
@@ -133,7 +133,7 @@ An `Arc<Mutex<Vm>>` transfers VM access in safe Rust:
 
 The engine polls the future on the scheduler thread. `context.with_vm` therefore acquires the uncontended lock immediately.
 
-Rust's type system rejects any future that holds VM access across an `await` point. `MutexGuard` is `!Send`. A future that holds a guard across an `await` point is therefore `!Send`. The VM requires `Send` futures. The Rust compiler therefore rejects any future that keeps a `MutexGuard` across a wait. SPEC §16.3 uses the same `!Send` check for VM handles today.
+Rust's type system rejects any future that holds VM access across an `await` point. `MutexGuard` is `!Send`. Holding a guard across an `await` point makes the future `!Send`. The VM requires `Send` futures. SPEC §16.3 uses the same `!Send` check for VM handles.
 
 ## Part 3: Root VM values across `await` points
 
@@ -222,7 +222,7 @@ The implementation follows Parts 1 to 4 with seven refinements:
 
 ## Measurements
 
-We ran release benchmarks on an Apple M-series machine on 2026-11-15. Each number below is the fastest of several runs. We rebuilt the prototype walker from commit `1f7bb03` against the final API to encode 5,000 rows, each with a `Point` field:
+We ran release benchmarks on an Apple M-series machine on 2026-11-15. Each number below is the fastest of several runs. We rebuilt the prototype walker from commit `1f7bb03` against the final API. The benchmark encodes 5,000 rows with a `Point` field:
 
 | Walker | Time per row, ns |
 | --- | ---: |
@@ -232,7 +232,7 @@ We ran release benchmarks on an Apple M-series machine on 2026-11-15. Each numbe
 | Async walker, custom `Point` codec in Sand | 457 to 460 |
 
 - **Derived walk speed.** On derived types, the async walker matches the speed of the synchronous walker.
-- **Custom field overhead.** A Rust-to-Sand-to-Rust callback hop takes about 90 ns, down from about 270 ns for the continuation walker on `origin/encode-decode-traits`. Encoding a custom field with its Sand hook adds about 340 to 360 ns per row, down from about 435 ns.
+- **Custom field overhead.** A Rust-to-Sand-to-Rust callback hop takes about 90 ns. The continuation walker on `origin/encode-decode-traits` took about 270 ns. Encoding a custom field with its Sand hook adds about 340 to 360 ns per row, down from about 435 ns.
 
 Compared with `main`:
 

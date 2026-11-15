@@ -306,15 +306,14 @@ impl Vm {
 
     /// Runs `fiber` until it stops or spends `fuel`.
     ///
-    /// If an instruction hits a memory limit, `run_slice` collects all garbage,
-    /// restores the instruction's fuel, and retries the instruction in the same
+    /// On a memory-limit error, `run_slice` collects all garbage and restores
+    /// the instruction's fuel. It then retries the instruction in the same
     /// slice.
     fn run_slice(&mut self, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
         let mut last_retry_site = None;
         loop {
             let entry_fuel = *fuel;
-            // Catch panics once per slice and report them as internal errors
-            // instead of unwinding into the host.
+            // Catch panics once per slice. Report each panic as an internal error.
             let stop = match crate::unwind::catch(|| self.interp(fiber, fuel)) {
                 Ok(stop) => stop,
                 Err(msg) => {
@@ -324,9 +323,8 @@ impl Vm {
             };
             let Ok(FiberStop::CollectAndRetry(frame)) = stop else { return stop };
             let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
-            // Reaching the same instruction again crosses a back edge or a
-            // call and spends interpreter fuel. If the instruction fails again
-            // at the same fuel, the retry itself exceeded `max_memory`.
+            // Reaching this instruction again crosses a back edge or call that spends fuel.
+            // Equal fuel here means the retry itself exceeded `max_memory`.
             let retry_site = (fiber.frames.len(), frame.ip);
             if last_retry_site == Some(retry_site) && entry_fuel - *fuel <= tick {
                 return Err(Trap::Limit(LimitKind::Memory).into());
@@ -542,7 +540,7 @@ enum Pause<S> {
     Stop(S),
     Prompt(Capability),
     Yield,
-    /// Ready queue is empty.
+    /// The ready queue is empty.
     Idle,
 }
 
@@ -670,9 +668,8 @@ pub(crate) async fn end_tasks(shared_vm: &SharedVm) -> Result<(), RunEnding> {
 
 /// Drives ready tasks and async waits until `stop_policy` ends the drive.
 ///
-/// Releases the VM lock only while polling async native calls or awaiting an
-/// async operation in `drive`. If the caller drops this future at an `.await`
-/// point, `Vm` retains all tasks in its scheduler tables.
+/// Releases the VM lock only while polling async native calls or awaiting in
+/// `drive`. Dropping this future at an `.await` point leaves all tasks in `Vm`.
 pub(crate) async fn drive<U: DriveUntil>(shared_vm: &SharedVm, stop_policy: U) -> Result<U::Stop, RunEnding> {
     let mut timer = RunTimer::start(shared_vm.lock().host.clock.clone());
     loop {

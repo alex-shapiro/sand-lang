@@ -652,13 +652,13 @@ fn send(
             let mut slot = slot;
             if let Some(conn) = idle {
                 match exchange(conn, &request, head_only, &mut head_res).await {
-                    Ok(r) => return Ok(r),
-                    Err((_, Some(s))) if replayable => slot = Some(s),
-                    Err((e, _)) => return Err(e),
+                    Ok(response) => return Ok(response),
+                    Err((_, Some(returned_slot))) if replayable => slot = Some(returned_slot),
+                    Err((err, _)) => return Err(err),
                 }
             }
             let conn = connect(&policy, &*network, &tls, &method, &url, slot.expect("a slot for a new connection")).await?;
-            exchange(conn, &request, head_only, &mut head_res).await.map_err(|(e, _)| e)
+            exchange(conn, &request, head_only, &mut head_res).await.map_err(|(err, _)| err)
         };
         let (conn, head) = match crate::platform::timeout(&*clock, timeout, run).await {
             Some(exchange_result) => exchange_result?,
@@ -858,11 +858,11 @@ fn write_body(vm: &mut Vm, conn: VmVal<net::Conn>, body: VmVal<Outgoing>, data: 
 /// read from the upload's connection.
 fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<NewResponseStream> {
     let Upload { url, conn, head_only, timeout, .. } = upload;
-    let h = net::conn_handle(vm, conn)?;
+    let handle = net::conn_handle(vm, conn)?;
     let timeout = stream::timeout(timeout);
     let max_body = vm.host.limits.max_http_body;
     let mut res = Reservation::new(&vm.heap.io_memory);
-    let reader = h.reader.clone();
+    let reader = handle.reader.clone();
     let clock = vm.host.clock.clone();
     let body_clock = clock.clone();
     let read = async move {
@@ -873,7 +873,7 @@ fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<NewResponseStream> {
     };
     suspend(
         WaitKind::Io,
-        h.closed.clone().guard(async move {
+        handle.closed.clone().guard(async move {
             let head = match crate::platform::timeout(&*clock, timeout, read).await {
                 Some(head_result) => head_result?,
                 None => return Err(IoFailure::new("timeout", "timed out waiting for the response")),
@@ -881,7 +881,7 @@ fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<NewResponseStream> {
             let reader = if head.framing == Framing::Done {
                 BodyReader::empty(max_body)
             } else {
-                BodyReader::new(Box::new(Framed::on_conn(&h, head.framing, timeout, body_clock, false)), max_body, None)
+                BodyReader::new(Box::new(Framed::on_conn(&handle, head.framing, timeout, body_clock, false)), max_body, None)
             };
             Ok(NewResponseStream { url, status: head.status, headers: head.headers, reader })
         }),
