@@ -136,6 +136,8 @@ Each walker owns its list of supported types. The walker module has one function
 
 Both walkers support the set that derives `Encode` on `main` (`src/check/derive.rs:34-37`, `:196-199`). This set has every built-in type constructor except `Fn`, plus structs, enums, and native value types. Tasks, channels, and native object types are not in the set. Both registrations declare support for `never`. The decode walker also supports structs that declare `init`.
 
+A type that a native module binds from Rust implements `Encode` or `Decode` only if it opts in. See [Native types](#native-types).
+
 ### How the checker builds structural implementations
 
 **Built-in type constructors.** For each registered type constructor, the checker creates an implementation that requires every type argument to implement the trait. For `List`, it creates `impl<T: Encode> Encode for [T] {}`. A tuple implementation needs one type parameter for each element, and the checker keys tuple implementations by arity. The checker therefore creates the tuple implementation for an arity at the first lookup of that arity.
@@ -411,38 +413,81 @@ This design has two decode sources:
 
 The JSON rules therefore stay in the JSON sink and the JSON source. The walkers know only the structure of Sand values.
 
-### Native implementations of `Encode` and `Decode`
+### Native types
 
-A native module can implement `Encode` and `Decode` for its own types with Rust method bodies. The checker already accepts an `impl` block for any type definition, including an opaque native object type (`impl_key`, `src/check/traits.rs:121-127`). The orphan rule places the `impl` block in the module that declares the type. A host module can declare it in its Sand source, as a test on `main` does for `Close`: `impl Close for Conn { native fn close(self) }` (`tests/api.rs:3964`).
+A native type is a Rust type that a native module binds with a derive macro and `NativeModule::bind::<T>()` (`src/native/mod.rs:904-905`). Four macros exist (`crates/sandlang-macros/src/lib.rs`):
 
-The Rust function of a native `encode` method receives the `Encoder` argument as a handle. Through the handle, the function calls the [encode sink interface](#encode-sink-interface) on the sink of the current walk. The Rust function of a native `decode` method receives the `Decoder` argument as a handle, and calls the [decode source interface](#decode-source-interface) through it. serde gives the same access: a `Serialize` implementation calls the methods of its `Serializer` (`serde_core` 1.0.229, `src/ser/mod.rs:247-259`).
+- `SandStruct` binds a Rust struct to a Sand struct.
+- `SandEnum` binds a Rust enum to a Sand enum.
+- `SandValue` binds a Rust type to an opaque Sand value type. The type implements `ValueType`, and the runtime "encodes and decodes values in JSON as strings" (`src/vm/value.rs:879-880`).
+- `SandObject` binds a Rust type to an opaque Sand reference type, such as `fs.File` or `net.Conn`.
 
-For example, a host module stores a dense matrix as a native object for speed, and encodes it as a struct:
+`bind` reads the binding of the type from `T::binding()` and declares the type to the checker. The checker builds the type definition from that declaration (`src/check/mod.rs:1684-1720`).
+
+#### Opt-in
+
+A native type implements `Encode` or `Decode` only if its derive attribute declares the trait. The two traits are separate:
+
+- `#[sand(encode, decode)]` derives both traits.
+- `#[sand(encode = "manual")]` declares `Encode` and omits the derived implementation. The author implements the Rust trait `sandlang::native::Encode` by hand. `decode = "manual"` works the same way for `Decode`.
+
+A `SandObject` type supports only the manual form, because the macro cannot see the structure of an opaque object.
+
+On `main`, a bound struct, enum, or value type gets Sand `Encode` automatically from the checker (`src/check/derive.rs:196-199`). In this design, it gets the trait only from its attribute. The standard library adds the attribute to each data type that keeps its codec.
+
+A manual declaration needs the attribute because `bind` is a generic function. Generic code in stable Rust cannot ask whether `T: Encode` holds. Specialization, the feature that would allow it, is unstable (https://github.com/rust-lang/rust/issues/31844). The codebase already uses this pattern for conversions: `#[sand(manual_conversion)]` omits `FromVmValue` and `IntoVmValue` so that the author writes them (`crates/sandlang-macros/src/lib.rs:9`), and `json::Json` uses it (`src/stdlib/json.rs:36`). For a manual declaration, the macro adds a compile-time assertion that the Rust implementation exists.
+
+#### The Rust traits
+
+The traits have this form. The names are illustrative:
 
 ```rust
-module.source("impl Encode for Matrix { native fn encode(self, encoder: Encoder) -> Result<()> }");
-module.function("Matrix.encode", |vm: &mut Vm, matrix: VmVal<Matrix>, encoder: VmVal<Encoder>| -> Result<(), HostError> {
-    let m = matrix.get(&vm.heap)?;
-    let values = m.values.iter().map(|&x| Value::Float(x)).collect();
-    let fields = [("rows", Value::Int(m.rows)), ("cols", Value::Int(m.cols)), ("values", Value::List(values))];
-    let value = Value::Struct(StructValue::new("linalg.Matrix", fields));
-    encoder.sink(vm)?.write_value(&value)
-});
+pub trait Encode {
+    fn encode(&self, sink: &mut dyn EncodeSink) -> Result<(), HostError<Fail>>;
+}
+
+pub trait Decode: Sized {
+    fn decode(source: &mut dyn DecodeSource) -> Result<Self, HostError<Fail>>;
+}
 ```
 
-The method names in this example are illustrative. The handles add two conveniences, built on the interfaces:
+`EncodeSink` and `DecodeSource` give the [encode sink interface](#encode-sink-interface) and the [decode source interface](#decode-source-interface) as Rust traits. A serde `Serialize` implementation calls its `Serializer` in the same way (`serde_core` 1.0.229, `src/ser/mod.rs:247-259`). The traits take a trait object, so each native type needs one Rust function for each trait, not one for each sink. Only a manual implementation pays for the dynamic dispatch.
 
-- `write_value` writes a host `Value`. A host can then encode a Rust type through the Rust trait `value::Encode` (`src/value.rs:243-275`).
-- `read_value` reads the next value as a host `Value`, with the "next kind" request.
+`native::Encode` replaces the Rust trait `value::Encode` (`src/value.rs:243-275`). A helper converts a Rust value to a `Value` by running its `Encode` implementation into the `Value` sink. serde_json's `to_value` is also a function over `Serialize` (`serde_json` 1.0.154, `src/value/mod.rs:995-998`).
 
-The rules for native bodies are the rules for Sand bodies. A method writes or reads exactly one value. The same run-time checks apply, and an error from the Rust function becomes the `Err` result of the method. A native body is synchronous, so it cannot run a callback. It therefore writes and reads only data that Rust holds. To encode or decode a Sand value that can have a custom implementation, a method uses a Sand body and calls `encoder.encode(value)` or `decoder.decode()`.
+For example, a host type encodes an amount of money as integer cents instead of its text form:
 
-`Json` uses this interface like any other native type, so the `json` module has no private codec path:
+```rust
+/// An amount of money in cents, such as `12.50`.
+#[derive(Clone, PartialEq, Eq, Hash, sandlang::SandValue)]
+#[sand(module = "bank", encode = "manual", decode = "manual")]
+pub struct Money(u64);
 
-- `Json.encode` walks the `Json` tree on the heap and calls the sink methods: unit for `Null`, a list for `Arr`, a map with `str` keys for `Obj`, and each scalar as itself.
-- `Json.decode` calls the "next kind" request, and then the matching typed read, for each value.
+impl sandlang::native::Encode for Money {
+    fn encode(&self, sink: &mut dyn EncodeSink) -> Result<(), HostError<Fail>> {
+        let cents = i64::try_from(self.0).map_err(|_| HostError::new("invalid", "amount too large"))?;
+        sink.write_int(cents)
+    }
+}
 
-Neither method builds an intermediate tree.
+impl sandlang::native::Decode for Money {
+    fn decode(source: &mut dyn DecodeSource) -> Result<Money, HostError<Fail>> {
+        let cents = source.read_int()?;
+        u64::try_from(cents).map(Money).map_err(|_| HostError::new("parse", "negative amount"))
+    }
+}
+```
+
+#### How the walkers run a native implementation
+
+The binding records, for each declared trait, whether the implementation is derived or manual.
+
+- **Derived.** The checker creates a structural implementation, as for a type that Sand source declares. A struct or an enum gets the structure of its fields, and a value type gets its text form. The walker walks the heap value, and no Rust implementation runs. The macro also generates a derived Rust implementation, for host code such as the conversion to `Value`. The macro generates both from the same field list, and a test compares their output. `main` has the same rule for `value::Encode`: a derived `encode` "returns the same `Value` that [`Vm::to_value`] copies from the VM" (`src/value.rs:250-251`).
+- **Manual.** The macro generates a wrapper function for each manual trait and stores it in the binding. The method of the Sand implementation is that wrapper. If the walker reaches a part whose method is such a wrapper, the walker calls the wrapper directly in the same Rust walk, with the current sink or source. It makes no callback, and no Sand code runs.
+  - The `Encode` wrapper of a `SandObject` type borrows `&T` from the heap (`VmVal::get`, `src/native/mod.rs:571`). The wrapper of another native type converts the heap value to `T` with `FromVmValue`. Each wrapper then calls `T::encode`.
+  - The `Decode` wrapper calls `T::decode` and stores the result with `IntoVmValue`.
+
+A manual implementation follows the rules of a Sand implementation. It writes or reads exactly one value, and its error becomes the decode or encode error. [Open question 4](#open-questions) asks whether a native type with type parameters can have a manual implementation.
 
 ### Decoding a struct that declares `init`
 
@@ -485,16 +530,11 @@ With methods, `Encode` and `Decode` become subject to two existing checker limit
 - **`json.encode`.** `pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>`. The encode walker writes the value to the JSON sink. On `main`, `json.encode` returns `str` (`src/stdlib/json.sand:128`). The new return type changes each caller. In the standard library, `http` calls `json.encode(value).bytes()` (`src/stdlib/http.sand:159`). That call becomes `json.encode(value)?.bytes()`. `json.encode` returns an error for a non-finite float and for a map key without a text form.
 - **`json.decode`.** `pub native fn decode<T: Decode>(text: str) -> Result<T>`. The decode walker reads the text from the JSON source. The private `decode_raw` function, the `Decoded` enum, and the loop that runs computed defaults after the decode (`src/stdlib/json.sand:144-158`) go away.
 - **`json.parse`.** `json.parse` decodes the text into a `Json` value with the same walker and source.
-- **`Json`.** The `json` module implements `Encode` and `Decode` for `Json` with native methods:
+- **`Json`.** `Json` is a native type with manual implementations: `#[sand(module = "json", manual_conversion, encode = "manual", decode = "manual")]`. Its Rust `encode` writes the data model form: unit for `Null`, a list for `Arr`, a map with `str` keys for `Obj`, and each scalar as itself. Its Rust `decode` calls the "next kind" request, and then the matching typed read, for each value. On `main`, the JSON encoder and the typed decoder special-case `Json` by variant ID (`src/stdlib/json.rs:1100-1103`, `:1556-1558`). This design removes those special cases. serde_json takes the same approach: `serde_json::Value` implements `Serialize` and `Deserialize` (`serde_json` 1.0.154, `src/value/ser.rs:11`, `src/value/de.rs:22`).
 
-  ```sand
-  impl Encode for Json { native fn encode(self, encoder: Encoder) -> Result<()> }
-  impl Decode for Json { native fn decode(decoder: Decoder) -> Result<Json> }
-  ```
+  This form has a cost. The `Encode` wrapper converts the heap tree to a Rust `Json` tree with `FromVmValue` before it calls `encode`. The `Decode` wrapper builds a Rust `Json` tree and then converts it to the heap with `IntoVmValue`. On `main`, `json.encode` writes a `Json` value directly from the heap. The cost of the copy is unmeasured.
 
-  These methods use the public interface for native implementations. See [Native implementations of `Encode` and `Decode`](#native-implementations-of-encode-and-decode). On `main`, the JSON encoder and the typed decoder special-case `Json` by variant ID (`src/stdlib/json.rs:1100-1103`, `:1556-1558`). This design removes those special cases. serde_json takes the same approach: `serde_json::Value` implements `Serialize` and `Deserialize` (`serde_json` 1.0.154, `src/value/ser.rs:11`, `src/value/de.rs:22`).
-
-  This form changes one behavior. On `main`, `Vm::to_value` copies a `Json` value as a `Value::Variant` of `json.Json`. With the `Value` sink, a `Json` value becomes its JSON data model form, such as `Value::Int(3)` for `Json.Int(3)`.
+  This form also changes one behavior. On `main`, `Vm::to_value` copies a `Json` value as a `Value::Variant` of `json.Json`. With the `Value` sink, a `Json` value becomes its JSON data model form, such as `Value::Int(3)` for `Json.Int(3)`.
 
 - **`json.to_json`.** `to_json` writes the value to a `Json` sink, which builds the `Json` tree directly. The JSON sink and the `Json` sink share a single layer of JSON rules. `to_json` keeps the return type `Json`. If a conversion fails, `to_json` stops the run, so the `json!` macro keeps its form. Under the shared rules, a non-finite float is a conversion failure. On `main`, `to_json` keeps it as `Json.Float(NaN)`.
 - **Conversion to `Value`.** A conversion that applies custom `Encode` implementations needs an `Encode` dictionary. It can also reach a callback, so it must be able to wait. The engine therefore converts through one routine that starts synchronously and waits only if it reaches a custom implementation. Async native functions call it through a new method, `NativeContext::to_value(value, dictionary)`. [Open question 1](#open-questions) asks what happens to values whose types do not implement `Encode`, and to the synchronous `Vm::to_value`.
@@ -534,7 +574,8 @@ Changeset 16 adds only `Serialize` and `Deserialize` for `Value`. A `Value` that
   - Native default trait methods and their registration.
   - The computation of structural implementations through trait resolution.
   - `TraitDict<N>`, `NativeContext::to_value`, and the release of roots during a native call.
-  - The `Encoder` and `Decoder` prelude types, and their Rust handles for native method bodies.
+  - The `Encoder` and `Decoder` prelude types.
+  - The Rust traits `native::Encode` and `native::Decode`, the Rust sink and source traits, the codec attributes of the derive macros, and the codec entries in bindings. The macros and bindings exist on `main`.
 
 ## Rejected alternatives
 
@@ -592,7 +633,8 @@ Each item below names an existing component and what this design takes from it.
 
 - The encode sink interface. Changeset 14 rejected an earlier sink interface, so `main` has none.
 - The `Value` source. On `main`, no code converts a `Value` into a heap value.
-- The `Encoder` and `Decoder` prelude types, and the Rust handles that give native method bodies access to the sink and the source.
+- The `Encoder` and `Decoder` prelude types.
+- The Rust traits `native::Encode` and `native::Decode`, the Rust sink and source traits, and the codec entries in bindings.
 - Native default methods in traits, and their registration.
 - The computation of structural implementations through trait resolution.
 - The shape table and part templates.
@@ -604,7 +646,9 @@ Each item below names an existing component and what this design takes from it.
 - **Existing JSON behavior.** We keep the existing output in `tests/spec/std_json.test`, except for the changes that this document lists: the callback order and the `Value` form of `Json`. We will add each planned error-message change to this document.
 - **New spec tests:**
   - Custom `Encode` and `Decode` implementations on structs and enums.
-  - A host module with native `Encode` and `Decode` methods for an opaque object type, including a native body that writes a host `Value` and one that reads with the "next kind" request.
+  - Native types with `#[sand(encode, decode)]`, with manual implementations, and without the attribute. A type without the attribute must not implement either trait.
+  - A manual `Encode` implementation that the walker calls inside a list, to show that it runs without a callback.
+  - A test that compares the derived Rust implementation of a native type with the walker output for the same value.
   - Generic custom implementations, such as `impl<T: Encode> Encode for Box<T>`.
   - A custom implementation with a bound on another trait, such as `impl<T: Describe> Encode for Box<T>`, inside a struct with a structural implementation.
   - A concrete custom implementation, such as `impl Encode for W<int>`, and the error for `W<str>: Encode`.
@@ -635,7 +679,7 @@ Each item below names an existing component and what this design takes from it.
 
 The owner made these decisions during review.
 
-- **Custom `encode` methods write through an `Encoder`.** The signature is `fn encode(self, encoder: Encoder) -> Result<()>`. A native implementation, such as `Json.encode`, can then write a whole tree in a single call. The engine checks at run time that a method writes exactly one value.
+- **Custom `encode` methods write through an `Encoder`.** The signature is `fn encode(self, encoder: Encoder) -> Result<()>`. The engine checks at run time that a method writes exactly one value.
 - **`encode` returns `Result<()>`.** A custom method can report an error to the caller of `json.encode`. serde returns `Result<S::Ok, S::Error>` (`serde_core` 1.0.229, `src/ser/mod.rs:149-150`), and Swift's `encode(to:)` throws (`Codable.swift:24-25`). `json.encode` returns `Result<str>`.
 - **`json.encode` returns an error for a non-finite float**, and for a map key without a text form. The error has kind `"invalid"`. The output therefore conforms to RFC 8259, which does not allow `NaN` or infinity. Go's `encoding/json` also returns an error (`encoding/json/encode.go:80`). serde_json writes `null`, and its maintainer calls an error "better behavior" (https://github.com/serde-rs/json/issues/985). Nesting beyond 512 levels stays a limit that stops the run.
 - **`json.to_json` uses a dedicated `Json` sink.** The sink builds the `Json` tree directly. A single layer of JSON rules serves both the JSON sink and the `Json` sink.
@@ -647,6 +691,8 @@ The owner made these decisions during review.
 - **The `Value` source accepts only exact forms.** The JSON rules stay in the JSON source, and a host with JSON data passes JSON text. serde_json reads bytes from a JSON string as UTF-8 text, not Base64 (`serde_json` 1.0.154, `src/value/de.rs:414-420`), so a JSON form of `bytes` is not universal.
 - **A duplicate struct field or `init` parameter is a decode error.** The decode returns an error of kind `"parse"`, and the run continues. serde's derive also reports `duplicate_field` (`serde_derive` 1.0.229, `src/de/struct_.rs:269`). A duplicate map key keeps its last value.
 - **Decoding ignores the visibility of `init`,** as decoding on `main` ignores the visibility of fields.
+- **Native types opt in to each trait.** `#[sand(encode, decode)]` derives both. `#[sand(encode = "manual")]` or `decode = "manual"` declares a trait that the author implements in Rust, with no Sand code in the path.
+- **`native::Encode` replaces `value::Encode`.** A single Rust trait serves both the walkers and the conversion to `Value`.
 
 ## Open questions
 
@@ -696,5 +742,14 @@ A struct that declares `init` derives `Decode` through `init`. `init` inherits t
 
 - **Option A: the structural `Decode` implementation also requires the bounds of `init`.** Its shape holds part templates for their dictionaries, and the walker passes them to `init`. Parameter default helpers already take the dictionaries of their function (`src/check/mod.rs:2768`).
 - **Option B: a struct whose `init` needs dictionaries does not derive `Decode`.**
+
+**Recommendation:** Option A.
+
+### 4. Can a native type with type parameters have a manual implementation?
+
+`SandStruct` and `SandEnum` support type parameters (`crates/sandlang-macros/src/lib.rs`, "Rust type parameters define Sand type parameters"). A Rust implementation of `encode` for such a type cannot encode a part of type `T` by itself. The Sand type of `T` is erased, so the part needs its dictionary, and Rust code has no access to it.
+
+- **Option A: only native types without type parameters can have a manual implementation.** A generic native type can still derive its implementation.
+- **Option B: give manual implementations a way to encode and decode a part with its dictionary.** The sink and source interfaces gain a request that runs the walker on a part. That part can then reach a custom Sand implementation, so the request must be able to wait for a callback.
 
 **Recommendation:** Option A.
