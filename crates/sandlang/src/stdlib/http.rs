@@ -602,7 +602,7 @@ fn send(
     headers: VmVal<Vec<(String, String)>>,
     body: VmVal<Vec<u8>>,
     timeout: SignedDuration,
-) -> Suspended<NewResponse> {
+) -> Suspended<NewResponseStream> {
     let mut req = prepare_request(vm, method, url, headers)?;
     // The request is held outside the heap while it is sent.
     let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
@@ -676,7 +676,7 @@ fn send(
         } else {
             BodyReader::new(Box::new(framed), max_body, None)
         };
-        Ok(NewResponse { url: url_text, status, headers, reader })
+        Ok(NewResponseStream { url: url_text, status, headers, reader })
     })
 }
 
@@ -782,7 +782,7 @@ fn upload(
     })
 }
 
-/// Owned `http.Upload` parts returned from an async connect before heap allocation.
+/// Owned fields of an `http.Upload` before `IntoVmValue` allocates its VM objects.
 struct NewUpload {
     url: String,
     conn: net::Conn,
@@ -856,7 +856,7 @@ fn write_body(vm: &mut Vm, conn: VmVal<net::Conn>, body: VmVal<Outgoing>, data: 
 
 /// `read_response(upload)`: reads the response to an upload, whose body is
 /// read from the upload's connection.
-fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<NewResponse> {
+fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<NewResponseStream> {
     let Upload { url, conn, head_only, timeout, .. } = upload;
     let h = net::conn_handle(vm, conn)?;
     let timeout = stream::timeout(timeout);
@@ -875,7 +875,7 @@ fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<NewResponse> {
         WaitKind::Io,
         h.closed.clone().guard(async move {
             let head = match crate::platform::timeout(&*clock, timeout, read).await {
-                Some(r) => r?,
+                Some(head_result) => head_result?,
                 None => return Err(IoFailure::new("timeout", "timed out waiting for the response")),
             };
             let reader = if head.framing == Framing::Done {
@@ -883,7 +883,7 @@ fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<NewResponse> {
             } else {
                 BodyReader::new(Box::new(Framed::on_conn(&h, head.framing, timeout, body_clock, false)), max_body, None)
             };
-            Ok(NewResponse { url, status: head.status, headers: head.headers, reader })
+            Ok(NewResponseStream { url, status: head.status, headers: head.headers, reader })
         }),
     )
 }

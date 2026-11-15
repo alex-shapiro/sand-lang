@@ -460,15 +460,21 @@ impl Config {
         self.gc_stress = on;
         self
     }
-    /// Enables or disables forced limit-check failures in tests.
+    /// Configures forced limit-check failures to catch early side effects and
+    /// missing retries in tests.
     ///
     /// If `on` is `true`, the engine fails the first memory or resource check
-    /// in each `&mut Vm` call, each poll of a [`Later`](crate::native::func::Later)
-    /// future, and each retryable instruction. Retryable instructions,
-    /// `&mut Vm` calls, and [`NativeContext::step`](crate::native::context::NativeContext::step)
-    /// collect garbage and retry after that failure. Enable this mode to catch
-    /// side effects before limit checks and unretried checks in
-    /// [`Later`](crate::native::func::Later) futures.
+    /// in each:
+    ///
+    /// - `&mut Vm` call
+    /// - poll of a [`Later`](crate::native::func::Later) future
+    /// - retryable instruction
+    ///
+    /// After that forced failure, the engine collects garbage. It then retries
+    /// retryable instructions, `&mut Vm` calls, and
+    /// [`NativeContext::step`](crate::native::context::NativeContext::step)
+    /// closures. Direct checks in a [`Later`](crate::native::func::Later)
+    /// future outside `step` fail the run.
     pub fn retry_stress(mut self, on: bool) -> Self {
         self.retry_stress = on;
         self
@@ -534,13 +540,13 @@ struct InterruptTargets {
     cleanup_len: usize,
 }
 
-/// Weak references to a call's interrupt flag and host-wake state.
+/// Active or recent call registered with an [`InterruptHandle`].
 struct InterruptTarget {
     flag: Weak<AtomicBool>,
     wake_state: Weak<HostWakeState>,
 }
 
-/// Interrupt flag and host-wake state for an active engine or session call.
+/// Interrupt state for an active engine or session call.
 #[derive(Clone)]
 pub(crate) struct CallInterrupt {
     pub flag: Arc<AtomicBool>,

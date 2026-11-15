@@ -285,7 +285,7 @@ fn accept_request(vm: &mut Vm, server: VmVal<Server>) -> Suspended<AcceptedReque
     stream::suspend(WaitKind::Io, closed.guard(accepted))
 }
 
-/// Owned `http.Request` parts read by `Server.accept` before heap allocation.
+/// Owned fields of an `http.Request` before `IntoVmValue` allocates its VM objects.
 struct AcceptedRequest {
     method: String,
     path: String,
@@ -492,18 +492,18 @@ pub(super) fn end_response(vm: &mut Vm, c: VmVal<net::Conn>, data: Vec<u8>, res:
     let conn = net::detach(vm, c)?;
     let mem = vm.heap.io_memory.clone();
     stream::suspend(WaitKind::Io, async move {
-        let written = async {
-            let mut w = conn.writer.lock().await;
-            w.write_all(&data).await?;
-            w.flush().await
+        let write_future = async {
+            let mut writer = conn.writer.lock().await;
+            writer.write_all(&data).await?;
+            writer.flush().await
         };
-        let r = written.await;
+        let write_result = write_future.await;
         drop(res);
         match after.server.upgrade() {
-            Some(server) if after.persists && r.is_ok() => server.hand_back(conn, mem),
+            Some(server) if after.persists && write_result.is_ok() => server.hand_back(conn, mem),
             _ => conn.close(),
         }
-        Ok(r?)
+        Ok(write_result?)
     })
 }
 

@@ -2185,23 +2185,25 @@ operations:
 - `root(value)` keeps a heap value alive until the native call returns. It
   returns a `RootedValue` handle. `value(rooted)` reads that `VmValue` from the
   call's root table.
-- `step(f)` runs `f` with `&mut Vm` and retries on limit checks and prompts.
-  After a memory or resource limit error, the engine collects garbage and runs
-  `f` again. After a permission prompt, the engine asks the user and runs `f`
-  again.
+- `step(f)` runs `f` with `&mut Vm` under automatic retry for limit errors and
+  permission requests. After a memory or resource limit error, the engine
+  collects garbage before running `f` again. After a permission request, the
+  engine prompts the user before running `f` again.
 - `call(callee, args)` calls a Sand function with at most 255 arguments on the
   calling task. While `callee` waits, the scheduler can run other tasks. After
   the engine starts `callee`, it runs `callee` to completion before polling the
-  native future again. A timer or `select!` branch inside the native future
-  waits until `callee` returns.
+  native future again. The engine polls timers or other `select!` branches
+  inside the native future only after `callee` returns.
 
-Each callback uses two frames toward `max_call_depth`. If a task is canceled
+Each callback uses two frames toward `max_call_depth`. On task cancellation
 during a callback, the engine runs the callee's `defer` blocks, drops the
-native future, and runs the caller's `defer` blocks. The engine keeps rooted
-values and callback results alive until the native call returns. The engine
-charges only the top-level future and its root table against `max_memory`.
-Nested boxed futures allocate memory outside `max_memory`. Bound the recursion
-depth of any async native function.
+native future, and runs the caller's `defer` blocks.
+
+Bound the recursion depth of any async native function. The engine charges only
+the top-level future and its root table against `max_memory`. A recursive async
+native function allocates nested boxed futures outside that memory count. The
+engine keeps rooted values and callback results alive until the native call
+returns.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
@@ -2275,16 +2277,16 @@ returns a Sand `Result` or aborts the run on failure:
 - `Result<T, Ctl>` maps to the Sand return type `T`. A `Ctl` is a `Fail` or a
   request to the scheduler, such as a permission prompt.
 - `Result<Later<T, E>, E>` maps to the same Sand return type as `Result<T, E>`.
-  Returning `Ok(Later::new(wait_kind, build))` suspends the calling task on a
-  future. `Later::ready(result)` returns immediately.
+  Return `Ok(Later::new(wait_kind, build))` to suspend the calling task on a
+  future. Return `Ok(Later::ready(result))` to finish immediately.
   `Later::new(wait_kind, build)` sets the `WaitKind` of host I/O waits. Pass
   `WaitKind::User` if the task waits for user input. The engine excludes
   `WaitKind::User` wait time from `max_wall_time` (§16.2). An async native
   function uses `WaitKind::Io`. If `E` is `Ctl` or `Fail`, the future returns
   `Result<T, Fail>`. If `E` is `HostError`, the future returns
-  `Result<T, HostError<Fail>>`. If the future returns a memory-limit `Fail`, the
-  engine ends the run. Call `NativeContext::step` to collect garbage and retry
-  before failing.
+  `Result<T, HostError<Fail>>`. If the future returns a memory-limit `Fail`,
+  the engine ends the run. Call `NativeContext::step` to collect garbage before
+  retrying a limit check.
 - A future makes scheduler requests only through its `NativeContext`. Its
   output is `T`, `Result<T, Fail>`, or `Result<T, HostError<Fail>>`, for any `T`
   that implements `IntoVmValue`.
@@ -2294,11 +2296,12 @@ To check a sandbox capability inside a function that takes `&mut Vm`, call
 `"permission_denied"` if the policy denies the request. A function that takes
 `&mut Vm` must check capabilities and limits before any side effect. The engine
 runs the function again from the start after a permission prompt or a garbage
-collection during a memory or resource check. `Config::retry_stress` fails the
-first memory or resource check in each `&mut Vm` call and in each poll of a
-`Later` future. After a native function returns, the engine converts the return
-value before checking `max_memory`. If heap usage exceeds `max_memory`, the
-engine collects garbage before enforcing the limit.
+collection during a memory or resource check. With `Config::retry_stress`
+enabled, the engine fails the first memory or resource check in each `&mut Vm`
+call and in each poll of a `Later` future. After a native function or future
+finishes, the engine converts the return value before checking `max_memory`. If
+heap usage exceeds `max_memory`, the engine collects garbage before enforcing
+the limit.
 
 | Rust type                         | Sand type                                             |
 | --------------------------------- | ----------------------------------------------------- |

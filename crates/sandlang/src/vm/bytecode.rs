@@ -1127,7 +1127,7 @@ impl Op {
 /// Prototype index of the callback trampoline for async native calls.
 pub const CALLBACK_PROTO: u32 = 0;
 
-/// Maximum argument count for a callback started from an async native call.
+/// Maximum argument count for a Sand callback in an async native call.
 pub const MAX_CALLBACK_ARGS: usize = u8::MAX as usize;
 
 /// Prototype name for helper functions that evaluate field defaults and populate sets during `json.decode` (omitted from stack traces).

@@ -24,8 +24,8 @@ This design differs from piccolo in three ways:
 Three VM rules prevent a native Rust function from calling a Sand function on `main`:
 
 - **The VM can suspend any Sand function.** Under SPEC §11, every Sand function uses synchronous call syntax. Any Sand function can wait on I/O. To suspend a task, the interpreter returns to the scheduler. Active Rust frames on the call stack block that return.
-- **The garbage collector ignores Rust stack handles.** The collector runs only at safe points in the interpreter loop. Only VM registers and VM structures belong to its root set.
-- **Memory-limit retries restart native functions.** Under SPEC §16.3, if a native function reaches `max_memory`, the VM collects garbage. It then runs the native function again from the start.
+- **The garbage collector ignores Rust stack handles.** The collector runs only at safe points in the interpreter loop. The collector traces only VM registers and VM structures.
+- **The VM restarts native functions on memory-limit retries.** Under SPEC §16.3, if a native function reaches `max_memory`, the VM collects garbage. It then runs the native function again from the start.
 
 These three rules prevent a single fast codec. On `main`, a codec must either run in Sand or duplicate derived walks in Rust and Sand.
 
@@ -38,13 +38,13 @@ The callback study tested two designs for calling Sand from Rust:
 
 Authors on `origin/encode-decode-traits` built and measured a continuation-based codec walker in `experiments/codec-traits/rejected-designs.md`. That walker paid three costs:
 
-- **Each callback unwinds the Rust stack frame.** To run a Sand method, the walker must return from Rust to the VM. Before returning, the walker copies its local state to the heap. After the VM finishes the Sand method, the continuation rebuilds the walk from that heap state. Handling a custom field added about 270 ns to stop the walk, call Sand, and resume. The VM call itself took about 50 ns of that 270 ns.
-- **Heap state slows down derived types.** A recursive Rust walker stores its position across nested Rust stack frames. Returning to the VM unwinds those frames. The continuation walker therefore kept an explicit frame stack on the heap. Storing walk frames on the heap slowed derived decoding by 40% to 45%.
-- **Retries require per-step rollback state.** After garbage collection, the VM repeats only the current continuation step. To return to the start of a step, the continuation walker copied its state and logged format changes at every step.
+- **Each callback returns to the VM.** To run a Sand method, the walker must return from Rust to the VM. Before returning, the walker copies its local state to the heap. After the VM finishes the Sand method, the continuation rebuilds the walk from that heap state. For each custom field, the walker spent about 270 ns to stop the walk, call Sand, and resume. The VM call itself took about 50 ns of that 270 ns.
+- **Heap frame stacks slow derived walks.** A recursive Rust walker keeps its position in nested Rust stack frames. A return to the VM unwinds those frames. The continuation walker therefore kept an explicit frame stack on the heap. With walk frames on the heap, the walker decoded derived types 40% to 45% slower.
+- **Retries require per-step rollback state.** After garbage collection, the VM repeats only the current continuation step. Before each step, the continuation walker copied its state. During the step, it logged format changes for rollback.
 
 ## Design goals
 
-Authors write callback-capable native functions as `async` Rust functions. Inside the function, `context.call(sand_fn, args).await` runs `sand_fn` on the current task and returns its result. While the VM runs `sand_fn`, it maintains four properties:
+Authors write callback-capable native functions as `async` Rust functions. Inside the function, the author awaits `context.call(sand_fn, args)` to run `sand_fn` on the current task. That call returns `sand_fn`'s rooted result. While the VM runs `sand_fn`, it maintains four properties:
 
 - The scheduler can suspend `sand_fn` on async I/O.
 - The garbage collector traces every value rooted by the native function.
@@ -62,11 +62,11 @@ SPEC §16.3 already defines async native functions for host I/O:
 
 On `main`, an async native future waits only on host I/O. Only its finisher closure accesses the VM heap.
 
-Keeping async futures on the VM thread still leaves three problems:
+Even on the VM thread, async futures must satisfy three constraints:
 
-- **Garbage collection invalidates unrooted handles.** While a future awaits a Sand call, the Sand code can trigger garbage collection. An untraced handle in the future can then point to a freed or reused heap slot. In safe Rust, reading that stale handle returns an unrelated heap object. The callback study reproduced this bug.
+- **Garbage collection invalidates unrooted handles.** While a future awaits a Sand call, the Sand code can trigger garbage collection. An untraced handle in the future can then point to a freed or reused heap slot. In safe Rust, a read through that stale handle returns an unrelated heap object. The callback study reproduced this bug.
 - **The interpreter needs `&mut Vm` during a Sand call.** The interpreter takes `&mut Vm` to run `sand_fn`. A future must release `&mut Vm` before each `await` point.
-- **`Engine` requires `Send`.** Under SPEC §16, `Engine` implements `Send`. Storing a `!Send` future inside the VM would make both `Vm` and `Engine` `!Send`. Restoring `Send` would require `unsafe impl Send`. Sand's 100% safe-Rust rule forbids `unsafe` code.
+- **`Engine` requires `Send`.** Under SPEC §16, `Engine` implements `Send`. A `!Send` future inside `Vm` makes both `Vm` and `Engine` `!Send`. Only `unsafe impl Send` can restore `Send` on those types. Sand's 100% safe-Rust rule forbids `unsafe` code.
 
 ## Part 1: Unify async native functions under a single future type
 
@@ -115,7 +115,7 @@ This layout also supports nested callbacks. If a custom `encode` method calls th
 
 ### Design choice: lend owned state
 
-This design wraps `Vm` in a shared owner. The scheduler lends that owner to `'static` futures in safe Rust. Refactoring `Vm` ownership is the largest structural cost of the proposal. On `main`, the interpreter borrows the entire `Vm` across each execution slice.
+This design wraps `Vm` in a shared owner. The scheduler lends that owner to `'static` futures in safe Rust. This `Vm` ownership change is the largest refactor in the proposal. On `main`, the interpreter borrows the entire `Vm` across each execution slice.
 
 Every value captured by a `'static` future must satisfy `'static`. Two mechanisms can lend VM access during a poll:
 
@@ -133,11 +133,11 @@ An `Arc<Mutex<Vm>>` transfers VM access in safe Rust:
 
 The engine polls the future on the scheduler thread. `context.with_vm` therefore acquires the uncontended lock immediately.
 
-Rust's type system prevents keeping VM access across an `await` point. `MutexGuard` is `!Send`. Keeping a guard across an `await` point makes the future `!Send`. The VM requires `Send` futures. The Rust compiler therefore rejects any future that keeps a `MutexGuard` across a wait. SPEC §16.3 uses the same `!Send` check for VM handles today.
+Rust's type system rejects any future that holds VM access across an `await` point. `MutexGuard` is `!Send`. A future that holds a guard across an `await` point is therefore `!Send`. The VM requires `Send` futures. The Rust compiler therefore rejects any future that keeps a `MutexGuard` across a wait. SPEC §16.3 uses the same `!Send` check for VM handles today.
 
 ## Part 3: Root VM values across `await` points
 
-During a single `Future::poll` call, the engine runs only Rust code for that future. Across an `await` point, Sand code can trigger garbage collection and invalidate unrooted handles.
+During a single `Future::poll` call, the engine runs only Rust code for that future. Across an `await` point, Sand code can trigger garbage collection. Collection invalidates unrooted handles.
 
 Each running future therefore owns a rooted value table:
 
@@ -159,7 +159,7 @@ In a global root table, each native function must remove its own entries explici
 
 ## Part 4: Await memory reservations and host permissions
 
-A Sand callback can perform side effects. Restarting an async native function from the start would repeat those side effects. Async native functions therefore await memory reservations in place:
+A Sand callback can perform side effects. A full restart of an async native function would repeat those side effects. Async native functions therefore await memory reservations in place:
 
 1. Before allocating heap memory, the future calls `context.check_memory(byte_count).await`.
 2. If the heap exceeds `max_memory`, the poll returns `Pending` with a garbage-collection request.
@@ -168,7 +168,7 @@ A Sand callback can perform side effects. Restarting an async native function fr
 
 Async native functions request host permissions in the same way through `context.require(capability).await`.
 
-Collecting garbage in place eliminates the step snapshots and rollback logs from `origin/encode-decode-traits`. Synchronous native functions execute in a single Rust call before returning to the VM. The VM still restarts them from the start on memory limits.
+In-place garbage collection eliminates the step snapshots and rollback logs from `origin/encode-decode-traits`. Synchronous native functions execute in a single Rust call before returning to the VM. The VM still restarts them from the start on memory limits.
 
 ### Design choice: preserve hard memory limits
 
@@ -213,12 +213,12 @@ The walker keeps its position in local variables and recursive calls. The Rust c
 The implementation follows Parts 1 to 4 with seven refinements:
 
 - **`Later::new` builds the future directly.** `Later::new(wait_kind, |mut context| async move { ... })` passes a `NativeContext` to the builder closure. The engine converts the future's output directly into the Sand return value.
-- **The scheduler shares `Vm` through `Arc<Mutex<Vm>>`.** The scheduler unlocks the VM only while polling a native future or awaiting on the host executor. `NativeContext` panics if code calls `with_vm` or polls a VM request outside a poll of that call.
+- **The scheduler shares `Vm` through `Arc<Mutex<Vm>>`.** The scheduler unlocks the VM only while polling a native future or awaiting a host operation. `NativeContext` panics if code calls `with_vm` or polls a VM request outside a poll of that call.
 - **A trampoline prototype runs each callback.** In prototype 0 of every program, the interpreter executes `CallR` followed by `ResumeNative`. Regular Sand functions still return with `Ret`, `RetVariant`, and `RetUnit`.
-- **`NativeContext::step` replaces `check_memory` and `require`.** `context.step(f)` runs `f` under the synchronous `&mut Vm` restart rule. After a memory or resource limit error, the engine collects garbage and runs `f` again. After a permission prompt, the engine asks the user and runs `f` again from the start.
-- **Each context allows a single active request.** `call` and `step` borrow `&mut NativeContext`. If a losing `select!` branch drops a request future, `Drop` clears the pending VM request.
+- **`NativeContext::step` replaces `check_memory` and `require`.** `context.step(f)` runs `f` under the synchronous `&mut Vm` restart rule. After a memory or resource limit error, the engine collects garbage before running `f` again. After a permission request, the engine prompts the user before running `f` again from the start.
+- **Each context allows a single active request.** `call` and `step` borrow `&mut NativeContext`. If the caller drops a request future before the scheduler takes it, `Drop` clears the pending VM request.
 - **Each fiber reuses a single host-event waker.** A drop guard on each waiting call maintains per-kind host-wait counters for the scheduler's idle check.
-- **The scheduler yields after exhausting the Tokio coop budget.** On `main`, 20,000 concurrent sleeps exhausted Tokio's coop budget and caused about 9.2 million polls. Yielding to Tokio cuts that count to 40,000 polls.
+- **The scheduler yields after exhausting the Tokio coop budget.** On `main`, 20,000 concurrent sleeps exhausted Tokio's coop budget. Exhausted coop budgets caused about 9.2 million polls. Explicit yields to Tokio cut that count to 40,000 polls.
 
 ## Measurements
 

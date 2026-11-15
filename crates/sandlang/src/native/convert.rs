@@ -72,11 +72,13 @@ pub trait IntoVmValue: SandType {
 
 /// Error returned by a native function whose Sand return type is `Result<T>`.
 ///
-/// Construct a recoverable script error with [`HostError::new`], or propagate a
-/// [`Fail`], a [`Ctl`], or a `std::io::Error` with `?`.
+/// Call [`HostError::new`] to construct a recoverable script error. Use `?` to
+/// propagate a [`Fail`], a [`Ctl`], or a `std::io::Error`.
 ///
-/// `C` is the control signal that aborts or suspends the call. A
-/// `HostError<Fail>` cannot hold a scheduler request (`Ctl`):
+/// `C` is the control signal that aborts or suspends the call. Synchronous
+/// functions use `HostError<Ctl>`. Futures submit scheduler requests through
+/// [`NativeContext`](super::context::NativeContext) instead of [`Ctl`]. The
+/// compiler therefore rejects [`Ctl`] conversions into `HostError<Fail>`:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::convert::HostError;

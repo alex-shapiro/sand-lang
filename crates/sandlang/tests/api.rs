@@ -4003,7 +4003,7 @@ fn host_errors_are_err_values_and_aborts_end_the_run() {
 }
 
 #[test]
-fn natives_that_cannot_make_scheduler_requests_return_fail() {
+fn native_functions_and_futures_handle_fail_results() {
     use sandlang::native::convert::HostError;
     use sandlang::native::func::Later;
     use sandlang::vm::{Fail, WaitKind};

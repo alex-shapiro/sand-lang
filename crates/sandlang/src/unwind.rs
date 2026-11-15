@@ -6,8 +6,8 @@
 //! [`Session`](crate::session::Session) entry-point methods wrap their futures
 //! in [`CatchUnwind`]. The scheduler wraps each interpreter slice and each
 //! native-future poll in [`catch`]. Per-slice guards keep synchronous native
-//! calls fast. In builds compiled with `panic = "abort"`, the Rust runtime
-//! aborts the process on any panic.
+//! calls fast. Under `panic = "abort"`, the Rust runtime aborts the process on
+//! any panic.
 
 use std::any::Any;
 use std::future::Future;

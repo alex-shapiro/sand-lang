@@ -230,21 +230,21 @@ pub(crate) struct ResponseStream {
     pub url: String,
 }
 
-/// Owned `http.Stream` parts returned from an async HTTP exchange before heap allocation.
-pub(crate) struct NewResponse {
+/// Owned fields of an `http.Stream` before `IntoVmValue` allocates its `Body` object.
+pub(crate) struct NewResponseStream {
     pub url: String,
     pub status: i64,
     pub headers: Vec<(String, String)>,
     pub reader: BodyReader,
 }
 
-impl SandType for NewResponse {
+impl SandType for NewResponseStream {
     fn sand_type() -> Type {
         ResponseStream::sand_type()
     }
 }
 
-impl IntoVmValue for NewResponse {
+impl IntoVmValue for NewResponseStream {
     fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         let body = vm.new_object(Body::new(self.reader))?;
         ResponseStream { status: self.status, headers: self.headers, body, url: self.url }.into_vm_value(vm)
@@ -465,7 +465,7 @@ impl NativeObject for Body {
 /// Read mode for an HTTP body.
 #[derive(Clone, Copy)]
 enum BodyReadMode {
-    Upto(usize),
+    UpTo(usize),
     Line,
     All,
 }
@@ -480,7 +480,7 @@ fn start_body_read(
     let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };
     let mut closed = body.closed.subscribe();
     let mut reservation = match mode {
-        BodyReadMode::Upto(n) => vm.reserve_io(n.min(64 << 10))?,
+        BodyReadMode::UpTo(n) => vm.reserve_io(n.min(64 << 10))?,
         _ => vm.io_reservation(),
     };
     let read_future = async move {
@@ -492,7 +492,7 @@ fn start_body_read(
             let reservation = &mut reservation;
             body_reader
                 .reading(async move |body_reader: &mut BodyReader| match mode {
-                    BodyReadMode::Upto(n) => body_reader.read(n, reservation).await.map(Some),
+                    BodyReadMode::UpTo(n) => body_reader.read(n, reservation).await.map(Some),
                     BodyReadMode::Line => body_reader.read_line(reservation).await,
                     BodyReadMode::All => body_reader.read_all(reservation).await.map(Some),
                 })
@@ -529,7 +529,7 @@ fn body_natives(m: &mut NativeModule) {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_body_bytes(vm, body, BodyReadMode::Upto(to_usize_saturating(max)))
+        read_body_bytes(vm, body, BodyReadMode::UpTo(to_usize_saturating(max)))
     });
     m.function("Body.read_line", |vm: &mut Vm, body: VmVal<Body>| {
         stream::suspend_line(WaitKind::Io, start_body_read(vm, body, BodyReadMode::Line)?, "line is not valid UTF-8")

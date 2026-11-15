@@ -415,7 +415,7 @@ impl<const N: u8> SandType for Reflect<N> {
 /// Uncopied [`VmValue`] with the Sand type of `T`.
 ///
 /// A [`NativeFunction`](super::func::NativeFunction) that takes `&mut Vm` can
-/// accept and return `VmVal<T>` to pass heap values by reference.
+/// accept and return `VmVal<T>` to pass heap handles directly.
 ///
 /// A `VmVal` is valid only during the `&mut Vm` call that received or
 /// allocated it. Garbage collection during a wait can free an unrooted heap

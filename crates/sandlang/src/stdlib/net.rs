@@ -67,10 +67,11 @@ pub(crate) trait Resource: crate::native::ObjectType + IntoVmValue {
     fn attach(&mut self, slot: ResourceSlot);
 }
 
-/// Suspends the calling task on `future` and attaches `slot` to the opened resource.
+/// Suspends the calling task on `future` to open a resource for `slot`.
 ///
-/// Pass `slot` from before the wait so an in-flight socket counts toward
-/// `max_open_resources`.
+/// Reserve `slot` before the wait. The engine then counts the in-flight socket
+/// toward `max_open_resources`. After `future` succeeds, `suspend_resource`
+/// attaches `slot` to the resource.
 fn suspend_resource<T: Resource>(slot: ResourceSlot, future: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> Suspended<T> {
     suspend(WaitKind::Io, async move {
         let mut resource = future.await?;
@@ -521,7 +522,7 @@ fn conn_read(vm: &mut Vm, c: VmVal<Conn>, max: i64) -> Suspended<Vec<u8>> {
 
 fn conn_read_line(vm: &mut Vm, conn: VmVal<Conn>) -> Suspended<Option<String>> {
     let handle = conn_handle(vm, conn)?;
-    // Reserve bytes dynamically up to `max_memory` as the line arrives.
+    // Line length is unknown upfront. Reserve I/O bytes incrementally up to `max_memory`.
     let mut reservation = vm.io_reservation();
     let line_future = handle.closed.guard(async move {
         let line = read_line(&mut *handle.reader.lock().await, &mut reservation).await?;

@@ -31,8 +31,8 @@ impl Signature {
 
 /// Rust function that [`NativeModule::function`](super::NativeModule::function) registers.
 ///
-/// [`NativeModule::function`](super::NativeModule::function) accepts three
-/// kinds of Rust function, selected by the function signature:
+/// [`NativeModule::function`](super::NativeModule::function) selects from three
+/// kinds of Rust function based on the signature:
 ///
 /// ```
 /// # use sandlang::native::NativeModule;
@@ -46,23 +46,23 @@ impl Signature {
 /// module.function("fetch", |url: String| async move { url.len() as i64 });
 /// ```
 ///
-/// - **Synchronous.** Each parameter implements [`NativeParam`] and can borrow
-///   `&str`, `&[u8]`, or `&T` from the VM heap. The return type implements
-///   [`NativeReturn<Ctl>`].
+/// - **Synchronous.** Each parameter implements [`NativeParam`]. Parameters can
+///   borrow `&str`, `&[u8]`, or `&T` from the VM heap. The return type
+///   implements [`NativeReturn<Ctl>`].
 /// - **Synchronous with `&mut Vm` first.** Each parameter after `&mut Vm` is an
 ///   owned [`NativeParam`] type, such as `String` or
 ///   [`VmVal`](super::ty::VmVal). The return type implements
 ///   [`NativeReturn<Ctl>`]. Check permissions and limits before any side
 ///   effect. The engine runs the function again from the start after a
 ///   permission prompt or a garbage collection during a memory or resource
-///   check. Return a [`Later`] to suspend the calling task on a future that
-///   can await host I/O or call Sand functions.
+///   check. Return a [`Later`] to suspend the calling task on a future. That
+///   future can await host I/O and call Sand functions.
 /// - **Asynchronous.** A function that returns a future suspends only the
 ///   calling Sand task. Each parameter is an owned `Send` [`NativeParam`] type.
-///   The future is `Send`. The future output is `Send` and implements
+///   The future and its output are `Send`. The output implements
 ///   [`NativeReturn<Fail>`].
 ///
-/// A function that takes `&mut Vm` cannot have a borrowed parameter:
+/// The compiler rejects borrowed parameters in a `&mut Vm` function:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -71,9 +71,9 @@ impl Signature {
 /// module.function("len", |_: &mut Vm, s: &str| s.len() as i64);
 /// ```
 ///
-/// An async function cannot have a borrowed parameter. It also cannot take or
-/// return a VM handle, because garbage collection can free the heap object
-/// during the wait:
+/// Garbage collection can free unrooted heap objects during a wait. The
+/// compiler therefore rejects borrowed parameters and VM handles in an async
+/// function:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -277,8 +277,8 @@ where
 {
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         match self {
-            Ok(Later(Completion::Now(result))) => Ok(result.into_call_result(vm)?),
-            Ok(Later(Completion::After(call))) => Err(Ctl::async_native(call)),
+            Ok(Later(Completion::Ready(result))) => Ok(result.into_call_result(vm)?),
+            Ok(Later(Completion::Async(call))) => Err(Ctl::async_native(call)),
             Err(e) => e.stop_call(vm),
         }
     }
@@ -295,9 +295,9 @@ pub struct Later<T, E: NativeError>(Completion<T, E>);
 /// Execution mode of a [`Later`] value.
 enum Completion<T, E: NativeError> {
     /// Returns the result immediately on the calling task.
-    Now(Result<T, E::FutureError>),
+    Ready(Result<T, E::FutureError>),
     /// Suspends the calling task on an async native call.
-    After(AsyncNativeCall),
+    Async(AsyncNativeCall),
 }
 
 /// Error type for a [`Later`] result: [`Ctl`], [`Fail`], or [`HostError`].
@@ -405,12 +405,12 @@ where
     where
         F: Future<Output = Result<T, E::FutureError>> + Send + 'static,
     {
-        Later(Completion::After(AsyncNativeCall::new(wait_kind, build)))
+        Later(Completion::Async(AsyncNativeCall::new(wait_kind, build)))
     }
 
     /// Returns `result` immediately from a [`Later`] function on the calling task.
     pub fn ready(result: Result<T, E::FutureError>) -> Later<T, E> {
-        Later(Completion::Now(result))
+        Later(Completion::Ready(result))
     }
 }
 

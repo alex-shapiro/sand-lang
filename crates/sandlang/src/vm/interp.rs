@@ -1824,7 +1824,7 @@ impl Vm {
             CtlKind::Cancelled => Ok(Some(FiberStop::Cancelled)),
             CtlKind::Yield | CtlKind::Blocked { .. } => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
-            // Do not retry memory limits here. `call_native` already retried the call after garbage collection.
+            // `call_native` already retried any memory-limit failure after garbage collection.
             CtlKind::Fail(fail) => Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32)))),
         }
     }

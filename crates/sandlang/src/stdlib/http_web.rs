@@ -9,7 +9,7 @@
 //! local JavaScript event loop and sends its result back over a channel.
 //! Dropping the receiver aborts the in-flight request.
 
-use super::http_common::{BodyReader, MemoryBody, NewResponse, Prepared, prepare_request};
+use super::http_common::{BodyReader, MemoryBody, NewResponseStream, Prepared, prepare_request};
 use super::stream::{self, IoFailure, Suspended, suspend};
 use crate::check::ModKind;
 use crate::native::NativeModule;
@@ -53,7 +53,7 @@ fn send(
     headers: VmVal<Vec<(String, String)>>,
     body: VmVal<Vec<u8>>,
     timeout: SignedDuration,
-) -> Suspended<NewResponse> {
+) -> Suspended<NewResponseStream> {
     let mut req = prepare_request(vm, method, url, headers)?;
     // The request body is held, and the response buffered, outside the heap.
     let res = vm.reserve_io(body.bytes(&vm.heap).len())?;
@@ -74,10 +74,10 @@ fn send(
     let (id, done) = start(request, res);
     let received = async move {
         let _abort = AbortOnDrop(id);
-        let (status, headers, body, res) = done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))?;
-        // Keep the body's I/O reservation in `BodyReader` until the script closes or drains the body.
-        let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res));
-        Ok(NewResponse { url: text, status, headers, reader })
+        let (status, headers, body, reservation) = done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))?;
+        // Browser `fetch` buffers `body` off-heap upfront. `BodyReader` holds `reservation` until the script reads or closes the body.
+        let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(reservation));
+        Ok(NewResponseStream { url: text, status, headers, reader })
     };
     suspend(WaitKind::Io, received)
 }

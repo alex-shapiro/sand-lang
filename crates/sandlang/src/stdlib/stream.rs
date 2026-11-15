@@ -41,7 +41,7 @@ pub(crate) fn suspend<T: IntoVmValue + 'static>(
 /// Suspends the calling task on `line_future` with `wait_kind` to read a
 /// UTF-8 line.
 ///
-/// Returns `None` at end of stream. Fails with kind `"invalid"` and
+/// Returns `None` at end of stream. Returns an `"invalid"` [`HostError`] with
 /// `invalid_utf8_message` on invalid UTF-8 bytes.
 pub(crate) fn suspend_line(
     wait_kind: WaitKind,
@@ -71,10 +71,11 @@ pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Fail> {
     Ok(String::from_utf8(data).ok())
 }
 
-/// Decodes `line` as UTF-8 and charges fuel for its length.
+/// Decodes an optional byte line as UTF-8.
 ///
-/// Returns `Ok(None)` if `line` is `None`. Fails with kind `"invalid"` and
-/// `invalid_utf8_message` on invalid UTF-8 bytes.
+/// Charges fuel for the byte length of `line`. Returns `Ok(None)` if `line` is
+/// `None`. Returns an `"invalid"` [`HostError`] with `invalid_utf8_message` on
+/// invalid UTF-8 bytes.
 pub(crate) fn decode_utf8_line(vm: &Vm, line: Option<Vec<u8>>, invalid_utf8_message: &str) -> Result<Option<String>, HostError<Fail>> {
     let Some(line) = line else { return Ok(None) };
     utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", invalid_utf8_message))

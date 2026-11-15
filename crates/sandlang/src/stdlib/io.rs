@@ -26,7 +26,7 @@ pub(crate) fn module() -> NativeModule {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_stdin_bytes(vm, StdinReadMode::Upto(to_usize_saturating(max)))
+        read_stdin_bytes(vm, StdinReadMode::UpTo(to_usize_saturating(max)))
     });
     m.function("Stdin.read_line", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin_line(vm));
     m.function("Stdin.read_all", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin_bytes(vm, StdinReadMode::All));
@@ -91,12 +91,12 @@ fn flush_out(vm: &mut Vm, which: u8) -> Result<(), HostError> {
 /// Read mode for standard input.
 #[derive(Clone, Copy, PartialEq)]
 enum StdinReadMode {
-    /// A line (`Result<str?>`).
+    /// Single line without its line ending.
     Line,
-    /// Remaining bytes until end of input (`Result<bytes>`).
+    /// Remaining bytes until end of input.
     All,
-    /// Up to `usize` bytes from the next available chunk (`Result<bytes>`).
-    Upto(usize),
+    /// Up to `usize` bytes from the next available chunk.
+    UpTo(usize),
 }
 
 const INVALID_STDIN_UTF8: &str = "stdin: input is not valid UTF-8";
@@ -134,7 +134,7 @@ fn start_stdin_read(
     let stdin = vm.host.stdin.clone();
     // Count the off-heap read buffer against the I/O memory limit during the read.
     let mut reservation = match mode {
-        StdinReadMode::Upto(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
+        StdinReadMode::UpTo(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
         _ => vm.io_reservation(),
     };
     let read_future = async move {
@@ -176,7 +176,7 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     Some(Some(line))
 }
 
-/// Reads `mode` from `stdin`. Returns `Ok(None)` if [`StdinReadMode::Line`] reaches end of input.
+/// Reads from `stdin` according to `mode`. Returns `Ok(None)` at end of input in [`StdinReadMode::Line`] mode.
 async fn read_input(
     stdin: Option<&StdinChannel>,
     mode: StdinReadMode,
@@ -198,7 +198,7 @@ async fn read_from<R: AsyncBufRead + Unpin>(
             read_to_end_reserved(reader, &mut data, reservation, usize::MAX).await?;
             Ok(Some(data))
         }
-        StdinReadMode::Upto(max) => read_upto(reader, max.min(STDIN_CHUNK)).await.map(Some),
+        StdinReadMode::UpTo(max) => read_upto(reader, max.min(STDIN_CHUNK)).await.map(Some),
     }
 }
 
