@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 /// Handle that lets the future of an async native call use the VM, call Sand
 /// functions, and keep heap values alive across waits.
@@ -56,8 +56,10 @@ pub(crate) struct CallState {
     pub lent_vm: Option<SharedVm>,
     /// Garbage collection roots, indexed by [`RootedValue`].
     pub roots: Vec<VmValue>,
-    /// The request that the last poll made.
-    pub request: Option<VmRequest>,
+    /// The request that the last poll made, with its id.
+    pub request: Option<(u64, VmRequest)>,
+    /// The number of requests that the call made.
+    pub requests_made: u64,
     /// The result of the last [`VmRequest::Call`].
     pub reply: Option<RootedValue>,
 }
@@ -194,17 +196,46 @@ impl NativeContext {
 
     /// Stores `request` for the scheduler and waits until the scheduler polls
     /// the future again.
-    fn request(&self, request: VmRequest) -> impl Future<Output = ()> + '_ {
-        let mut request = Some(request);
-        std::future::poll_fn(move |_| match request.take() {
-            Some(request) => {
-                let mut call = self.call.lock();
-                assert!(call.lent_vm.is_some(), "`NativeContext` requests run only while the engine polls the call");
-                assert!(call.request.is_none(), "a native call made two VM requests in one poll");
-                call.request = Some(request);
-                Poll::Pending
-            }
-            None => Poll::Ready(()),
-        })
+    fn request(&self, request: VmRequest) -> PendingRequest<'_> {
+        PendingRequest { cx: self, request: Some(request), id: None }
+    }
+}
+
+/// A VM request that the scheduler handles before it polls the future again.
+/// Dropping it before the scheduler takes it, for example in a `select!`
+/// branch that loses, withdraws it.
+struct PendingRequest<'a> {
+    cx: &'a NativeContext,
+    request: Option<VmRequest>,
+    /// The id of the stored request.
+    id: Option<u64>,
+}
+
+impl Future for PendingRequest<'_> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+        let Some(request) = self.request.take() else {
+            self.id = None;
+            return Poll::Ready(());
+        };
+        let mut call = self.cx.call.lock();
+        assert!(call.lent_vm.is_some(), "`NativeContext` requests run only while the engine polls the call");
+        assert!(call.request.is_none(), "a native call made two VM requests in one poll");
+        call.requests_made += 1;
+        let id = call.requests_made;
+        call.request = Some((id, request));
+        drop(call);
+        self.id = Some(id);
+        Poll::Pending
+    }
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        let mut call = self.cx.call.lock();
+        if self.id.is_some() && call.request.as_ref().map(|(id, _)| *id) == self.id {
+            call.request = None;
+        }
     }
 }

@@ -487,7 +487,7 @@ fn poll_native(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber) ->
         let (request, roots) = {
             let mut call = native.call.lock();
             call.lent_vm = None;
-            (call.request.take(), call.roots.capacity())
+            (call.request.take().map(|(_, request)| request), call.roots.capacity())
         };
         let polled = match polled {
             Ok(polled) => polled,
@@ -501,10 +501,6 @@ fn poll_native(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber) ->
         if let Poll::Ready(result) = polled {
             let slot = native.result_slot;
             vm.pop_native(f);
-            let result = match request {
-                None => result,
-                Some(_) => Err(Fail::internal("a native call returned during a VM request")),
-            };
             f.stack[slot] = result.map_err(|fail| vm.run_ending_of(fail, |vm| vm.trace_of(f, None)))?;
             vm.enforce_limit(Some(f)).map_err(Trap::Limit)?;
             return Ok(None);

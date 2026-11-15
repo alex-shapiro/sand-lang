@@ -71,6 +71,21 @@ fn calls_module(log: &Log) -> NativeModule {
             }
         }))
     });
+    // Races a callback against a branch that is ready at once, then waits.
+    m.function("race_callback", |f: Callback| -> Result<Later<String, Fail>, Fail> {
+        Ok(Later::new(WaitKind::Io, |cx| {
+            let f = cx.root(f.raw());
+            async move {
+                let winner = tokio::select! {
+                    biased;
+                    _ = cx.call(f, &[]) => "callback",
+                    _ = std::future::ready(()) => "ready",
+                };
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                Ok(winner.to_string())
+            }
+        }))
+    });
     m.function("wait_ms", |ms: i64| async move { tokio::time::sleep(Duration::from_millis(ms as u64)).await });
     m.function("spend_budget", |n: i64| async move {
         for _ in 0..n {
@@ -260,6 +275,15 @@ fn require_prompts_and_resumes_the_future() {
 #[test]
 fn a_context_works_only_while_the_engine_polls_its_call() {
     assert_eq!(run_ok(Config::new(), "calls.save_context()\nprint(calls.use_saved_context())"), "(false, false)\n");
+}
+
+#[test]
+fn a_callback_in_a_losing_select_branch_does_not_run() {
+    let log = Log::default();
+    let (r, out) = run(Config::new(), &log, "print(calls.race_callback(() => calls.log(\"callback ran\")))");
+    r.unwrap();
+    assert_eq!(out, "ready\n");
+    assert!(log.lock().is_empty(), "{:?}", log.lock());
 }
 
 #[test]
