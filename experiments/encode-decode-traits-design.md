@@ -8,12 +8,13 @@ We propose to make `Encode` and `Decode` ordinary traits that users can implemen
 
 The compiler passes dictionaries for `Encode` and `Decode` to generic functions, as it does for every trait with methods. The walker reads these dictionaries to find the implementation of each part of a value. It processes a part that uses the native default in Rust. For a part with a custom implementation, it calls the Sand method through a callback, waits for the result, and continues from the same position.
 
-The design has four goals:
+The design has five goals:
 
-- **Custom implementations.** A user can implement `Encode` and `Decode` for any type that they define. The type can be concrete or generic. It can be defined in Sand, or defined in Rust as a native type. A Sand type implements the traits in Sand, and a native type implements them in Rust. The walkers apply these implementations at every level of a value.
-- **JSON.** The encode walker writes JSON text directly. The decode walker reads JSON text directly. Neither builds an intermediate tree.
-- **Host `Value` conversion.** The encode walker can also write a `Value`, and the decode walker can read one.
-- **`json.Json` as an ordinary type.** `Json` implements `Encode` and `Decode` with ordinary implementations. The walkers treat `Json` as they treat any other type.
+- **Ordinary traits.** `Encode` and `Decode` follow the same rules as every other trait.
+- **Custom encodings for any type.** A user can define how any type that they define is encoded and decoded. This includes concrete and generic types, and types defined in Sand or in Rust. A custom encoding takes effect wherever a value of the type appears, at any depth.
+- **JSON.** A script can encode any encodable value as JSON text, and decode JSON text into any decodable type.
+- **Host `Value` conversion.** A host can convert any encodable Sand value to a `Value`, and convert a `Value` into any decodable Sand type.
+- **`json.Json` as an ordinary type.** `json.Json` is encoded and decoded under the same rules as every other type.
 
 ## Terms
 
