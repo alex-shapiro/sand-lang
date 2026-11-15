@@ -23,29 +23,29 @@ This design meets four goals:
 
 This document uses the following terms:
 
-- **Trait evidence.** A hidden runtime argument that provides a trait implementation to a generic function. Callers pass trait evidence because the compiler erases type arguments.
-- **Dictionary.** A runtime tuple that provides trait evidence for a trait with methods. On `main`, each dictionary stores three groups of items in order:
-  1. Method closures of the implementation.
-  2. Supertrait dictionaries. For `Decode: Encode`, this group holds the `Encode` dictionary for the same type.
-  3. Bound dictionaries of the implementation. For `impl<T: Show> Show for [T]`, this group holds the `Show` dictionary for `T`.
+- **Trait evidence.** Trait evidence is a hidden runtime argument that provides a trait implementation to a generic function. Callers pass trait evidence because the compiler erases type arguments.
+- **Dictionary.** A dictionary is a runtime tuple that provides trait evidence for a trait with methods. On `main`, each dictionary stores three groups of items in order:
+  1. The first group holds the method closures of the implementation.
+  2. The second group holds supertrait dictionaries. For `Decode: Encode`, it holds the `Encode` dictionary for the same type.
+  3. The third group holds bound dictionaries of the implementation. For `impl<T: Show> Show for [T]`, it holds the `Show` dictionary for `T`.
 
   For traits without methods, such as `Hash` on `main`, the checker verifies bounds at compile time. Code generation omits runtime dictionaries for those traits.
-- **Constant dictionary.** A dictionary emitted once as a program constant because all of its types are concrete. For example, `[int]: Show` uses a constant dictionary.
-- **Runtime dictionary.** A dictionary tuple built at runtime inside generic code from type-parameter dictionaries. For example, `fn print_all<T: Show>(items: [T])` builds the `[T]: Show` dictionary at runtime.
-- **Derived trait.** A built-in trait that the compiler implements automatically. On `main`, the compiler derives five traits, including `Encode` and `Decode`:
+- **Constant dictionary.** A constant dictionary is a dictionary of concrete types stored as a program constant. For example, `[int]: Show` uses a constant dictionary.
+- **Runtime dictionary.** A runtime dictionary is a dictionary tuple that generic code builds at runtime from type-parameter dictionaries. For example, `fn print_all<T: Show>(items: [T])` builds the `[T]: Show` dictionary at runtime.
+- **Derived trait.** A derived trait is a built-in trait that the compiler implements automatically. On `main`, the compiler derives five traits, including `Encode` and `Decode`:
   - A struct or enum implements a derived trait if every field and variant payload implements that trait.
   - On `main`, the checker rejects custom implementations of derived traits.
-- **Native function.** A Rust function that Sand code can call.
-- **Native default method.** A trait method whose default body is a native function. Any implementation that omits the method body inherits the native default. This design adds native default methods to Sand.
-- **Part.** A direct child value inside a composite or container value:
+- **Native function.** A native function is a Rust function that Sand code can call.
+- **Native default method.** A native default method is a trait method whose default body is a native function. Any implementation that omits the method body inherits the native default. This design adds native default methods to Sand.
+- **Part.** A part is a direct child value inside a composite or container value:
   - Struct parts are field values.
   - Enum parts are variant payload values.
   - List and set parts are elements.
   - Map parts are keys and values.
-- **Walker.** A native function that visits a value and its parts in turn. The encode walker reads a value from the VM heap. The decode walker builds a value on the VM heap.
-- **`Value`.** The host-owned Rust type `sandlang::value::Value`. It holds a copy of a Sand value outside the VM. A Rust host can keep a `Value` after a VM run ends.
-- **Callback.** A Sand function call made from an async native function. Commit `8a51c46` added support for callbacks. Each callback round trip takes about 90 ns, as measured in `experiments/native-async-sand-calls.md`.
-- **Triage report.** The document `experiments/encode-decode-design-causes.md` on branch `encode-decode-design-causes`. It analyzes the performance and complexity problems in earlier codec designs.
+- **Walker.** A walker is a native function that visits a value and its parts in turn. The encode walker reads a value from the VM heap. The decode walker builds a value on the VM heap.
+- **`Value`.** `sandlang::value::Value` is a host-owned Rust type that holds a copy of a Sand value outside the VM. A Rust host can keep a `Value` after a VM run ends.
+- **Callback.** A callback is a Sand function call made from an async native function. Commit `8a51c46` added support for callbacks. Each callback round trip takes about 90 ns, as measured in `experiments/native-async-sand-calls.md`.
+- **Triage report.** The triage report is `experiments/encode-decode-design-causes.md` on branch `encode-decode-design-causes`. It analyzes the performance and complexity problems in earlier codec designs.
 
 ## Why `Encode` and `Decode` need dictionaries
 
@@ -165,7 +165,7 @@ Each `ImplShape` constant in Part 3 stores a `TypeKind` variant.
 
 ### Registration
 
-The Rust code that registers a native default method passes a `TypeKind` slice. For example, prelude setup registers `Encode.encode` with every kind that the encode walker supports.
+Each native default registration supplies a slice of `TypeKind` values. For example, prelude setup registers `Encode.encode` with every kind that the encode walker supports.
 
 During trait declaration, the type checker processes each registered `TypeKind`:
 
@@ -210,8 +210,8 @@ Ordinary trait method calls read only the method closures and supertrait diction
 
 Each `ImplShape` holds two fields:
 
-- **Type kind.** A `TypeKind` variant from Part 2 that tells the walker how to represent the value. `Struct` variants also store field identifiers and field defaults. `NativeValue` variants also store a text parser.
-- **Part templates.** A list with a `PartTemplate` for each part. The walker uses each template to obtain that part's dictionary.
+- **Type kind.** This field stores a `TypeKind` variant from Part 2. The variant tells the walker how to represent the value. `Struct` variants also store field identifiers and field defaults. `NativeValue` variants also store a text parser.
+- **Part templates.** This field stores a `PartTemplate` for each part. The walker uses each template to obtain that part's dictionary.
 
 ### Part templates
 
@@ -260,15 +260,15 @@ save(Page(items: [Email(address: "a@b.c")]))
 
 `Email` defines a custom `Encode` implementation. `Page<T>` uses a derived structural implementation. Here, the native encoder is the native default method `Encode.encode`:
 
-- **Step 1: Incoming bound dictionary.** `save` requires `T: Encode`. Its caller passes `Email`'s `Encode` dictionary, a 1-item tuple containing `Email.encode`.
+- **Step 1: Incoming bound dictionary.** `save` requires `T: Encode`. Its caller passes `Email`'s `Encode` dictionary to `save`. That dictionary is a 1-item tuple that holds `Email.encode`.
 - **Step 2: Runtime `Page<T>` dictionary.** `save` calls `json.encode(page)`. For generic `T`, `save` builds the `Page<T>` dictionary at runtime as a 3-item tuple:
-  1. The native encoder method.
-  2. The constant `ImplShape` for `Page`.
-  3. `T`'s `Encode` dictionary from Step 1. In this call, that item is `Email`'s dictionary.
+  1. Item 1 holds the native encoder method.
+  2. Item 2 holds the constant `ImplShape` for `Page`.
+  3. Item 3 holds `T`'s `Encode` dictionary from Step 1. In this call, that item is `Email`'s dictionary.
 - **Step 3: `Page` part template.** `Page`'s `ImplShape` holds a `PartTemplate` for `items`. That template tells the walker to build a 3-item `[T]` dictionary tuple:
-  1. The native encoder method.
-  2. The constant `ImplShape` for lists.
-  3. Item 3 of the enclosing `Page` dictionary.
+  1. Item 1 holds the native encoder method.
+  2. Item 2 holds the constant `ImplShape` for lists.
+  3. Item 3 copies item 3 of the enclosing `Page` dictionary.
 - **Step 4: Runtime walk.**
   1. `json.encode` calls the native encoder with `page` and the `Page` dictionary.
   2. The native encoder reads item 2 of the `Page` dictionary to get `Page`'s `ImplShape`.
@@ -331,16 +331,16 @@ If the walker records any holes, it runs in two passes:
 2. The native function runs a callback for each hole. It saves the resulting heap values.
 3. Pass 2 decodes the input again using the saved results.
 
-Two-pass decoding preserves two guarantees. First, computed field defaults run in post-order after the walker validates the whole input, as on `main`. Second, sets and maps insert finished values with their final hashes.
+Two-pass decoding preserves two guarantees. First, the walker validates the entire input before it runs any computed field defaults. It runs those defaults in post-order, as on `main`. Second, sets and maps insert finished values with their final hashes.
 
 ### Synchronous fast path
 
-If a walk records zero holes, the native function returns immediately. It returns a synchronous result without allocating a future. Returning synchronously saves the roughly 112 ns cost of polling a ready async native future.
+If a walk records zero holes, the native function returns immediately. It returns a synchronous result without allocating a future. Skipping the async future poll saves about 112 ns per call.
 
 ## Part 6: Type checker and compiler changes
 
 1. **Native default methods.** The parser and checker accept `native fn` methods inside `trait` declarations. On `main`, they accept `native fn` only inside `impl` blocks.
-2. **Structural implementations from registered kinds.** The checker generates structural implementations from each native default's `TypeKind` list, as Part 2 describes. It registers them as ordinary implementations. Registration of `Decode` excludes structs with `init` constructors. For `Hash`, the checker continues to exclude structs with `var` fields on its existing derivation path.
+2. **Structural implementations from registered kinds.** The checker generates structural implementations from each native default's `TypeKind` list, as Part 2 describes. It registers them as ordinary implementations. Prelude registration for `Decode` excludes structs with `init` constructors. For `Hash`, the checker continues to exclude structs with `var` fields on its existing derivation path.
 3. **Part templates.** For each structural implementation, the checker builds trait-evidence trees for all parts. The compiler lowers those trees to `PartTemplate` constants.
 4. **Structural implementations for `never`.** Under SPEC §5.1 on `main`, `never` implements only traits without methods. Expressions such as `json.encode([])` require `[never]: Encode`. Registering `TypeKind::Never` gives `never` a structural implementation with shape kind `Never`. The decode walker always returns an error for `TypeKind::Never`. Because `never` has zero runtime values, the encode walker never visits a `Never` part.
 5. **Trait dictionary parameters for native functions.** Generic native functions such as `json.encode<T: Encode>` receive `T`'s dictionary through a new `TraitDict<N>` parameter wrapper. `TraitDict<N>` reads the `N`-th bound dictionary for traits with methods. It follows the same mechanism as `Num<N>`.
@@ -348,7 +348,7 @@ If a walk records zero holes, the native function returns immediately. It return
 
 Two existing restrictions on traits with methods now apply to `Encode` and `Decode`:
 
-- **Local functions.** The checker rejects bounds on traits with methods on local functions. It reports `local functions cannot require traits with methods` for local `Encode` or `Decode` bounds.
+- **Local functions.** For local functions, the checker rejects bounds on traits with methods. It reports `local functions cannot require traits with methods` for local `Encode` or `Decode` bounds.
 - **Struct field defaults.** Under SPEC §4.2, the checker rejects bounds on traits with methods inside field default expressions.
 
 See [Open question 1](#open-questions) on keeping both restrictions in this branch.
@@ -434,7 +434,7 @@ This design drops all four special cases listed in [Limits of the earlier draft]
   - Error paths from failed custom `Decode` implementations
 - **Robustness checks:**
   - Run tests with `Config::retry_stress` enabled to force limit-check retries.
-  - Compare process resident memory against `max_memory` and against equivalent Sand loops on large inputs.
+  - On large inputs, compare process resident memory against `max_memory`. Also compare resident memory against equivalent Sand loops.
   - Encode and decode deeply nested values on a 512 KiB thread stack.
   - Encode values that contain many custom-encoded parts.
 - **Benchmarks:**
