@@ -341,8 +341,6 @@ pub struct Fiber {
     pub waiters_prune_at: usize,
     /// Async native calls in progress, innermost last.
     pub(crate) natives: Vec<sched::NativeCall>,
-    /// The kind of the host event that the innermost native call waits on.
-    pub(crate) host_wait: Option<WaitKind>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
     /// Whether the fiber stopped in or just after a native call. Its
@@ -586,7 +584,8 @@ pub struct Vm {
     pub main_fiber: u32,
     pub live_tasks: usize,
     pub host: Host,
-    pub wakers: sched::FiberWakers,
+    /// The host-event wakers of the fibers, by fiber id.
+    fiber_wakers: Vec<std::task::Waker>,
     pub gen_counter: u64,
     /// Fuel accounting (see `meter`).
     pub meter: Meter,
@@ -673,7 +672,7 @@ impl Fiber {
             + self.race.capacity() * std::mem::size_of::<VmValue>()
             + self.waiters.capacity() * std::mem::size_of::<(u32, u64)>()
             + self.natives.capacity() * std::mem::size_of::<sched::NativeCall>()
-            + self.natives.iter().map(sched::NativeCall::footprint).sum::<usize>()
+            + self.natives.iter().map(|native| native.bytes).sum::<usize>()
     }
 }
 
@@ -683,7 +682,6 @@ impl Vm {
         let consts = Vec::with_capacity(prog.consts.len());
         let globals = vec![VmValue::Uninit; prog.nglobals];
         let meter = Meter::new(host.limits.max_instructions, host.interrupt.flag.clone(), host.clock.clone());
-        let wakers = sched::FiberWakers::new(host.interrupt.io.clone());
         let mut vm = Vm {
             prog,
             natives,
@@ -698,7 +696,7 @@ impl Vm {
             main_fiber: 0,
             live_tasks: 0,
             host,
-            wakers,
+            fiber_wakers: Vec::new(),
             gen_counter: 1,
             meter,
             deadline: None,
@@ -1388,7 +1386,6 @@ impl Vm {
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
                     natives: Vec::new(),
-                    host_wait: None,
                     pending_error: None,
                     stopped_in_native_call: false,
                 });

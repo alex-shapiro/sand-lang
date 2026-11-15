@@ -3,7 +3,7 @@
 use super::interp::FiberStop;
 use super::*;
 use crate::engine::LimitKind;
-use crate::native::context::{CallState, NativeFuture, VmRequest};
+use crate::native::context::VmRequest;
 use crate::platform::{ClockFuture, Instant};
 use parking_lot::MutexGuard;
 use std::task::{Context, Poll, Wake, Waker};
@@ -33,10 +33,6 @@ impl IoShared {
             *slot = Some(waker.clone());
         }
     }
-
-    fn has_woken(&self) -> bool {
-        !self.ready.lock().is_empty()
-    }
 }
 
 /// Wakes fiber `fid`, whose innermost native call waits on a host event. A
@@ -56,49 +52,30 @@ impl Wake for FiberWaker {
     }
 }
 
-/// The host-event wakers of a VM's fibers, by fiber id.
-pub struct FiberWakers {
-    wakers: Vec<Waker>,
-    pub shared: Arc<IoShared>,
-}
-
-impl FiberWakers {
-    pub fn new(shared: Arc<IoShared>) -> FiberWakers {
-        FiberWakers { wakers: Vec::new(), shared }
-    }
-
-    /// The waker of fiber `fid`.
-    fn waker(&mut self, fid: u32) -> Waker {
-        while self.wakers.len() <= fid as usize {
-            let fid = self.wakers.len() as u32;
-            self.wakers.push(Waker::from(Arc::new(FiberWaker { fid, shared: self.shared.clone() })));
-        }
-        self.wakers[fid as usize].clone()
-    }
-}
-
 /// An async native call in progress on a fiber.
 pub(crate) struct NativeCall {
-    future: NativeFuture,
-    call: Arc<Mutex<CallState>>,
-    wait_kind: WaitKind,
+    start: NativeStart,
     /// The number of frames below the call. `frames[depth - 1]` made it.
     depth: usize,
     /// Absolute stack slot receiving the call's result.
     result_slot: usize,
-    future_bytes: usize,
     /// Memory counted in `Heap::fiber_bytes`: the future and its roots.
-    bytes: usize,
+    pub bytes: usize,
 }
 
 impl NativeCall {
-    pub fn footprint(&self) -> usize {
-        self.bytes
-    }
-
     /// Adds the call's roots to `roots`.
     pub fn trace(&self, roots: &mut Vec<VmValue>) {
-        roots.extend_from_slice(&self.call.lock().roots);
+        roots.extend_from_slice(&self.start.call.lock().roots);
+    }
+}
+
+impl Fiber {
+    /// The kind of host event that the fiber waits on. A waiting fiber waits
+    /// on one when its innermost native call is on top of its frames.
+    fn host_wait(&self) -> Option<WaitKind> {
+        let native = self.natives.last().filter(|native| native.depth == self.frames.len())?;
+        (self.state == FiberState::Waiting).then_some(native.start.wait_kind)
     }
 }
 
@@ -342,31 +319,22 @@ impl Vm {
     /// Starts the async native call `start` on fiber `f`.
     fn begin_native(&mut self, f: &mut Fiber, start: NativeStart) {
         let capacity = f.natives.capacity();
-        let future_bytes = std::mem::size_of_val(&*start.future);
-        f.natives.push(NativeCall {
-            future: start.future,
-            call: start.call,
-            wait_kind: start.wait_kind,
-            depth: f.frames.len(),
-            result_slot: f.result_slot,
-            future_bytes,
-            bytes: future_bytes,
-        });
-        self.heap.fiber_bytes += future_bytes + (f.natives.capacity() - capacity) * std::mem::size_of::<NativeCall>();
+        let bytes = std::mem::size_of_val(&*start.future);
+        f.natives.push(NativeCall { start, depth: f.frames.len(), result_slot: f.result_slot, bytes });
+        self.heap.fiber_bytes += bytes + (f.natives.capacity() - capacity) * std::mem::size_of::<NativeCall>();
     }
 
     /// Removes the innermost native call of `f` and drops its future.
-    fn pop_native(&mut self, f: &mut Fiber) -> Option<NativeCall> {
-        let native = f.natives.pop()?;
-        native.call.lock().roots = Vec::new();
-        self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(native.bytes);
-        Some(native)
+    fn pop_native(&mut self, f: &mut Fiber) {
+        if let Some(native) = f.natives.pop() {
+            native.start.call.lock().roots = Vec::new();
+            self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(native.bytes);
+        }
     }
 
     /// Drops the native calls of `f` that frames at index `depth` and above
     /// made, innermost first.
     pub(crate) fn drop_natives(&mut self, f: &mut Fiber, depth: usize) {
-        f.host_wait = None;
         while f.natives.last().is_some_and(|native| native.depth > depth) {
             self.pop_native(f);
         }
@@ -411,18 +379,27 @@ impl Vm {
         f.frames.pop();
         f.stopped_in_native_call = true;
         let native = f.natives.last().expect("a native call made the callback");
-        let mut call = native.call.lock();
+        let mut call = native.start.call.lock();
         let reply = call.root(v);
         call.reply = Some(reply);
+    }
+
+    /// The waker that makes fiber `fid` ready after a host event.
+    fn fiber_waker(&mut self, fid: u32) -> Waker {
+        while self.fiber_wakers.len() <= fid as usize {
+            let fid = self.fiber_wakers.len() as u32;
+            self.fiber_wakers.push(Waker::from(Arc::new(FiberWaker { fid, shared: self.host.interrupt.io.clone() })));
+        }
+        self.fiber_wakers[fid as usize].clone()
     }
 
     /// Makes the fibers whose host events fired ready. Returns whether any
     /// fiber became ready.
     fn wake_host_waits(&mut self) -> bool {
         let mut woke = false;
-        for fid in std::mem::take(&mut *self.wakers.shared.ready.lock()) {
+        for fid in std::mem::take(&mut *self.host.interrupt.io.ready.lock()) {
             if let Some(Some(f)) = self.fibers.get_mut(fid as usize)
-                && f.host_wait.take().is_some()
+                && f.host_wait().is_some()
             {
                 f.state = FiberState::Ready;
                 self.ready.push_back(fid);
@@ -437,7 +414,7 @@ impl Vm {
     pub(crate) fn host_wait_kind(&self) -> Option<WaitKind> {
         let mut kind = None;
         for f in self.fibers.iter().flatten() {
-            match f.host_wait {
+            match f.host_wait() {
                 Some(WaitKind::User) => return Some(WaitKind::User),
                 Some(WaitKind::Io) => kind = Some(WaitKind::Io),
                 None => {}
@@ -477,23 +454,23 @@ fn poll_native(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber) ->
     let mut collected = false;
     loop {
         let fid = vm.current;
-        let waker = vm.wakers.waker(fid);
+        let waker = vm.fiber_waker(fid);
         let native = f.natives.last_mut().expect("a native call is on top");
-        native.call.lock().lent_vm = Some(shared.clone());
+        native.start.call.lock().lent_vm = Some(shared.clone());
         vm.heap.fail_next_check.set(vm.retry_stress && !collected);
         // A panic in the future (a bug) becomes an internal error.
-        let polled = MutexGuard::unlocked(vm, || crate::unwind::catch(|| native.future.as_mut().poll(&mut Context::from_waker(&waker))));
+        let polled =
+            MutexGuard::unlocked(vm, || crate::unwind::catch(|| native.start.future.as_mut().poll(&mut Context::from_waker(&waker))));
         vm.heap.fail_next_check.set(false);
         let (request, roots) = {
-            let mut call = native.call.lock();
+            let mut call = native.start.call.lock();
             call.lent_vm = None;
             (call.request.take().map(|(_, request)| request), call.roots.capacity())
         };
         let polled = match polled {
             Ok(polled) => polled,
             Err(msg) => {
-                let native = f.natives.pop();
-                let _ = crate::unwind::catch(move || drop(native));
+                let _ = crate::unwind::catch(|| vm.pop_native(f));
                 vm.broken = true;
                 return Err(Trap::Internal { message: msg, trace: vm.trace_of(f, None) }.into());
             }
@@ -505,15 +482,13 @@ fn poll_native(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber) ->
             vm.enforce_limit(Some(f)).map_err(Trap::Limit)?;
             return Ok(None);
         }
-        let bytes = native.future_bytes + roots * std::mem::size_of::<VmValue>();
+        let bytes = std::mem::size_of_val(&*native.start.future) + roots * std::mem::size_of::<VmValue>();
         vm.heap.fiber_bytes = (vm.heap.fiber_bytes + bytes).saturating_sub(native.bytes);
         native.bytes = bytes;
-        let wait_kind = native.wait_kind;
         vm.enforce_limit(Some(f)).map_err(Trap::Limit)?;
         match request {
             None => {
                 f.wait_gen = vm.next_gen();
-                f.host_wait = Some(wait_kind);
                 return Ok(Some(FiberStop::Blocked));
             }
             Some(VmRequest::Call { callee, args }) => {
@@ -634,7 +609,6 @@ struct HostEventWait {
     pause_start: Option<Instant>,
     deadline: Option<Instant>,
     interrupt: crate::engine::CallInterrupt,
-    io: Arc<IoShared>,
 }
 
 /// Runs `proto` (a zero-argument function) as the main task until it
@@ -727,24 +701,16 @@ pub(crate) async fn drive<U: DriveUntil>(shared: &SharedVm, until: U) -> Result<
                         pause_start: (wait_kind == WaitKind::User).then_some(timer.now),
                         deadline: vm.deadline,
                         interrupt: vm.host.interrupt.clone(),
-                        io: vm.wakers.shared.clone(),
                     }
                 };
                 let mut sleep =
                     wait.deadline.filter(|_| wait.pause_start.is_none()).map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
-                std::future::poll_fn(|cx| {
-                    wait.io.set_waker(cx.waker());
-                    if wait.io.has_woken() || wait.interrupt.is_set() {
-                        return Poll::Ready(());
-                    }
-                    if let Some(s) = sleep.as_mut()
-                        && s.as_mut().poll(cx).is_ready()
-                    {
-                        return Poll::Ready(());
-                    }
-                    Poll::Pending
-                })
-                .await;
+                let host_event = std::future::poll_fn(|cx| {
+                    let woken = !wait.interrupt.io.ready.lock().is_empty();
+                    let deadline_passed = sleep.as_mut().is_some_and(|s| s.as_mut().poll(cx).is_ready());
+                    if woken || deadline_passed { Poll::Ready(()) } else { Poll::Pending }
+                });
+                wait.interrupt.unless_interrupted(host_event).await;
                 drop(wait.idle);
                 let mut vm = shared.lock();
                 if let Some(start) = wait.pause_start {
