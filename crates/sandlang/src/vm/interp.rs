@@ -57,7 +57,7 @@ pub enum FiberStop {
     Done(VmValue),
     /// Out of fuel: preempted.
     Preempt,
-    /// Waiting on a scheduler event (already registered).
+    /// Waiting on a scheduler event or on a host event.
     Blocked,
     /// An async native call started. The call's result goes to
     /// `Fiber::result_slot`.

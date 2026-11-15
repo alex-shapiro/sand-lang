@@ -45,11 +45,11 @@ The host cannot rely on engine limits, stability, or control.
       run in the middle of a walk. Options: fail on mutation like CPython, or
       walk a snapshot.
 - [ ] ❓ _Embedding._ Let a native call release roots before it returns.
-      Each `NativeContext::root` call and each callback result adds an entry
-      to the call's root table until the call returns. A walker over a list
-      of a million values keeps a million entries alive. The engine counts the
-      entries against `max_memory`. Options: `NativeContext::unroot`, or
-      scoped roots that a callback result reuses.
+      Each `NativeContext::root` call and each callback result stays rooted,
+      with its whole object graph, until the call returns. A native loop of
+      20,000 callbacks that each return a 1 KB string fails a 16 MB
+      `max_memory` limit that the same loop in Sand passes. Options:
+      `NativeContext::unroot`, or scoped roots that a callback result reuses.
 - [ ] ❓ _Memory._ Count the boxes that an async native future allocates for
       recursive calls against `max_memory`. The engine counts only the size
       of the top-level future and its root table. A recursive walker
