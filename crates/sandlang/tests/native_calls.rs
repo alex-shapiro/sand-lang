@@ -322,3 +322,12 @@ fn a_callback_with_the_wrong_argument_count_is_an_internal_error() {
         "{r:?}"
     );
 }
+
+#[test]
+fn errors_in_callbacks_trace_through_the_native_call() {
+    let src = "fn divide(x: int) -> int { x / 0 }\nfn outer() -> int { calls.apply(divide, 1) }\nprint(outer())";
+    let (r, _) = run(Config::new(), &Log::default(), src);
+    let Err(Error::Runtime { trace, .. }) = r else { panic!("{r:?}") };
+    let functions: Vec<&str> = trace.iter().map(|frame| frame.function.as_str()).collect();
+    assert_eq!(functions, ["divide", "outer", "<top level>"]);
+}

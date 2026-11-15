@@ -435,7 +435,13 @@ impl Vm {
         }
         f.stack[base] = callee;
         f.stack[base + 1..][..args.len()].copy_from_slice(args);
-        f.frames.push(Frame { proto: CALLBACK_PROTO, ip: 2 * args.len() as u32, base: base as u32, ret: base as u32, closure: NO_CLOSURE });
+        f.frames.push(Frame {
+            proto: CALLBACK_PROTO,
+            ip: Proto::callback_entry(args.len()),
+            base: base as u32,
+            ret: base as u32,
+            closure: NO_CLOSURE,
+        });
         Ok(())
     }
 

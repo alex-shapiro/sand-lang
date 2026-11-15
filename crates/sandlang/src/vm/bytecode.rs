@@ -1130,9 +1130,6 @@ impl Op {
 /// program starts with it.
 pub const CALLBACK_PROTO: u32 = 0;
 
-/// Name of [`CALLBACK_PROTO`] (omitted from stack traces).
-pub const CALLBACK_PROTO_NAME: &str = "<callback>";
-
 /// Most arguments that an async native call passes to a callback.
 pub const MAX_CALLBACK_ARGS: usize = u8::MAX as usize;
 
@@ -1181,14 +1178,20 @@ pub struct Cleanup {
 }
 
 impl Proto {
-    /// Builds [`CALLBACK_PROTO`]. The callee is in register 0 and its `n`
-    /// arguments follow it. The frame starts at instruction `2 * n`, which
-    /// calls the callee and then passes its result to the native call.
+    /// The instruction where a [`CALLBACK_PROTO`] frame starts to call a
+    /// callee with `argc` arguments.
+    pub(crate) fn callback_entry(argc: usize) -> u32 {
+        2 * argc as u32
+    }
+
+    /// Builds [`CALLBACK_PROTO`]. The callee is in register 0 and its
+    /// arguments follow it. At [`Proto::callback_entry`], the frame calls the
+    /// callee and then passes its result to the native call.
     pub(crate) fn callback() -> Proto {
         let code: Vec<Op> =
             (0..=MAX_CALLBACK_ARGS as u8).flat_map(|argc| [Op::CallR { callee: 0, base: 1, dst: 0, argc }, Op::ResumeNative]).collect();
         Proto {
-            name: CALLBACK_PROTO_NAME.into(),
+            name: "<callback>".into(),
             file: 0,
             nparams: 0,
             nregs: 1 + MAX_CALLBACK_ARGS as u16,
