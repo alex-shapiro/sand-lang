@@ -465,7 +465,7 @@ fn poll_native(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber) ->
         let (request, roots) = {
             let mut call = native.start.call.lock();
             call.lent_vm = None;
-            (call.request.take().map(|(_, request)| request), call.roots.capacity())
+            (call.request.take(), call.roots.capacity())
         };
         let polled = match polled {
             Ok(polled) => polled,

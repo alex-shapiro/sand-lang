@@ -1,12 +1,11 @@
 //! VM access for the future of an async native call.
 
-use super::convert::HostError;
-use super::func::NativeReturn;
+use super::func::{NativeError, NativeReturn};
 use crate::engine::LimitKind;
 use crate::policy::Capability;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::value::VmValue;
-use crate::vm::{Fail, SharedVm, Vm, WaitKind};
+use crate::vm::{CtlKind, Fail, SharedVm, Vm, WaitKind};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
@@ -22,6 +21,19 @@ use std::task::{Context, Poll};
 /// runs other tasks, and garbage collection can free any heap value that the
 /// call has not rooted.
 ///
+/// The methods that make a VM request take `&mut self`, so a future waits on
+/// at most one request at a time:
+///
+/// ```compile_fail,E0499
+/// # use sandlang::native::context::{NativeContext, RootedValue};
+/// async fn both(cx: &mut NativeContext, f: RootedValue) {
+///     let first = cx.call(f, &[]);
+///     let second = cx.call(f, &[]);
+///     first.await;
+///     second.await;
+/// }
+/// ```
+///
 /// ```
 /// # use sandlang::native::NativeModule;
 /// # use sandlang::native::func::Later;
@@ -30,7 +42,7 @@ use std::task::{Context, Poll};
 /// let mut module = NativeModule::new("calls");
 /// module.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
 /// module.function("twice", |f: VmVal<fn(Param<0>) -> Param<0>>, x: Param<0>| -> Result<Later<Param<0>, Fail>, Fail> {
-///     Ok(Later::new(WaitKind::Io, |cx| {
+///     Ok(Later::new(WaitKind::Io, |mut cx| {
 ///         let (f, x) = (cx.root(f.raw()), cx.root(x.raw()));
 ///         async move {
 ///             let once = cx.call(f, &[x]).await;
@@ -40,7 +52,6 @@ use std::task::{Context, Poll};
 ///     }))
 /// });
 /// ```
-#[derive(Clone)]
 pub struct NativeContext {
     call: Arc<Mutex<CallState>>,
 }
@@ -57,10 +68,8 @@ pub(crate) struct CallState {
     pub lent_vm: Option<SharedVm>,
     /// Garbage collection roots, indexed by [`RootedValue`].
     pub roots: Vec<VmValue>,
-    /// The request that the last poll made, with its id.
-    pub request: Option<(u64, VmRequest)>,
-    /// The number of requests that the call made.
-    pub requests_made: u64,
+    /// The request that the last poll made.
+    pub request: Option<VmRequest>,
     /// The result of the last [`VmRequest::Call`].
     pub reply: Option<RootedValue>,
 }
@@ -83,11 +92,10 @@ pub(crate) enum VmRequest {
     Prompt(Capability),
 }
 
-pub(crate) type NativeFuture = Pin<Box<dyn Future<Output = Result<VmValue, Fail>> + Send>>;
-
-/// An async native call that the scheduler has not started yet.
+/// The future of an async native call, and the state it shares with the
+/// scheduler.
 pub(crate) struct NativeStart {
-    pub future: NativeFuture,
+    pub future: Pin<Box<dyn Future<Output = Result<VmValue, Fail>> + Send>>,
     pub call: Arc<Mutex<CallState>>,
     pub wait_kind: WaitKind,
 }
@@ -100,12 +108,12 @@ impl NativeStart {
         F: Future<Output = R> + Send + 'static,
         R: NativeReturn<Fail> + 'static,
     {
-        let cx = NativeContext { call: Arc::default() };
-        let call = cx.call.clone();
-        let output = build(cx.clone());
+        let call: Arc<Mutex<CallState>> = Arc::default();
+        let output = build(NativeContext { call: call.clone() });
+        let converter = NativeContext { call: call.clone() };
         let future = Box::pin(async move {
             let r = output.await;
-            cx.with_vm(|vm| vm.unchecked(|vm| r.into_call_result(vm)))
+            converter.with_vm(|vm| vm.unchecked(|vm| r.into_call_result(vm)))
         });
         NativeStart { future, call, wait_kind }
     }
@@ -150,8 +158,9 @@ impl NativeContext {
     ///
     /// The scheduler can suspend the callee on async I/O and run other tasks.
     /// If the task is cancelled, the engine drops the future during the call.
-    /// The callee takes at most 255 arguments.
-    pub async fn call(&self, callee: RootedValue, args: &[RootedValue]) -> RootedValue {
+    /// The callee takes at most 255 arguments. A timer or `select!` branch
+    /// around the call cannot interrupt the callee.
+    pub async fn call(&mut self, callee: RootedValue, args: &[RootedValue]) -> RootedValue {
         assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
         let request = {
             let call = self.call.lock();
@@ -162,45 +171,57 @@ impl NativeContext {
         self.call.lock().reply.take().expect("the scheduler returns the callee's result")
     }
 
-    /// Runs `f` with the VM, like [`NativeContext::with_vm`], for a step that
-    /// allocates on the heap. If `f` fails on the memory limit, the engine
-    /// collects all garbage and runs `f` once more, as it restarts a
-    /// synchronous native function. `f` must check limits before any side
-    /// effect.
-    pub async fn allocate<R>(&self, mut f: impl FnMut(&mut Vm) -> Result<R, Fail>) -> Result<R, Fail> {
-        match self.with_vm(&mut f) {
-            Err(fail) if fail.as_limit() == Some(LimitKind::Memory) => {
-                self.request(VmRequest::Collect).await;
-                self.with_vm(f)
-            }
-            r => r,
-        }
-    }
-
-    /// Checks `capability` like [`Vm::require`], and asks the user if the
-    /// policy requires a prompt. Returns a `"permission_denied"` error if the
-    /// policy or the user denies it.
-    pub async fn require(&self, capability: &Capability) -> Result<(), HostError<Fail>> {
-        loop {
-            let permit = self.with_vm(|vm| {
-                let permit = vm.permit(capability);
-                if permit.is_ok() {
-                    vm.forget_once_answers();
-                }
-                permit
+    /// Runs `f` with the VM, like [`NativeContext::with_vm`], under the restart
+    /// rule of a function that takes `&mut Vm`. If `f` fails on a memory or
+    /// resource limit, the engine collects all garbage and runs `f` again. If
+    /// `f` needs a permission prompt, the engine asks the user and runs `f`
+    /// again. `f` must check limits and capabilities before any side effect.
+    ///
+    /// ```
+    /// # use sandlang::native::context::NativeContext;
+    /// # use sandlang::native::convert::HostError;
+    /// # use sandlang::policy::Capability;
+    /// # use sandlang::vm::Fail;
+    /// async fn open(cx: &mut NativeContext, capability: Capability) -> Result<(), HostError<Fail>> {
+    ///     cx.step(|vm| vm.require(&capability)).await?;
+    ///     let _slot = cx.step(|vm| vm.resource_slot()).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn step<R, E: NativeError>(&mut self, mut f: impl FnMut(&mut Vm) -> Result<R, E>) -> Result<R, E::FutureError> {
+        let mut collected = false;
+        let result = loop {
+            let result = self.with_vm(|vm| {
+                vm.collected = collected;
+                let result = f(vm);
+                vm.collected = false;
+                result
             });
-            match permit {
-                Ok(true) => return Ok(()),
-                Ok(false) => return Err(HostError::new("permission_denied", format!("permission denied: {capability}"))),
-                Err(_) => self.request(VmRequest::Prompt(capability.clone())).await,
+            let ctl = match result.map_err(E::into_ctl) {
+                Ok(value) => break Ok(value),
+                Err(Err(error)) => break Err(error),
+                Err(Ok(ctl)) => ctl,
+            };
+            let memory_limit = matches!(ctl.kind(), CtlKind::Fail(fail) if fail.as_limit() == Some(LimitKind::Memory));
+            if !collected && (memory_limit || matches!(ctl.kind(), CtlKind::Collect)) {
+                collected = true;
+                self.request(VmRequest::Collect).await;
+                continue;
             }
-        }
+            match ctl.into_kind() {
+                CtlKind::NeedPermission(cap) => self.request(VmRequest::Prompt(cap)).await,
+                CtlKind::Fail(fail) => break Err(fail.into()),
+                other => break Err(Fail::internal(format!("a native step made the scheduler request {other:?}")).into()),
+            }
+        };
+        self.with_vm(Vm::forget_once_answers);
+        result
     }
 
     /// Stores `request` for the scheduler and waits until the scheduler polls
     /// the future again.
-    fn request(&self, request: VmRequest) -> PendingRequest<'_> {
-        PendingRequest { cx: self, request: Some(request), id: None }
+    fn request(&mut self, request: VmRequest) -> PendingRequest<'_> {
+        PendingRequest { cx: self, request: Some(request), stored: false }
     }
 }
 
@@ -208,37 +229,35 @@ impl NativeContext {
 /// Dropping it before the scheduler takes it, for example in a `select!`
 /// branch that loses, withdraws it.
 struct PendingRequest<'a> {
-    cx: &'a NativeContext,
+    cx: &'a mut NativeContext,
     request: Option<VmRequest>,
-    /// The id of the stored request.
-    id: Option<u64>,
+    stored: bool,
 }
 
 impl Future for PendingRequest<'_> {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+    fn poll(mut self: Pin<&mut Self>, w: &mut Context<'_>) -> Poll<()> {
         let Some(request) = self.request.take() else {
-            self.id = None;
+            self.stored = false;
             return Poll::Ready(());
         };
         let mut call = self.cx.call.lock();
         assert!(call.lent_vm.is_some(), "`NativeContext` requests run only while the engine polls the call");
-        assert!(call.request.is_none(), "a native call made two VM requests in one poll");
-        call.requests_made += 1;
-        let id = call.requests_made;
-        call.request = Some((id, request));
+        call.request = Some(request);
         drop(call);
-        self.id = Some(id);
+        self.stored = true;
+        // A combinator that polls its children with its own waker polls this
+        // future again only after a wake.
+        w.waker().wake_by_ref();
         Poll::Pending
     }
 }
 
 impl Drop for PendingRequest<'_> {
     fn drop(&mut self) {
-        let mut call = self.cx.call.lock();
-        if self.id.is_some() && call.request.as_ref().map(|(id, _)| *id) == self.id {
-            call.request = None;
+        if self.stored {
+            self.cx.call.lock().request = None;
         }
     }
 }

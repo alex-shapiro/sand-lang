@@ -305,9 +305,14 @@ enum Completion<T, E: NativeError> {
 pub trait NativeError: Send + Sized + 'static + sealed::NativeError {
     /// Error type of the future output. It excludes scheduler requests, which
     /// the future makes through its [`NativeContext`].
-    type FutureError: 'static;
+    type FutureError: From<Fail> + 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl>;
+    /// Returns the control signal that stops a
+    /// [`NativeContext::step`](super::context::NativeContext::step), or the
+    /// error that the step returns.
+    #[doc(hidden)]
+    fn into_ctl(self) -> Result<Ctl, Self::FutureError>;
 }
 
 mod sealed {
@@ -324,6 +329,9 @@ impl NativeError for Ctl {
     fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self)
     }
+    fn into_ctl(self) -> Result<Ctl, Fail> {
+        Ok(self)
+    }
 }
 
 impl NativeError for Fail {
@@ -331,12 +339,18 @@ impl NativeError for Fail {
     fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self.into())
     }
+    fn into_ctl(self) -> Result<Ctl, Fail> {
+        Ok(self.into())
+    }
 }
 
 impl NativeError for HostError {
     type FutureError = HostError<Fail>;
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         self.into_sand_error(vm)
+    }
+    fn into_ctl(self) -> Result<Ctl, HostError<Fail>> {
+        self.into_abort()
     }
 }
 
@@ -346,7 +360,8 @@ where
 {
     /// Suspends the calling task on the future that `build` returns for the
     /// call's [`NativeContext`]. The engine converts the future output into
-    /// the Sand result.
+    /// the Sand result. `build` runs during the native call, before the
+    /// engine polls the future, so it can root values but cannot use the VM.
     ///
     /// `wait_kind` classifies waits on host I/O. Pass [`WaitKind::User`] if the
     /// task waits for a user action so that idle wait time does not count

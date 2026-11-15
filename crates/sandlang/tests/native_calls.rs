@@ -13,9 +13,12 @@ use sandlang::native::ty::{Param, VmVal};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::vm::value::VmValue;
 use sandlang::vm::{Fail, Vm, WaitKind};
+use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Poll, Wake, Waker};
 use std::time::Duration;
 
 type Log = Arc<Mutex<Vec<String>>>;
@@ -31,12 +34,53 @@ impl Drop for LogOnDrop {
 
 type Callback = VmVal<fn() -> ()>;
 
+/// Polls the inner future again only after it wakes its own waker, as
+/// `FuturesUnordered` does.
+struct WakeGated<F> {
+    inner: Pin<Box<F>>,
+    gate: Arc<Gate>,
+}
+
+/// The waker of a [`WakeGated`] future.
+struct Gate {
+    woken: AtomicBool,
+    outer: Mutex<Option<Waker>>,
+}
+
+impl Wake for Gate {
+    fn wake(self: Arc<Self>) {
+        self.woken.store(true, Ordering::SeqCst);
+        if let Some(outer) = self.outer.lock().take() {
+            outer.wake();
+        }
+    }
+}
+
+impl<F> WakeGated<F> {
+    fn new(inner: F) -> WakeGated<F> {
+        WakeGated { inner: Box::pin(inner), gate: Arc::new(Gate { woken: AtomicBool::new(true), outer: Mutex::new(None) }) }
+    }
+}
+
+impl<F: Future> Future for WakeGated<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, w: &mut std::task::Context<'_>) -> Poll<F::Output> {
+        *self.gate.outer.lock() = Some(w.waker().clone());
+        if !self.gate.woken.swap(false, Ordering::SeqCst) {
+            return Poll::Pending;
+        }
+        let waker = Waker::from(self.gate.clone());
+        self.inner.as_mut().poll(&mut std::task::Context::from_waker(&waker))
+    }
+}
+
 /// The `calls` module, whose functions record events in `log`.
 fn calls_module(log: &Log) -> NativeModule {
     let mut m = NativeModule::new("calls");
     m.source("pub native fn apply<T>(f: fn(T) -> T, x: T, times: int) -> T");
     m.function("apply", |f: VmVal<fn(Param<0>) -> Param<0>>, x: Param<0>, times: i64| -> Result<Later<Param<0>, Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, move |cx| {
+        Ok(Later::new(WaitKind::Io, move |mut cx| {
             let (f, mut x) = (cx.root(f.raw()), cx.root(x.raw()));
             async move {
                 for _ in 0..times {
@@ -49,7 +93,7 @@ fn calls_module(log: &Log) -> NativeModule {
     // Returns a string that only the call's roots reference after `f` runs.
     m.function("keep", |vm: &mut Vm, f: Callback| -> Result<Later<String, Fail>, Fail> {
         let kept = "kept".into_vm_value(vm)?;
-        Ok(Later::new(WaitKind::Io, |cx| {
+        Ok(Later::new(WaitKind::Io, |mut cx| {
             let (kept, f) = (cx.root(kept), cx.root(f.raw()));
             async move {
                 cx.call(f, &[]).await;
@@ -62,7 +106,7 @@ fn calls_module(log: &Log) -> NativeModule {
     let l = log.clone();
     m.function("guard", move |f: Callback| -> Result<Later<(), Fail>, Fail> {
         let guard = LogOnDrop(l.clone());
-        Ok(Later::new(WaitKind::Io, |cx| {
+        Ok(Later::new(WaitKind::Io, |mut cx| {
             let f = cx.root(f.raw());
             async move {
                 let _guard = guard;
@@ -73,7 +117,7 @@ fn calls_module(log: &Log) -> NativeModule {
     });
     // Races a callback against a branch that is ready at once, then waits.
     m.function("race_callback", |f: Callback| -> Result<Later<String, Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, |cx| {
+        Ok(Later::new(WaitKind::Io, |mut cx| {
             let f = cx.root(f.raw());
             async move {
                 let winner = tokio::select! {
@@ -94,17 +138,25 @@ fn calls_module(log: &Log) -> NativeModule {
     });
     // Allocates a string of `bytes` bytes and returns its length.
     m.function("allocate", |bytes: i64| -> Result<Later<i64, Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, move |cx| async move {
-            cx.allocate(|vm| {
+        Ok(Later::new(WaitKind::Io, move |mut cx| async move {
+            cx.step(|vm| -> Result<i64, Fail> {
                 let text = "x".repeat(bytes as usize).into_vm_value(vm)?;
                 Ok(vm.str(text).len() as i64)
             })
             .await
         }))
     });
+    // Opens and closes a resource slot after a wait.
+    m.function("open_resource", || -> Result<Later<(), HostError>, HostError> {
+        Ok(Later::new(WaitKind::Io, |mut cx| async move {
+            tokio::task::yield_now().await;
+            cx.step(|vm| vm.resource_slot().map(drop)).await
+        }))
+    });
     m.function("open_door", |name: String| -> Result<Later<String, HostError>, HostError> {
-        Ok(Later::new(WaitKind::Io, |cx| async move {
-            cx.require(&Capability::Custom { name: "door".into(), detail: name.clone() }).await?;
+        Ok(Later::new(WaitKind::Io, |mut cx| async move {
+            let door = Capability::Custom { name: "door".into(), detail: name.clone() };
+            cx.step(|vm| vm.require(&door)).await?;
             Ok(format!("opened {name}"))
         }))
     });
@@ -120,7 +172,7 @@ fn calls_module(log: &Log) -> NativeModule {
     });
     // Returns whether `with_vm` and a VM request through the saved context work.
     m.function("use_saved_context", move || -> Result<Later<(bool, bool), Fail>, Fail> {
-        let saved = saved.lock().take().expect("a saved context");
+        let mut saved = saved.lock().take().expect("a saved context");
         Ok(Later::new(WaitKind::Io, |_| async move {
             let with_vm = catch_unwind(AssertUnwindSafe(|| saved.with_vm(|_| ()))).is_ok();
             let callee = saved.root(VmValue::Unit);
@@ -129,18 +181,12 @@ fn calls_module(log: &Log) -> NativeModule {
             Ok((with_vm, request))
         }))
     });
-    m.function("two_calls", |f: Callback| -> Result<Later<(), Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, |cx| {
+    // Calls `f` through a combinator that polls the call with its own waker.
+    m.function("call_behind_own_waker", |f: Callback| -> Result<Later<(), Fail>, Fail> {
+        Ok(Later::new(WaitKind::Io, |mut cx| {
             let f = cx.root(f.raw());
             async move {
-                let mut first = std::pin::pin!(cx.call(f, &[]));
-                let mut second = std::pin::pin!(cx.call(f, &[]));
-                std::future::poll_fn(|w| {
-                    let _ = first.as_mut().poll(w);
-                    let _ = second.as_mut().poll(w);
-                    std::task::Poll::<()>::Pending
-                })
-                .await;
+                WakeGated::new(cx.call(f, &[])).await;
                 Ok(())
             }
         }))
@@ -260,6 +306,12 @@ fn allocate_collects_garbage_in_place() {
 }
 
 #[test]
+fn steps_retry_resource_checks_after_a_collection() {
+    // `retry_stress` makes the first check of each poll ask for a collection.
+    assert_eq!(run_ok(Config::new().retry_stress(true), "print(calls.open_resource())"), "Ok(())\n");
+}
+
+#[test]
 fn callback_results_count_against_the_memory_limit() {
     let (r, _) = run(memory_limit(16 << 20), &Log::default(), "calls.apply((x) => x + 1, 0, 1200000)");
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
@@ -293,9 +345,11 @@ fn a_callback_in_a_losing_select_branch_does_not_run() {
 }
 
 #[test]
-fn two_requests_in_one_poll_are_an_internal_error() {
-    let (r, _) = run(Config::new(), &Log::default(), "calls.two_calls(() => ())");
-    assert!(matches!(&r, Err(Error::Internal { message, .. }) if message.contains("two VM requests")), "{r:?}");
+fn a_call_completes_behind_a_combinator_with_its_own_waker() {
+    let limits = Limits { max_wall_time: Some(Duration::from_secs(5)), ..Limits::default() };
+    let log = Log::default();
+    run(Config::new().limits(limits), &log, "calls.call_behind_own_waker(() => calls.log(\"called\"))").0.unwrap();
+    assert_eq!(*log.lock(), ["called"]);
 }
 
 #[test]

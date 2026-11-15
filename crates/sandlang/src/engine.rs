@@ -465,7 +465,7 @@ impl Config {
     /// instruction. A failed check triggers garbage collection and runs the
     /// call or instruction again. Use this option to verify that functions and
     /// instructions check limits before side effects and refund fuel on retry,
-    /// and that futures allocate with `NativeContext::allocate`.
+    /// and that futures run checks with `NativeContext::step`.
     pub fn retry_stress(mut self, on: bool) -> Self {
         self.retry_stress = on;
         self

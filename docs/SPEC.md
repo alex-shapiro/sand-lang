@@ -2178,18 +2178,19 @@ raw `VmValue` across a wait; root it with `NativeContext::root` instead.
 `Later::new(wait_kind, build)` passes a `NativeContext` to `build`, which
 returns the future. The future runs on the calling task. Through the context,
 it uses the VM with `with_vm` (only while the engine polls the call), keeps
-values alive across waits with `root` and `value`, calls Sand functions with
-`call`, allocates with `allocate`, and asks for permission
-with `require`. A callee can wait on I/O while other tasks run, and takes at
-most 255 arguments. A raw `VmValue` is valid until the next wait.
+values alive across waits with `root` and `value`, and calls Sand functions
+with `call`. `step(f)` runs `f` with the VM under the restart rule of a
+function that takes `&mut Vm`: after a memory or resource limit error or a
+permission prompt, the engine collects garbage or asks the user, and runs `f`
+again. A callee can wait on I/O while other tasks run, and takes at most 255
+arguments. A raw `VmValue` is valid until the next wait.
 
 Each callback uses two frames of `max_call_depth`. Cancelling a task during a
 callback runs the callee's `defer` blocks, drops the future, and then runs the
 caller's. Roots and callback results stay alive until the native call returns,
 and count against `max_memory` with the future itself. Boxes of nested futures
 do not count, and polling them uses the Rust stack, so a recursive future must
-limit its depth. A future makes at most one request per poll, and a timer or
-`select!` branch cannot interrupt a callback.
+limit its depth. A timer or `select!` branch cannot interrupt a callback.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
@@ -2284,8 +2285,7 @@ requirement: it fails the first memory or resource check in each call of a
 function that takes `&mut Vm`, and in each poll of a `Later` future.
 Return-value conversion does not fail on the memory limit; instead, the engine
 collects garbage and checks the memory limit after the call completes. A
-`Later` future allocates with `NativeContext::allocate`, which collects
-garbage in place and runs the step again after a memory limit error.
+`Later` future runs its checks and allocations with `NativeContext::step`.
 
 | Rust type                         | Sand type                                             |
 | --------------------------------- | ----------------------------------------------------- |

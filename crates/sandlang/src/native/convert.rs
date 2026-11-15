@@ -138,6 +138,15 @@ impl<C: From<Fail>> HostError<C> {
             HostErrorKind::Abort(c) => Err(c),
         }
     }
+
+    /// Returns the control signal that stops the call, or the recoverable
+    /// error.
+    pub(crate) fn into_abort(self) -> Result<C, HostError<Fail>> {
+        match *self.0 {
+            HostErrorKind::Error { kind, message } => Err(HostError::new(kind, message)),
+            HostErrorKind::Abort(c) => Ok(c),
+        }
+    }
 }
 
 impl<C> From<std::io::Error> for HostError<C> {
