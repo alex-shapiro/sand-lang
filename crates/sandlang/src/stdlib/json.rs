@@ -634,8 +634,7 @@ fn direct_json(vm: &mut Vm, dict: VmValue, value: VmValue) -> Result<Option<VmVa
     if let Some(ShapeKind::ManualEncode(_)) = kind
         && [ids.null, ids.bool_, ids.int, ids.float, ids.str_, ids.arr, ids.obj].contains(&vm.heap.variant_id(value))
     {
-        vm.charge(1)?;
-        return Ok(Some(value));
+        return Ok(all_finite(vm, &ids, value)?.then_some(value));
     }
     let id = match (kind, value) {
         (Some(ShapeKind::Unit), _) => return Ok(Some(VmValue::Tag(ids.null))),
@@ -647,6 +646,29 @@ fn direct_json(vm: &mut Vm, dict: VmValue, value: VmValue) -> Result<Option<VmVa
     };
     vm.charge(1)?;
     Ok(Some(vm.heap.new_variant(id, &[value])))
+}
+
+/// Returns `true` if every float in the `Json` value `json` is finite, as
+/// JSON text requires. Charges a fuel unit for each node.
+fn all_finite(vm: &Vm, ids: &JsonIds, json: VmValue) -> Result<bool, Fail> {
+    let mut stack = vec![json];
+    while let Some(v) = stack.pop() {
+        vm.charge(1)?;
+        let id = vm.heap.variant_id(v);
+        let payload = vm.heap.payload_if(&v, id);
+        if id == ids.float {
+            if !matches!(payload, VmValue::Float(f) if f.is_finite()) {
+                return Ok(false);
+            }
+        } else if id == ids.arr {
+            stack.extend_from_slice(vm.heap.list(payload));
+        } else if id == ids.obj
+            && let Obj::Map(m) = vm.heap.get(payload)
+        {
+            stack.extend(m.entries.iter().flatten().map(|&(_, v)| v));
+        }
+    }
+    Ok(true)
 }
 
 fn invalid_key<T>() -> CodecResult<T> {
