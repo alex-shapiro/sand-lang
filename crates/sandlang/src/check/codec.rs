@@ -39,11 +39,11 @@ impl<T> Default for CodecImpl<T> {
 /// The value of a struct field or `init` parameter that the input omits.
 #[derive(Clone, Debug)]
 pub enum CodecFill<T> {
-    /// The input must give the value. The compiler uses the constant default
-    /// of a struct field in its place.
+    /// The input must give the value.
     Required,
     Const(ConstVal),
-    /// A call of the default helper with its dictionaries.
+    /// A call of the default helper with its dictionaries. The compiler uses
+    /// the constant default of a struct field in its place.
     Helper(FnId, Vec<T>),
 }
 

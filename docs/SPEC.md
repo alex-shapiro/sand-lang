@@ -740,12 +740,13 @@ reads no value, the decoder skips the input value. `decoder.kind()` returns
 the `InputKind` of the input value without reading it: `Null`, `Bool`, `Int`,
 `Float`, `Duration`, `Str`, `Bytes`, `List`, `Map`, `Tuple`, `Struct`, `Range`,
 `Native`, or `Variant`. JSON text gives only `Null`, `Bool`, `Int`, `Float`,
-`Str`, `List`, and `Map`.
+`Str`, `List`, and `Map`, and a JSON object key has kind `Str`.
 
 A struct that declares `init` (§4.2) decodes the parameters of `init` and
 calls `init`. A missing `Option` parameter is `None`, and a missing parameter
 with a default gets its default. The input can give every parameter, including
-a parameter with a default, such as a limit that `init` checks. If the names or types of the `init`
+a parameter with a default, such as a limit that `init` checks. An `init`
+error that is not an `Error` fails with kind `"invalid"` and its text. If the names or types of the `init`
 parameters differ from the fields, the struct does not derive `Encode`.
 
 A derived `Decode` gives a missing struct field its default. A duplicate struct

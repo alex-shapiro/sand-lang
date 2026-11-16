@@ -1300,8 +1300,8 @@ pub struct CodecShape {
     pub kind: ShapeKind,
     /// The dictionary of each part, from the dictionary of the whole.
     pub parts: Vec<PartTemplate>,
-    /// For `Decode` of a struct or an enum: how to fill each field, `init`
-    /// parameter, or named payload value that the input omits.
+    /// For `Decode` of a struct: how to fill each field or `init` parameter
+    /// that the input omits.
     pub fills: Vec<Fill>,
     /// For `Decode` through `init`.
     pub init: Option<InitCall>,
@@ -1340,7 +1340,9 @@ pub enum ShapeKind {
     Tuple,
     /// The prelude `Option`. Part 0 is the payload of `Some`.
     Option,
-    /// The parts are the fields of struct `def`.
+    /// The parts are the fields of struct `def`, or for `Decode` of a
+    /// struct with `init` (see [`CodecShape::init`]), the parameters of
+    /// `init`.
     Struct(u32),
     /// The parts are the payload values of the variants of enum `def`, in
     /// order. `first` is the id of its first variant.
@@ -1348,8 +1350,6 @@ pub enum ShapeKind {
         def: u32,
         first: u32,
     },
-    /// The parts are the parameters of `init` of struct `def`.
-    Init(u32),
     /// A native value type `def`, encoded as its text.
     Native(u32, crate::vm::value::ParseValue),
     ManualEncode(crate::native::codec::EncodeFn),

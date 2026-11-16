@@ -147,8 +147,9 @@ fn trait_checks_on_structs_sharing_field_types() {
     let (r, took) = check(Config::new(), &src);
     r.unwrap();
     assert!(took < FAST, "took {took:?}");
-    // Runtime type descriptions (`json.decode`) share the descriptions of
-    // such structs, so they stay small (see `reflected_types_are_shared`).
+    // The `Decode` dictionary of `json.decode` shares the impls of such
+    // structs, so it stays small (see
+    // `decode_dictionaries_of_doubling_structs_build_quickly`).
     let mut src = String::from("import json\nstruct S0 { x: int }\n");
     for i in 1..60 {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
@@ -476,7 +477,7 @@ fn source_size_limit_covers_imports() {
 /// Runs the script `main` (with the script modules `files` beside it),
 /// returning its output.
 fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
-    let dir = TempDir::new("reflect");
+    let dir = TempDir::new("codec");
     for (name, body) in files {
         dir.write(name, body);
     }
@@ -490,10 +491,9 @@ fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
 
 #[cfg(feature = "os")]
 #[test]
-fn reflected_types_are_described_once() {
-    // Struct descriptions that double at each level, used by many call
-    // sites: each struct is described once and shared, within a
-    // description and by every call site.
+fn decode_dictionaries_of_doubling_structs_build_quickly() {
+    // Structs that double at each level, decoded at many call sites: each
+    // struct has one `Decode` impl, which every part and call site shares.
     let mut src = String::from("import json\nstruct S0 { x: int }\n");
     for i in 1..40 {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
@@ -511,9 +511,9 @@ print(s.a.b.x * 10 + s.b.a.x)
 
 #[cfg(feature = "os")]
 #[test]
-fn shared_reflected_types_with_back_references() {
-    // Shared descriptions that refer back to an enclosing type, and
-    // recursive enums.
+fn decode_of_shared_types_with_back_references() {
+    // Shared structs that refer back to an enclosing type, and recursive
+    // enums.
     let src = r#"import json
 struct S0 { x: int, up: Root? }
 struct S1 { a: S0, b: S0 }
@@ -533,7 +533,7 @@ print(t)
 
 #[cfg(feature = "os")]
 #[test]
-fn reflected_types_with_the_same_name() {
+fn decode_of_types_with_the_same_name() {
     // Two structs named `Config` in different modules are different types.
     let files = [("a.sand", "pub struct Config { pub p: int, pub q: int, pub r: int }\n")];
     let src = r#"import json

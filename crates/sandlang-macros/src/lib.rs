@@ -892,12 +892,12 @@ mod tests {
     fn manual_conversion_omits_only_the_vm_conversion_impls() {
         let cases: [(Derive, &str, &str); 2] =
             [(sand_enum, "enum E { A(i64) }", "EnumType for E"), (sand_struct, "struct S { x: i64 }", "StructType for S")];
-        for (f, item, reflection) in cases {
+        for (f, item, type_impl) in cases {
             let derived = expand(f, &format!("#[sand(module = \"m\")] {item}"));
             let manual = expand(f, &format!("#[sand(module = \"m\", manual_conversion)] {item}"));
             let bare = expand(f, &format!("#[sand(module = \"m\", manual_conversion, no_value)] {item}"));
             for out in [&derived, &manual, &bare] {
-                assert!(out.contains("NamedType for") && out.contains("SandType for") && out.contains(reflection), "{out}");
+                assert!(out.contains("NamedType for") && out.contains("SandType for") && out.contains(type_impl), "{out}");
             }
             assert!(
                 derived.contains("FromVmValue for") && derived.contains("IntoVmValue for") && derived.contains("ToValue for"),

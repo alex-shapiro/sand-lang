@@ -371,7 +371,7 @@ extend Decoder {
     pub native fn decode<T: Decode>(self) -> Result<T>
 
     /// Returns the kind of the value that `decode` would read, without
-    /// reading it.
+    /// reading it. A JSON object key has kind `Str`.
     pub native fn kind(self) -> Result<InputKind>
 }
 

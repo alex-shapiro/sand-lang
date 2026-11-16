@@ -30,8 +30,8 @@ An unconstrained type parameter `T` supports only storage, passing, and formatti
 | `Ord`    | `<`, `>`, `sorted()`, `max()`    | numbers, `str`, lists, tuples                                   |
 | `Hash`   | map keys and set elements        | `int`, `bool`, `str`, tuples                                    |
 | `Num`    | `+`, `-`, `*`, `/`, `T.zero()`   | `int`, `float`                                                  |
-| `Encode` | `json.encode()`                  | data types: not functions, tasks, or channels                   |
-| `Decode` | `json.decode()`                  | data types: not functions, tasks, or channels                   |
+| `Encode` | `json.encode()`                  | data types, and native types that opt in                        |
+| `Decode` | `json.decode()`                  | data types, and native types that opt in                        |
 
 ```sand
 fn largest<T: Ord>(xs: [T]) -> T? {

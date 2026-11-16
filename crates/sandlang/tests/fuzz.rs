@@ -346,7 +346,8 @@ fn hostile_runtime_programs_are_contained() {
         "print(\"\\(1:999999999)\".len())",
         // Sleeping forever.
         "task.sleep(1000h)",
-        "struct P<A, B> { a: A, b: B }\nfn grow<reflect A, reflect B>(n: int, a: A?, b: B?) -> int {\n    let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))",
+        // Polymorphic recursion that builds a deeper `Encode` dictionary at each call.
+        "import json\nstruct P<A, B> { a: A, b: B }\nfn grow<A: Encode, B: Encode>(n: int, a: A?, b: B?) -> int {\n    let x: P<A, B>? = None\n    json.encode(x).unwrap().len() + grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))",
     ];
     for src in programs {
         let start = std::time::Instant::now();

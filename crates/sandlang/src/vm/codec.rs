@@ -304,12 +304,12 @@ impl Turn {
     /// handle took no value. Fails with the error of a failed nested write
     /// or read.
     fn end(&mut self, token: u64, saved: SavedTurn) -> CodecResult<bool> {
-        if let Some((kind, message)) = self.failed.take() {
-            return Err(HostError::new(kind, message));
-        }
         let unused = self.active == token && !self.used;
         (self.active, self.used) = (saved.active, saved.used);
-        Ok(unused)
+        match self.failed.take() {
+            Some((kind, message)) => Err(HostError::new(kind, message)),
+            None => Ok(unused),
+        }
     }
 
     /// Records the error of a nested write or read, so that the walk fails
@@ -489,7 +489,7 @@ impl EncodeWalk {
                 self.push_frame(value, dict, s, EncodeKind::Fields, 0)?;
                 sink.begin_tuple(shape.parts.len())?;
             }
-            (ShapeKind::Struct(def) | ShapeKind::Init(def), _) => {
+            (ShapeKind::Struct(def), _) => {
                 self.push_frame(value, dict, s, EncodeKind::Fields, 0)?;
                 sink.begin_struct(prog.types[*def as usize].desc())?;
             }
@@ -844,12 +844,12 @@ impl DecodeWalk {
                     return Ok(());
                 }
             },
-            ShapeKind::Struct(def) | ShapeKind::Init(def) => {
+            ShapeKind::Struct(def) => {
                 let desc = prog.types[*def as usize].desc();
                 source.begin_struct(desc)?;
-                let (slots, n) = match (&shape.kind, &shape.init) {
-                    (ShapeKind::Init(_), Some(init)) => (Slots::Init(init.names.clone()), init.names.len()),
-                    _ => (Slots::Struct(*def, desc.clone()), desc.fields.len()),
+                let (slots, n) = match &shape.init {
+                    Some(init) => (Slots::Init(init.names.clone()), init.names.len()),
+                    None => (Slots::Struct(*def, desc.clone()), desc.fields.len()),
                 };
                 return self.push_frame(dict, s, DecodeKind::Slots { slots, seen: vec![false; n], next: 0 }, n);
             }

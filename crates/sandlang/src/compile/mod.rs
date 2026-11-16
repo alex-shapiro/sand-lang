@@ -752,7 +752,7 @@ enum Stub {
 
 impl<'a> Compiler<'a> {
     /// The index of constant `k`, shared with equal constants made before
-    /// (but trait dictionaries and type descriptions have their own caches).
+    /// (but trait dictionaries have their own cache).
     fn const_idx(&mut self, k: Const) -> u32 {
         let next = self.prog.consts.len() as u32;
         let t = &mut self.consts;
@@ -2786,7 +2786,6 @@ impl<'a> Compiler<'a> {
                         let first = self.prog.variants.iter().position(|v| v.def == d).unwrap_or(0) as u32;
                         ShapeKind::Enum { def: d, first }
                     }
-                    (_, _) if codec.init.is_some() => ShapeKind::Init(d),
                     _ => ShapeKind::Struct(d),
                 }
             }
@@ -2796,7 +2795,9 @@ impl<'a> Compiler<'a> {
             }
         };
         let field_consts: Vec<Option<&crate::types::ConstVal>> = match &kind {
-            ShapeKind::Struct(d) => cp.types[*d as usize].fields().iter().map(|f| f.const_default.as_deref()).collect(),
+            ShapeKind::Struct(d) if codec.init.is_none() => {
+                cp.types[*d as usize].fields().iter().map(|f| f.const_default.as_deref()).collect()
+            }
             _ => Vec::new(),
         };
         let fills = codec

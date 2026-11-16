@@ -124,7 +124,7 @@ pub native fn parse(text: str) -> Result<Json>
 /// per level. Finite floats include a decimal point or exponent. Fails with
 /// kind `"invalid"` for a `NaN` or infinite float, or if a map key is not a
 /// `str`, `int`, `duration`, `bool`, unit enum variant, or value type. Fails
-/// with the error of a custom `encode` method. Aborts with kind `"limit"` if
+/// with the error of a custom `encode` method, and with kind `"limit"` if
 /// nesting exceeds 512 levels.
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>
 

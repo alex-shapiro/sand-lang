@@ -406,6 +406,9 @@ Visible defects that rarely block users.
 
 ### Embedding
 
+- [ ] ⚪ Use one map key rule for JSON encode and decode. `JsonSink` denies
+      `bytes` and `Option` keys, but `JsonSource` accepts them, so
+      `[int?: int]` decodes `{"1": 1}` and cannot encode it.
 - [ ] ⚪ Check that a manual Rust `Encode` impl writes exactly one value. The
       walker passes its sink to `native::codec::Encode::encode` without a
       count, so a host impl that writes two values or omits `end()` makes
@@ -443,8 +446,8 @@ Visible defects that rarely block users.
       compiles each tool three times across `check_file`, `lint_file`, and
       `run_tests`. Return lint warnings from compilation and accept a
       `CompiledProgram` in `run_tests`.
-- [ ] ⚪ Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`
-      dictionary from the `impl` dictionary.
+- [ ] ⚪ Pass `TraitDict` arguments to native `impl` methods by extracting the
+      dictionary of the trait from the `impl` dictionary.
 - [ ] ⚪ Unify the terminology for Rust types attached via `NativeModule::bind`
       across `BoundKind`, `BoundType`, `Type::bound`, `declare_bound_types`, and
       `Binding<T>`.
@@ -489,11 +492,16 @@ Visible defects that rarely block users.
 
 ### Performance
 
+- [ ] ❓ Find why plain recursion keeps garbage alive. A function that builds
+      a 5,000-string list, returns only its length, and then recurses keeps
+      about 0.3 MB for each level: 80 levels need 32M, and 250 levels need
+      128M, on main too. A likely cause is that the collector roots each
+      frame's whole register window, which still holds the handles of
+      returned callees.
 - [ ] ⚪ Split `CodecShape` into an encode shape and a decode shape. `fills`
       and `init` serve only decode, and `ManualEncode` and `ManualDecode`
       serve one direction each, so the walkers handle wrong combinations with
-      internal errors. `DecodeKind::Slots` also carries both `names` and
-      `SlotsEnd`, which describe the same case split.
+      internal errors.
 - [ ] ⚪ Build the path segments of `ValueSource` only for error messages.
       `ValueSource::next` and `next_field` format a segment for each part.
 - [ ] ⚪ Benchmark `HostFn::Static` against `HostFn::Shared` to determine whether
