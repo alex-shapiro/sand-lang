@@ -513,34 +513,3 @@ pub(crate) fn is_structural(traits: &PVec<TraitDef>, imp: &ImplDef) -> bool {
 fn mk_dict(kind: HKind) -> HExpr {
     super::expr::mk(kind, TypeId::UNIT, Span::default())
 }
-
-/// Returns the value of the closed constant expression `e`, which a
-/// parameter default declares.
-fn closed_const(e: &ast::Expr) -> Option<ConstVal> {
-    use ast::ExprKind;
-    Some(match &e.kind {
-        ExprKind::Unit => ConstVal::Unit,
-        ExprKind::Bool(b) => ConstVal::Bool(*b),
-        ExprKind::Int(i) => ConstVal::Int(*i),
-        ExprKind::Float(f) => ConstVal::Float(*f),
-        ExprKind::Duration(d) => ConstVal::Dur(*d),
-        ExprKind::Bytes(b) => ConstVal::Bytes(b.clone()),
-        ExprKind::Str(segs) => ConstVal::Str(
-            segs.iter()
-                .map(|s| match s {
-                    ast::StrSeg::Text(t) => Some(t.as_str()),
-                    _ => None,
-                })
-                .collect::<Option<String>>()?,
-        ),
-        ExprKind::List(xs) if xs.is_empty() => ConstVal::List(Vec::new()),
-        ExprKind::Map(xs) if xs.is_empty() => ConstVal::Map(Vec::new()),
-        ExprKind::Unary(ast::UnOp::Neg, inner) => match closed_const(inner)? {
-            ConstVal::Int(i) => ConstVal::Int(i.checked_neg()?),
-            ConstVal::Float(f) => ConstVal::Float(-f),
-            ConstVal::Dur(d) => ConstVal::Dur(d.checked_neg()?),
-            _ => return None,
-        },
-        _ => return None,
-    })
-}

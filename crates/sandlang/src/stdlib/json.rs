@@ -767,7 +767,7 @@ impl EncodeSink for JsonSink {
         if self.slot()? {
             return invalid_key();
         }
-        self.out.begin_object(2 + usize::from(inclusive))?;
+        self.out.begin(false)?;
         for (name, bound) in [("start", start), ("end", end)] {
             self.out.key(name)?;
             self.out.int(bound)?;
@@ -798,9 +798,9 @@ impl EncodeSink for JsonSink {
         Ok(())
     }
 
-    fn begin_list(&mut self, len: usize) -> CodecResult {
+    fn begin_list(&mut self, _: usize) -> CodecResult {
         self.begin(Frame::Array)?;
-        self.out.begin_array(len)
+        self.out.begin(true)
     }
 
     fn begin_tuple(&mut self, len: usize) -> CodecResult {
@@ -811,14 +811,14 @@ impl EncodeSink for JsonSink {
         self.begin_list(len)
     }
 
-    fn begin_map(&mut self, len: usize) -> CodecResult {
+    fn begin_map(&mut self, _: usize) -> CodecResult {
         self.begin(Frame::Map { key_next: true })?;
-        self.out.begin_object(len)
+        self.out.begin(false)
     }
 
     fn begin_struct(&mut self, desc: &Arc<StructDesc>) -> CodecResult {
         self.begin(Frame::Struct { desc: desc.clone(), next: 0 })?;
-        self.out.begin_object(desc.fields.len())
+        self.out.begin(false)
     }
 
     fn begin_variant(&mut self, desc: &Arc<VariantDesc>, len: usize) -> CodecResult {
@@ -832,11 +832,11 @@ impl EncodeSink for JsonSink {
             None => Frame::Positional,
         };
         self.begin(frame)?;
-        self.out.begin_object(1)?;
+        self.out.begin(false)?;
         self.out.key(&desc.name)?;
         match desc.fields {
-            Some(_) => self.out.begin_object(len),
-            None => self.out.begin_array(len),
+            Some(_) => self.out.begin(false),
+            None => self.out.begin(true),
         }
     }
 
@@ -976,14 +976,6 @@ impl TextOut {
         self.separate(quoted_len(s))?;
         write_str(&mut self.out, s);
         Ok(())
-    }
-
-    fn begin_array(&mut self, _: usize) -> CodecResult {
-        self.begin(true)
-    }
-
-    fn begin_object(&mut self, _: usize) -> CodecResult {
-        self.begin(false)
     }
 
     fn key(&mut self, k: &str) -> CodecResult {
@@ -1609,8 +1601,7 @@ impl DecodeSource for JsonSource {
         }
     }
 
-    fn begin_struct(&mut self, desc: &StructDesc) -> CodecResult {
-        let _ = desc;
+    fn begin_struct(&mut self, _: &StructDesc) -> CodecResult {
         if self.start("object")? != Some(b'{') {
             return Err(self.mismatch("object"));
         }

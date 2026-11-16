@@ -420,72 +420,6 @@ impl EncodeWalk {
         EncodeWalk { walk, unchecked: 0, frames: Vec::new(), depth: 0, pending: Some((value, dict)), callback: None }
     }
 
-    /// Walks until the end or the next callback.
-    pub(crate) fn run(&mut self, vm: &mut Vm, shared: &EncodeCell) -> CodecResult<Step> {
-        let prog = vm.prog.clone();
-        let mut state = shared.lock();
-        // Callbacks can have changed the heap since the last pass.
-        self.unchecked = 0;
-        loop {
-            if let Some(step) = self.walk.check_memory(vm, &mut self.unchecked) {
-                return step;
-            }
-            let (value, dict) = match self.pending {
-                Some(part) => part,
-                None => match self.next_part(vm, &prog, &mut state.io)? {
-                    Some(part) => part,
-                    None => return Ok(Step::Done),
-                },
-            };
-            vm.charge(1)?;
-            match method(vm, dict)? {
-                Method::Custom(callee) => {
-                    let token = state.turn.next_token;
-                    let encoder = match (Encoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm) {
-                        Ok(e) => e,
-                        Err(e) => return self.walk.checked(Err(e)).expect("an error"),
-                    };
-                    self.callback = Some(state.turn.begin());
-                    self.pending = None;
-                    return Ok(Step::Call(Callback { callee, args: vec![dict, value, encoder], purpose: Purpose::Method }));
-                }
-                Method::Structural(s) => {
-                    self.pending = None;
-                    self.visit(vm, &prog, &mut state.io, s, value, dict)?;
-                }
-            }
-        }
-    }
-
-    /// Checks the result of the callback of a custom method.
-    fn apply(&mut self, vm: &mut Vm, shared: &EncodeCell, result: VmValue) -> CodecResult {
-        let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("encode: no callback").into()) };
-        let unused = shared.lock().turn.end(token, saved)?;
-        if let Some(e) = err_payload(vm, result) {
-            return Err(sand_error(vm, e)?);
-        }
-        if unused {
-            return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
-        }
-        Ok(())
-    }
-
-    /// Finishes a walk that waits for callbacks.
-    async fn finish(&mut self, cx: &mut NativeContext, shared: &EncodeCell, first: Step) -> CodecResult {
-        let mut step = first;
-        loop {
-            match step {
-                Step::Done => return Ok(()),
-                Step::Call(callback) => {
-                    let result = cx.call_keeping(callback.callee, &callback.args, self.walk.roots()).await;
-                    cx.with_vm(|vm| self.apply(vm, shared, result))?;
-                }
-                Step::Collect(_) => self.walk.collect(cx).await,
-            }
-            step = cx.with_vm(|vm| self.run(vm, shared))?;
-        }
-    }
-
     #[inline(always)]
     fn push_frame(&mut self, value: VmValue, dict: VmValue, shape: u32, kind: EncodeKind, bound: usize) -> CodecResult {
         if !matches!(kind, EncodeKind::Some) {
@@ -615,6 +549,67 @@ impl EncodeWalk {
     }
 }
 
+impl Walker for EncodeWalk {
+    type IO = dyn EncodeSink;
+    type Output = ();
+    /// Walks until the end or the next callback.
+    fn run(&mut self, vm: &mut Vm, shared: &EncodeCell) -> CodecResult<Step> {
+        let prog = vm.prog.clone();
+        let mut state = shared.lock();
+        // Callbacks can have changed the heap since the last pass.
+        self.unchecked = 0;
+        loop {
+            if let Some(step) = self.walk.check_memory(vm, &mut self.unchecked) {
+                return step;
+            }
+            let (value, dict) = match self.pending {
+                Some(part) => part,
+                None => match self.next_part(vm, &prog, &mut state.io)? {
+                    Some(part) => part,
+                    None => return Ok(Step::Done),
+                },
+            };
+            vm.charge(1)?;
+            match method(vm, dict)? {
+                Method::Custom(callee) => {
+                    let token = state.turn.next_token;
+                    let encoder = match (Encoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm) {
+                        Ok(e) => e,
+                        Err(e) => return self.walk.checked(Err(e)).expect("an error"),
+                    };
+                    self.callback = Some(state.turn.begin());
+                    self.pending = None;
+                    return Ok(Step::Call(Callback { callee, args: vec![dict, value, encoder], purpose: Purpose::Method }));
+                }
+                Method::Structural(s) => {
+                    self.pending = None;
+                    self.visit(vm, &prog, &mut state.io, s, value, dict)?;
+                }
+            }
+        }
+    }
+
+    /// Checks the result of the callback of a custom method.
+    fn apply(&mut self, vm: &mut Vm, shared: &EncodeCell, _: Purpose, result: VmValue) -> CodecResult {
+        let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("encode: no callback").into()) };
+        let unused = shared.lock().turn.end(token, saved)?;
+        if let Some(e) = err_payload(vm, result) {
+            return Err(sand_error(vm, e)?);
+        }
+        if unused {
+            return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
+        }
+        Ok(())
+    }
+
+    fn output(&self) -> Result<(), Fail> {
+        Ok(())
+    }
+    fn walk(&mut self) -> &mut Walk {
+        &mut self.walk
+    }
+}
+
 /// Returns the element of a list or a set at or after slot `next` and before
 /// slot `bound`, its part index, and the slot after it.
 fn seq_child(vm: &Vm, container: VmValue, next: usize, bound: usize) -> Result<Option<(VmValue, u32, usize)>, Fail> {
@@ -736,96 +731,11 @@ impl DecodeWalk {
         DecodeWalk { walk: Walk::new(vec![dict]), unchecked: 0, frames: Vec::new(), depth: 0, pending: Some(dict), callback: None }
     }
 
-    /// Walks until the end or the next callback.
-    pub(crate) fn run(&mut self, vm: &mut Vm, shared: &DecodeCell) -> CodecResult<Step> {
-        let prog = vm.prog.clone();
-        let mut state = shared.lock();
-        loop {
-            if let Some(step) = self.walk.check_memory(vm, &mut self.unchecked) {
-                return step;
-            }
-            vm.charge(1 + (state.io.work() / SLOW_BYTES_PER_UNIT) as u64)?;
-            if let Some(dict) = self.pending.take() {
-                match method(vm, dict)? {
-                    Method::Custom(callee) => {
-                        let token = state.turn.next_token;
-                        let decoder = match (Decoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm) {
-                            Ok(d) => d,
-                            Err(e) => {
-                                self.pending = Some(dict);
-                                return self.walk.checked(Err(e)).expect("an error");
-                            }
-                        };
-                        self.callback = Some(state.turn.begin());
-                        return Ok(Step::Call(Callback { callee, args: vec![dict, decoder], purpose: Purpose::Method }));
-                    }
-                    Method::Structural(s) => self.visit(vm, &prog, &mut state.io, s, dict)?,
-                }
-                continue;
-            }
-            if self.frames.is_empty() {
-                return Ok(Step::Done);
-            }
-            if let Some(callback) = self.advance(vm, &prog, &mut state.io)? {
-                return Ok(Step::Call(callback));
-            }
-        }
-    }
-
     /// Returns the decoded value of a walk that is done.
     pub(crate) fn result(&self) -> Result<VmValue, Fail> {
         match self.walk.values[..] {
             [_, v] => Ok(v),
             _ => Err(Fail::internal("decode: no result")),
-        }
-    }
-
-    /// Places the result of a callback.
-    fn apply(&mut self, vm: &mut Vm, shared: &DecodeCell, purpose: Purpose, result: VmValue) -> CodecResult {
-        let value = match purpose {
-            Purpose::Method => {
-                let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("decode: no callback").into()) };
-                let mut state = shared.lock();
-                let unread = state.turn.end(token, saved)?;
-                if let Some(e) = err_payload(vm, result) {
-                    return Err(at_path(sand_error(vm, e)?, &state.io));
-                }
-                if unread {
-                    state.io.skip()?;
-                }
-                vm.heap.payload_if(&result, vm.prog.ids.ok)
-            }
-            Purpose::Fill => result,
-            Purpose::Init => {
-                if let Some(e) = err_payload(vm, result) {
-                    return Err(at_path(sand_error(vm, e)?, &shared.lock().io));
-                }
-                match vm.heap.variant_id(result) {
-                    id if id == vm.prog.ids.ok => vm.heap.payload_if(&result, id),
-                    _ => result,
-                }
-            }
-        };
-        if purpose == Purpose::Init {
-            self.pop_frame();
-        }
-        self.place(value);
-        Ok(())
-    }
-
-    /// Finishes a walk that waits for callbacks.
-    async fn finish(&mut self, cx: &mut NativeContext, shared: &DecodeCell, first: Step) -> CodecResult<VmValue> {
-        let mut step = first;
-        loop {
-            match step {
-                Step::Done => return Ok(self.result()?),
-                Step::Call(callback) => {
-                    let result = cx.call_keeping(callback.callee, &callback.args, self.walk.roots()).await;
-                    cx.with_vm(|vm| self.apply(vm, shared, callback.purpose, result))?;
-                }
-                Step::Collect(_) => self.walk.collect(cx).await,
-            }
-            step = cx.with_vm(|vm| self.run(vm, shared))?;
         }
     }
 
@@ -1106,6 +1016,86 @@ impl DecodeWalk {
     }
 }
 
+impl Walker for DecodeWalk {
+    type IO = dyn DecodeSource;
+    type Output = VmValue;
+    /// Walks until the end or the next callback.
+    fn run(&mut self, vm: &mut Vm, shared: &DecodeCell) -> CodecResult<Step> {
+        let prog = vm.prog.clone();
+        let mut state = shared.lock();
+        loop {
+            if let Some(step) = self.walk.check_memory(vm, &mut self.unchecked) {
+                return step;
+            }
+            vm.charge(1 + (state.io.work() / SLOW_BYTES_PER_UNIT) as u64)?;
+            if let Some(dict) = self.pending.take() {
+                match method(vm, dict)? {
+                    Method::Custom(callee) => {
+                        let token = state.turn.next_token;
+                        let decoder = match (Decoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                self.pending = Some(dict);
+                                return self.walk.checked(Err(e)).expect("an error");
+                            }
+                        };
+                        self.callback = Some(state.turn.begin());
+                        return Ok(Step::Call(Callback { callee, args: vec![dict, decoder], purpose: Purpose::Method }));
+                    }
+                    Method::Structural(s) => self.visit(vm, &prog, &mut state.io, s, dict)?,
+                }
+                continue;
+            }
+            if self.frames.is_empty() {
+                return Ok(Step::Done);
+            }
+            if let Some(callback) = self.advance(vm, &prog, &mut state.io)? {
+                return Ok(Step::Call(callback));
+            }
+        }
+    }
+
+    /// Places the result of a callback.
+    fn apply(&mut self, vm: &mut Vm, shared: &DecodeCell, purpose: Purpose, result: VmValue) -> CodecResult {
+        let value = match purpose {
+            Purpose::Method => {
+                let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("decode: no callback").into()) };
+                let mut state = shared.lock();
+                let unread = state.turn.end(token, saved)?;
+                if let Some(e) = err_payload(vm, result) {
+                    return Err(at_path(sand_error(vm, e)?, &state.io));
+                }
+                if unread {
+                    state.io.skip()?;
+                }
+                vm.heap.payload_if(&result, vm.prog.ids.ok)
+            }
+            Purpose::Fill => result,
+            Purpose::Init => {
+                if let Some(e) = err_payload(vm, result) {
+                    return Err(at_path(sand_error(vm, e)?, &shared.lock().io));
+                }
+                match vm.heap.variant_id(result) {
+                    id if id == vm.prog.ids.ok => vm.heap.payload_if(&result, id),
+                    _ => result,
+                }
+            }
+        };
+        if purpose == Purpose::Init {
+            self.pop_frame();
+        }
+        self.place(value);
+        Ok(())
+    }
+
+    fn output(&self) -> Result<VmValue, Fail> {
+        self.result()
+    }
+    fn walk(&mut self) -> &mut Walk {
+        &mut self.walk
+    }
+}
+
 fn shape_kind(vm: &Vm, s: u32) -> Result<&ShapeKind, Fail> {
     Ok(&shape(vm, s)?.kind)
 }
@@ -1208,15 +1198,79 @@ impl WalkError for Fail {
     }
 }
 
+/// What the drivers of a walk need from the encode walker or the decode
+/// walker.
+trait Walker: Send + 'static {
+    /// The sink or the source of the walk.
+    type IO: ?Sized + Send;
+    /// The result of the walk: `()` for an encode, and the value for a decode.
+    type Output: Send;
+    fn run(&mut self, vm: &mut Vm, shared: &Arc<Mutex<Shared<Self::IO>>>) -> CodecResult<Step>;
+    /// Uses the result of a callback.
+    fn apply(&mut self, vm: &mut Vm, shared: &Arc<Mutex<Shared<Self::IO>>>, purpose: Purpose, result: VmValue) -> CodecResult;
+    fn output(&self) -> Result<Self::Output, Fail>;
+    fn walk(&mut self) -> &mut Walk;
+}
+
+/// Finishes a walk that waits for callbacks.
+async fn finish<W: Walker>(
+    walk: &mut W,
+    cx: &mut NativeContext,
+    shared: &Arc<Mutex<Shared<W::IO>>>,
+    first: Step,
+) -> CodecResult<W::Output> {
+    let mut step = first;
+    loop {
+        match step {
+            Step::Done => return Ok(walk.output()?),
+            Step::Call(callback) => {
+                let result = cx.call_keeping(callback.callee, &callback.args, walk.walk().roots()).await;
+                cx.with_vm(|vm| walk.apply(vm, shared, callback.purpose, result))?;
+            }
+            Step::Collect(_) => walk.walk().collect(cx).await,
+        }
+        step = cx.with_vm(|vm| walk.run(vm, shared))?;
+    }
+}
+
+/// Runs `walk` in a native call over the sink or source of `shared`, which
+/// `cell` also holds, and then runs `then` on the output and the sink or
+/// source. Waits for callbacks if the walk needs them.
+fn drive<W, S, T, E>(
+    vm: &mut Vm,
+    shared: Arc<Mutex<Shared<S>>>,
+    cell: Arc<Mutex<Shared<W::IO>>>,
+    mut walk: W,
+    then: impl FnOnce(&mut Vm, W::Output, &mut S) -> CodecResult<T> + Send + 'static,
+) -> Result<Later<T, E>, E>
+where
+    W: Walker,
+    S: Send + 'static,
+    T: IntoVmValue + 'static,
+    E: WalkError,
+    Result<T, E::FutureError>: NativeReturn<Fail>,
+{
+    match walk.run(vm, &cell).map_err(E::from_walk)? {
+        Step::Done => {
+            let output = walk.output().map_err(|e| E::from_walk(e.into()))?;
+            Ok(Later::ready(then(vm, output, &mut shared.lock().io).map_err(E::from_future_walk)))
+        }
+        Step::Collect(e) => Err(E::from_walk(e.into())),
+        step => Ok(Later::new(WaitKind::Io, |mut cx| async move {
+            let output = finish(&mut walk, &mut cx, &cell, step).await.map_err(E::from_future_walk)?;
+            cx.with_vm(|vm| then(vm, output, &mut shared.lock().io)).map_err(E::from_future_walk)
+        })),
+    }
+}
+
 /// Encodes `value` with `dict` into the sink of `shared`, and then runs
-/// `finish` on the sink. Waits for callbacks if the walk reaches a custom
-/// method.
+/// `then` on the sink.
 pub(crate) fn encode<S, T, E>(
     vm: &mut Vm,
     shared: Arc<Mutex<Shared<S>>>,
     value: VmValue,
     dict: VmValue,
-    finish: impl FnOnce(&mut Vm, &mut S) -> CodecResult<T> + Send + 'static,
+    then: impl FnOnce(&mut Vm, &mut S) -> CodecResult<T> + Send + 'static,
 ) -> Result<Later<T, E>, E>
 where
     S: EncodeSink + 'static,
@@ -1225,25 +1279,16 @@ where
     Result<T, E::FutureError>: NativeReturn<Fail>,
 {
     let cell: EncodeCell = shared.clone();
-    let mut walk = EncodeWalk::new(value, dict);
-    match walk.run(vm, &cell).map_err(E::from_walk)? {
-        Step::Done => Ok(Later::ready(finish(vm, &mut shared.lock().io).map_err(E::from_future_walk))),
-        Step::Collect(e) => Err(E::from_walk(e.into())),
-        step => Ok(Later::new(WaitKind::Io, |mut cx| async move {
-            walk.finish(&mut cx, &cell, step).await.map_err(E::from_future_walk)?;
-            cx.with_vm(|vm| finish(vm, &mut shared.lock().io)).map_err(E::from_future_walk)
-        })),
-    }
+    drive(vm, shared, cell, EncodeWalk::new(value, dict), |vm, (), sink| then(vm, sink))
 }
 
 /// Decodes a value with `dict` from the source of `shared`, and then runs
-/// `finish` on the value and the source. Waits for callbacks if the walk
-/// reaches a custom method, an `init` constructor, or a computed default.
+/// `then` on the value and the source.
 pub(crate) fn decode<S, T, E>(
     vm: &mut Vm,
     shared: Arc<Mutex<Shared<S>>>,
     dict: VmValue,
-    finish: impl FnOnce(&mut Vm, VmValue, &mut S) -> CodecResult<T> + Send + 'static,
+    then: impl FnOnce(&mut Vm, VmValue, &mut S) -> CodecResult<T> + Send + 'static,
 ) -> Result<Later<T, E>, E>
 where
     S: DecodeSource + 'static,
@@ -1252,18 +1297,14 @@ where
     Result<T, E::FutureError>: NativeReturn<Fail>,
 {
     let cell: DecodeCell = shared.clone();
-    let mut walk = DecodeWalk::new(dict);
-    match walk.run(vm, &cell).map_err(E::from_walk)? {
-        Step::Done => {
-            let v = walk.result().map_err(|e| E::from_walk(e.into()))?;
-            Ok(Later::ready(finish(vm, v, &mut shared.lock().io).map_err(E::from_future_walk)))
-        }
-        Step::Collect(e) => Err(E::from_walk(e.into())),
-        step => Ok(Later::new(WaitKind::Io, |mut cx| async move {
-            let v = walk.finish(&mut cx, &cell, step).await.map_err(E::from_future_walk)?;
-            cx.with_vm(|vm| finish(vm, v, &mut shared.lock().io)).map_err(E::from_future_walk)
-        })),
-    }
+    drive(vm, shared, cell, DecodeWalk::new(dict), then)
+}
+
+/// Runs `walk` over `shared` in the future of an async native, and returns
+/// its output.
+async fn run_async<W: Walker>(cx: &mut NativeContext, shared: &Arc<Mutex<Shared<W::IO>>>, mut walk: W) -> CodecResult<W::Output> {
+    let first = cx.with_vm(|vm| walk.run(vm, shared))?;
+    finish(&mut walk, cx, shared, first).await
 }
 
 /// Encodes `value` with `dict` as a [`Value`](crate::value::Value).
@@ -1271,9 +1312,7 @@ pub(crate) async fn to_value(cx: &mut NativeContext, value: VmValue, dict: VmVal
     let memory = cx.with_vm(|vm| vm.heap.io_memory.clone());
     let shared = Shared::new(ValueSink::new(&memory));
     let cell: EncodeCell = shared.clone();
-    let mut walk = EncodeWalk::new(value, dict);
-    let first = cx.with_vm(|vm| walk.run(vm, &cell))?;
-    walk.finish(cx, &cell, first).await?;
+    run_async(cx, &cell, EncodeWalk::new(value, dict)).await?;
     let root = shared.lock().io.take();
     root.map(|(value, _)| value).ok_or_else(|| Fail::internal("to_value: no value").into())
 }
@@ -1282,57 +1321,51 @@ pub(crate) async fn to_value(cx: &mut NativeContext, value: VmValue, dict: VmVal
 /// valid until the next wait.
 pub(crate) async fn from_value(cx: &mut NativeContext, value: crate::value::Value, dict: VmValue) -> CodecResult<VmValue> {
     let shared: DecodeCell = Shared::new(crate::value::ValueSource::new(value));
-    let mut walk = DecodeWalk::new(dict);
-    let first = cx.with_vm(|vm| walk.run(vm, &shared))?;
-    walk.finish(cx, &shared, first).await
+    run_async(cx, &shared, DecodeWalk::new(dict)).await
+}
+
+/// The misuse messages of an `Encoder`: a write outside its call, and a
+/// second write.
+const ENCODER_MISUSE: [&str; 2] =
+    ["an `Encoder` accepts a value only during its `encode` call", "an `encode` method wrote a second value to its `Encoder`"];
+
+/// The misuse messages of a `Decoder`: a read outside its call, and a second
+/// read.
+const DECODER_MISUSE: [&str; 2] =
+    ["a `Decoder` gives a value only during its `decode` call", "a `decode` method read a second value from its `Decoder`"];
+
+/// Claims the turn of the handle with `token` in `shared`, and then runs
+/// `walk` as its single value in the future of the native call, which the VM
+/// never runs again. Records an error of the walk, so that the outer walk
+/// fails even if the custom method ignores it.
+fn nested<W: Walker, T: IntoVmValue + 'static>(
+    shared: Option<Arc<Mutex<Shared<W::IO>>>>,
+    token: u64,
+    [inactive, second]: [&str; 2],
+    walk: W,
+    output: impl FnOnce(W::Output) -> T + Send + 'static,
+) -> Result<Later<T, HostError>, HostError> {
+    let Some(shared) = shared else { return Err(HostError::new("invalid", inactive)) };
+    shared.lock().turn.claim(token, inactive, second)?;
+    Ok(Later::new(WaitKind::Io, |mut cx| async move {
+        let r = run_async(&mut cx, &shared, walk).await;
+        if let Err(e) = &r {
+            shared.lock().turn.record(e);
+        }
+        r.map(output)
+    }))
 }
 
 /// Writes `value` as the single value of `encoder`.
 fn write(vm: &mut Vm, dict: VmValue, value: VmValue, encoder: VmVal<Encoder>) -> Result<Later<(), HostError>, HostError> {
     let e = encoder.get(&vm.heap)?;
-    let (shared, token) = (e.shared.upgrade(), e.token);
-    let Some(shared) = shared else { return Err(HostError::new("invalid", "an `Encoder` accepts a value only during its `encode` call")) };
-    shared.lock().turn.claim(
-        token,
-        "an `Encoder` accepts a value only during its `encode` call",
-        "an `encode` method wrote a second value to its `Encoder`",
-    )?;
-    let mut walk = EncodeWalk::new(value, dict);
-    Ok(Later::new(WaitKind::Io, |mut cx| async move {
-        let first = cx.with_vm(|vm| walk.run(vm, &shared));
-        let r = match first {
-            Ok(step) => walk.finish(&mut cx, &shared, step).await,
-            Err(e) => Err(e),
-        };
-        if let Err(e) = &r {
-            shared.lock().turn.record(e);
-        }
-        r
-    }))
+    nested(e.shared.upgrade(), e.token, ENCODER_MISUSE, EncodeWalk::new(value, dict), |()| ())
 }
 
 /// Reads the single value of `decoder`.
 fn read(vm: &mut Vm, dict: VmValue, decoder: VmVal<Decoder>) -> Result<Later<Param<0>, HostError>, HostError> {
     let d = decoder.get(&vm.heap)?;
-    let (shared, token) = (d.shared.upgrade(), d.token);
-    let Some(shared) = shared else { return Err(HostError::new("invalid", "a `Decoder` gives a value only during its `decode` call")) };
-    shared.lock().turn.claim(
-        token,
-        "a `Decoder` gives a value only during its `decode` call",
-        "a `decode` method read a second value from its `Decoder`",
-    )?;
-    let mut walk = DecodeWalk::new(dict);
-    Ok(Later::new(WaitKind::Io, |mut cx| async move {
-        let first = cx.with_vm(|vm| walk.run(vm, &shared));
-        let r = match first {
-            Ok(step) => walk.finish(&mut cx, &shared, step).await,
-            Err(e) => Err(e),
-        };
-        if let Err(e) = &r {
-            shared.lock().turn.record(e);
-        }
-        r.map(Param::from_raw)
-    }))
+    nested(d.shared.upgrade(), d.token, DECODER_MISUSE, DecodeWalk::new(dict), Param::from_raw)
 }
 
 /// Registers the prelude natives of `Encode` and `Decode`.
@@ -1354,12 +1387,10 @@ pub(crate) fn register(m: &mut crate::native::NativeModule) {
     m.function("Decoder.decode", |vm: &mut Vm, dict: TraitDict<0, traits::Decode>, decoder: VmVal<Decoder>| read(vm, dict.raw(), decoder));
     m.function("Decoder.kind", |vm: &mut Vm, decoder: VmVal<Decoder>| -> Result<InputKind, HostError> {
         let d = decoder.get(&vm.heap)?;
-        let Some(shared) = d.shared.upgrade() else {
-            return Err(HostError::new("invalid", "a `Decoder` gives a value only during its `decode` call"));
-        };
+        let Some(shared) = d.shared.upgrade() else { return Err(HostError::new("invalid", DECODER_MISUSE[0])) };
         let mut state = shared.lock();
         if state.turn.active != d.token {
-            return Err(state.turn.misuse("a `Decoder` gives a value only during its `decode` call"));
+            return Err(state.turn.misuse(DECODER_MISUSE[0]));
         }
         if state.turn.used {
             return Err(state.turn.misuse("a `decode` method asked for the kind of a value that it read"));

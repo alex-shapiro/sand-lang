@@ -450,7 +450,7 @@ impl Checker {
                 }
             }
             for dv in m.params.iter().filter_map(|p| p.default.as_ref()) {
-                if !is_closed_const(dv) {
+                if closed_const(dv).is_none() {
                     self.error(dv.span, "default values of trait method parameters must be constants");
                 }
             }

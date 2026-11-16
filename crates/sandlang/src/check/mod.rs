@@ -142,7 +142,7 @@ pub struct ParamSig {
 
 #[derive(Clone, Debug)]
 pub enum DefaultArg {
-    /// Inlined constant expression (closed: literals, empty collections, `None`).
+    /// Inlined closed constant expression (see [`closed_const`]).
     Inline(Arc<ast::Expr>),
     /// Computed by a helper function from the preceding parameters.
     Helper(FnId),
@@ -277,7 +277,7 @@ pub(crate) struct DeclRules<'s> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DefaultRule {
     All,
-    /// Only closed constants (`is_closed_const`).
+    /// Only closed constants (`closed_const`).
     Const,
     None,
 }
@@ -2738,11 +2738,11 @@ impl Checker {
         for (i, p) in f.params.iter().enumerate() {
             let kept = |d: &&ast::Expr| match rules.defaults {
                 DefaultRule::All => true,
-                DefaultRule::Const => is_closed_const(d),
+                DefaultRule::Const => closed_const(d).is_some(),
                 DefaultRule::None => false,
             };
             if let Some(d) = p.default.as_ref().filter(kept) {
-                let default = if is_closed_const(d) {
+                let default = if closed_const(d).is_some() {
                     DefaultArg::Inline(Arc::new(d.clone()))
                 } else {
                     let helper_params: Vec<ParamSig> = self.fns[id as usize].params[..i].to_vec();
@@ -3338,19 +3338,35 @@ pub fn ctor_of(t: Ty) -> Option<Ctor> {
     })
 }
 
-/// Default expressions that can be inlined at call sites (no names to resolve).
-fn is_closed_const(e: &ast::Expr) -> bool {
+/// Returns the value of `e` if it is a closed constant: a literal, an empty
+/// list or map, or a negated number. A closed parameter default is inlined.
+pub(crate) fn closed_const(e: &ast::Expr) -> Option<ConstVal> {
     use ast::ExprKind;
-    match &e.kind {
-        ExprKind::Unit | ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Duration(_) | ExprKind::Bytes(_) => true,
-        ExprKind::Str(segs) => segs.iter().all(|s| matches!(s, ast::StrSeg::Text(_))),
-        ExprKind::List(xs) => xs.is_empty(),
-        ExprKind::Map(xs) => xs.is_empty(),
-        ExprKind::Unary(ast::UnOp::Neg, inner) => {
-            matches!(inner.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Duration(_))
-        }
-        _ => false,
-    }
+    Some(match &e.kind {
+        ExprKind::Unit => ConstVal::Unit,
+        ExprKind::Bool(b) => ConstVal::Bool(*b),
+        ExprKind::Int(i) => ConstVal::Int(*i),
+        ExprKind::Float(f) => ConstVal::Float(*f),
+        ExprKind::Duration(d) => ConstVal::Dur(*d),
+        ExprKind::Bytes(b) => ConstVal::Bytes(b.clone()),
+        ExprKind::Str(segs) => ConstVal::Str(
+            segs.iter()
+                .map(|s| match s {
+                    ast::StrSeg::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect::<Option<String>>()?,
+        ),
+        ExprKind::List(xs) if xs.is_empty() => ConstVal::List(Vec::new()),
+        ExprKind::Map(xs) if xs.is_empty() => ConstVal::Map(Vec::new()),
+        ExprKind::Unary(ast::UnOp::Neg, inner) => match closed_const(inner)? {
+            ConstVal::Int(i) => ConstVal::Int(i.checked_neg()?),
+            ConstVal::Float(f) => ConstVal::Float(-f),
+            ConstVal::Dur(d) => ConstVal::Dur(d.checked_neg()?),
+            _ => return None,
+        },
+        _ => return None,
+    })
 }
 
 /// Names referenced (as identifiers or struct-literal shorthands) inside

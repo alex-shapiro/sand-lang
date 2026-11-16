@@ -78,7 +78,7 @@ print((p, q))
 9
 ((0.0, 1.0), (0, 1))
 
-=== Num evidence through traits and generic impls
+=== Num dictionaries through traits and generic impls
 trait Shape: Num {
     fn area(self) -> float
 }

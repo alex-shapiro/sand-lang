@@ -961,7 +961,14 @@ impl DecodeSource for ValueSource {
                 self.open(LevelKind::Fields(names, payload.into_iter()));
                 Ok(())
             }
-            _ => self.fail(format!("expected {form:?} payload, found {} values", payload.len())),
+            _ => {
+                let want = match form {
+                    PayloadForm::Unit => "no payload".to_string(),
+                    PayloadForm::Positional(n) => format!("{n} payload values"),
+                    PayloadForm::Named => "named payload fields".to_string(),
+                };
+                self.fail(format!("expected {want}, found {} payload values", payload.len()))
+            }
         }
     }
 
