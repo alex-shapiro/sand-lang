@@ -14,10 +14,6 @@
 //! Only an initial synchronous pass before any suspension can return a
 //! retryable limit error to the VM.
 
-use super::bytecode::{PartFill, PartTemplate, Program, SHAPE_SLOT, Shape, ShapeKind};
-use super::meter::SLOW_BYTES_PER_UNIT;
-use super::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
-use super::{Fail, Vm, WaitKind};
 use crate::engine::LimitKind;
 use crate::native::codec::{CodecResult, DecodeSource, EncodeSink, InputKind, PayloadForm};
 use crate::native::context::NativeContext;
@@ -27,6 +23,10 @@ use crate::native::ty::{EncodedArg, Param, TraitDict, VmVal};
 use crate::types::{ConstVal, traits};
 use crate::value::StructDesc;
 use crate::value::ValueSink;
+use crate::vm::bytecode::{PartFill, PartTemplate, Program, SHAPE_SLOT, Shape, ShapeKind};
+use crate::vm::meter::SLOW_BYTES_PER_UNIT;
+use crate::vm::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
+use crate::vm::{Fail, Vm, WaitKind};
 use parking_lot::Mutex;
 use std::sync::{Arc, Weak};
 

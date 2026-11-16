@@ -73,7 +73,7 @@ pub(crate) fn prelude() -> NativeModule {
     m.builtin_type("Task", "Handle to a concurrent task started with `spawn`.", &["T"]);
     m.builtin_type("Channel", "FIFO message queue for communicating between tasks.", &["T"]);
     m.bind::<Error>();
-    crate::vm::codec::register(&mut m);
+    crate::stdlib::codec::register(&mut m);
 
     // Globals.
     m.function("print", |vm: &mut Vm, x: Param<0>| {

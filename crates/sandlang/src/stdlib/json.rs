@@ -7,12 +7,12 @@ use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mi
 use crate::native::func::Later;
 use crate::native::ty::{Param, TraitDict, VmVal};
 use crate::native::{NamedType, NativeModule, variant_index};
+use crate::stdlib::codec::{self, Shared};
+use crate::stdlib::codec::{MAX_NESTING_DEPTH, NODE_BYTES};
 use crate::syntax::lexer::is_ident;
 use crate::types::traits;
 use crate::value::{StructDesc, VariantDesc};
 use crate::vm::bytecode::{Program, ShapeKind};
-use crate::vm::codec::{self, Shared};
-use crate::vm::codec::{MAX_NESTING_DEPTH, NODE_BYTES};
 use crate::vm::compare::str_hash;
 use crate::vm::heap::Staging;
 use crate::vm::iomem::{IoMemory, Reservation};

@@ -226,7 +226,7 @@ impl NativeContext {
     /// VM memory limit. Returns any error produced by a custom `encode` method.
     pub async fn to_value(&mut self, value: RootedValue, encode_dict: RootedValue) -> Result<Value, HostError<Fail>> {
         let (value, encode_dict) = (self.value(value), self.value(encode_dict));
-        crate::vm::codec::to_value(self, value, encode_dict).await
+        crate::stdlib::codec::to_value(self, value, encode_dict).await
     }
 
     /// Decodes `value` into a rooted Sand value with `decode_dict`.
@@ -246,7 +246,7 @@ impl NativeContext {
     /// constructor, or field default.
     pub async fn from_value(&mut self, value: Value, decode_dict: RootedValue) -> Result<RootedValue, HostError<Fail>> {
         let decode_dict = self.value(decode_dict);
-        let decoded = crate::vm::codec::from_value(self, value, decode_dict).await?;
+        let decoded = crate::stdlib::codec::from_value(self, value, decode_dict).await?;
         Ok(self.root(decoded))
     }
 

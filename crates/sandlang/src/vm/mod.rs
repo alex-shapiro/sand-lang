@@ -1,7 +1,6 @@
 //! The virtual machine: heap, fibers (tasks), scheduler and interpreter.
 
 pub mod bytecode;
-pub(crate) mod codec;
 pub mod compare;
 pub mod display;
 pub mod heap;

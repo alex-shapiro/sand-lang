@@ -568,7 +568,7 @@ impl ValueSink {
     /// Pushes a new open container with pre-reserved capacity for `len` items.
     fn open<T>(&mut self, len: usize, build: impl FnOnce(Vec<T>) -> PartialValue) -> CodecResult {
         if self.open_containers.len() >= MAX_VALUE_DEPTH {
-            return crate::vm::codec::nesting_limit_error();
+            return crate::stdlib::codec::nesting_limit_error();
         }
         self.grow(len.saturating_mul(size_of::<T>()))?;
         self.open_containers.push(build(Vec::with_capacity(len)));
