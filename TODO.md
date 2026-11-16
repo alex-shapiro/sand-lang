@@ -420,6 +420,21 @@ Visible defects that rarely block users.
 
 ### Embedding
 
+- [ ] ⚪ Check that a manual Rust `Encode` impl writes exactly one value. The
+      walker passes its sink to `native::codec::Encode::encode` without a
+      count, so a host impl that writes two values or omits `end()` makes
+      `json.encode` return invalid JSON. A typed sink interface, as in
+      serde's `SerializeStruct::serialize_field`, would also let `JsonSink` and
+      `ValueSink` drop their own field and key counters.
+- [ ] ⚪ Borrow the input text of a synchronous `json.parse`. `JsonSource::new`
+      copies the whole input, because a source cannot reach the heap across
+      the callbacks of `json.decode`.
+- [ ] ❓ _Testing._ Add a stress mode that fails the Nth memory check of a
+      native call, not only the first. `retry_stress` fails only the first
+      check, so it never tests a check after a side effect. A codec walk
+      that waits for a callback ends with the memory limit if a check fails
+      inside a part (see the TRADEOFFS decision on collection after a
+      callback), so such a mode must expect that ending there.
 - [ ] ⚪ Decode a list from a `Value::List` only. `DecodeSource` reads lists and
       sets with one `begin_list` request, so `NativeContext::from_value`
       accepts a `Value::Set` for a list type.
@@ -482,6 +497,13 @@ Visible defects that rarely block users.
 
 ### Performance
 
+- [ ] ⚪ Split `CodecShape` into an encode shape and a decode shape. `fills`
+      and `init` serve only decode, and `ManualEncode` and `ManualDecode`
+      serve one direction each, so the walkers handle wrong combinations with
+      internal errors. `DecodeKind::Slots` also carries both `names` and
+      `SlotsEnd`, which describe the same case split.
+- [ ] ⚪ Build the path segments of `ValueSource` only for error messages.
+      `ValueSource::next` and `next_field` format a segment for each part.
 - [ ] ⚪ Benchmark `HostFn::Static` against `HostFn::Shared` to determine whether
       avoiding the `Arc` dereference justifies `Box::leak` and the enum
       dispatch; if not, keep only `Arc`.
@@ -504,4 +526,9 @@ Visible defects that rarely block users.
 
 ### Language
 
+- [ ] ❓ Decide whether a variant with one positional payload encodes as its
+      payload, as serde writes a newtype variant: `{"Banned":"spam"}` instead
+      of `{"Banned":["spam"]}`. Hosts often exchange JSON with `serde_json`,
+      and scripts that depend on the derived form make a later change cost
+      more. `Some(None)` also encodes as `null` and decodes as `None`.
 - [ ] ⚪ Support non-constant default expressions on trait method parameters.
