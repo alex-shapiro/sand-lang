@@ -1110,6 +1110,15 @@ fn shape_kind(vm: &Vm, s: u32) -> Result<&ShapeKind, Fail> {
     Ok(&shape(vm, s)?.kind)
 }
 
+/// Returns the shape of `dict` if it is the dictionary of a structural
+/// impl.
+pub(crate) fn structural_kind(vm: &Vm, dict: VmValue) -> Result<Option<&ShapeKind>, Fail> {
+    match method(vm, dict)? {
+        Method::Structural(s) => Ok(Some(shape_kind(vm, s)?)),
+        Method::Custom(_) => Ok(None),
+    }
+}
+
 /// Returns the index of the field `name` in `names`, trying `guess` first.
 fn field_index(names: &[String], name: &str, guess: usize) -> Option<usize> {
     if names.get(guess).is_some_and(|n| n == name) {

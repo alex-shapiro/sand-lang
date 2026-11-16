@@ -148,13 +148,4 @@ pub native fn decode<T: Decode>(text: str) -> Result<T>
 
 /// Converts `value` into a `Json` value using the same representation as
 /// `encode`. Aborts with the error that `encode` would return.
-pub fn to_json<T: Encode>(value: T) -> Json {
-    let json = match encode(value) {
-        Ok(text) => parse(text)
-        Err(e) => Err(e)
-    }
-    match json {
-        Ok(json) => json
-        Err(e) => fail(e.message, e.kind)
-    }
-}
+pub native fn to_json<T: Encode>(value: T) -> Json

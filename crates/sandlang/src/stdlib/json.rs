@@ -10,7 +10,7 @@ use crate::native::{NamedType, NativeModule, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::traits;
 use crate::value::{StructDesc, VariantDesc};
-use crate::vm::bytecode::Program;
+use crate::vm::bytecode::{Program, ShapeKind};
 use crate::vm::codec::MAX_NESTING_DEPTH;
 use crate::vm::codec::{self, Shared};
 use crate::vm::compare::str_hash;
@@ -99,7 +99,22 @@ pub(crate) fn module() -> NativeModule {
         let indent = indent.clamp(0, 1 << 16) as usize;
         let shared = Shared::new(JsonSink::new(TextOut::new(indent, &vm.heap.io_memory)));
         codec::encode::<_, _, HostError>(vm, shared, value.raw(), dict.raw(), |vm, sink| {
-            Ok(VmVal::<String>::from_raw(vm.new_str(sink.out.take_text())))
+            let (text, reservation) = sink.out.take_text();
+            drop(reservation);
+            Ok(VmVal::<String>::from_raw(vm.new_str(text)))
+        })
+    });
+    m.function("to_json", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>| {
+        if let Some(json) = scalar_json(vm, dict.raw(), value.raw())? {
+            return Ok(Later::ready(Ok(VmVal::<Json>::from_raw(json))));
+        }
+        let shared = Shared::new(JsonSink::new(TextOut::new(0, &vm.heap.io_memory)));
+        codec::encode::<_, _, Fail>(vm, shared, value.raw(), dict.raw(), |vm, sink| {
+            let (text, reservation) = sink.out.take_text();
+            let mut source = JsonSource::owned(text.into_boxed_str(), reservation);
+            let json = decode_json(vm, &mut source)?;
+            vm.charge(1 + (source.work() / SLOW_BYTES_PER_UNIT) as u64)?;
+            Ok(VmVal::<Json>::from_raw(json))
         })
     });
     m.function(
@@ -608,6 +623,24 @@ fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValu
     })
 }
 
+/// Returns the `Json` of a scalar with a structural `Encode` dictionary
+/// `dict`, without a walk. `json!` converts each interpolated value, and
+/// most of them are scalars. Returns `None` for other values, and for a
+/// float that JSON cannot represent.
+fn scalar_json(vm: &mut Vm, dict: VmValue, value: VmValue) -> Result<Option<VmValue>, Fail> {
+    let ids = JsonIds::new(&vm.prog)?;
+    let id = match (codec::structural_kind(vm, dict)?, value) {
+        (Some(ShapeKind::Unit), _) => return Ok(Some(VmValue::Tag(ids.null))),
+        (Some(ShapeKind::Bool), VmValue::Bool(_)) => ids.bool_,
+        (Some(ShapeKind::Int), VmValue::Int(_)) => ids.int,
+        (Some(ShapeKind::Float), VmValue::Float(f)) if f.is_finite() => ids.float,
+        (Some(ShapeKind::Str), _) => ids.str_,
+        _ => return Ok(None),
+    };
+    vm.charge(1)?;
+    Ok(Some(vm.heap.new_variant(id, &[value])))
+}
+
 fn invalid_key<T>() -> CodecResult<T> {
     Err(HostError::new("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type"))
 }
@@ -844,11 +877,10 @@ impl TextOut {
         TextOut { out: String::new(), reservation: Reservation::new(memory), indent, open: Vec::new(), after_key: false }
     }
 
-    /// Returns the text, and releases its reservation for the heap string
-    /// that the caller builds from it.
-    fn take_text(&mut self) -> String {
-        self.reservation = self.reservation.sibling();
-        std::mem::take(&mut self.out)
+    /// Returns the text and the reservation of its memory.
+    fn take_text(&mut self) -> (String, Reservation) {
+        let sibling = self.reservation.sibling();
+        (std::mem::take(&mut self.out), std::mem::replace(&mut self.reservation, sibling))
     }
 
     /// Makes room for `bytes` more in `out` within the memory limit.
@@ -1048,8 +1080,13 @@ impl JsonSource {
         if reservation.ensure(text.len()).is_err() {
             return Err(Fail::limit(crate::engine::LimitKind::Memory));
         }
-        Ok(JsonSource {
-            text: text.into(),
+        Ok(JsonSource::owned(text.into(), reservation))
+    }
+
+    /// Reads `text`, whose memory `reservation` counts.
+    fn owned(text: Box<str>, reservation: Reservation) -> JsonSource {
+        JsonSource {
+            text,
             _reservation: reservation,
             pos: 0,
             charged: 0,
@@ -1058,7 +1095,7 @@ impl JsonSource {
             scratch: String::new(),
             variant: String::new(),
             enum_name: String::new(),
-        })
+        }
     }
 
     /// Fails if text other than whitespace follows the value.
