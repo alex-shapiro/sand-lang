@@ -406,6 +406,24 @@ Visible defects that rarely block users.
 
 ### Embedding
 
+- [ ] ❓ Decide whether a codec walk rewinds a part that reaches the memory
+      limit after a callback. Now the run stops, because the part has moved
+      the source or written to the sink. A request loop with a custom
+      `Decode` and garbage on the heap passes at 40M, stops at 44M and 48M,
+      and passes at 52M. Sources and sinks could save a mark before each part,
+      and the walker could restore its frames; `JsonSource` and `TextOut` can
+      rewind cheaply, but `ValueSource` must change to read by index. A rewind
+      would also let `Encoder.encode` and `Decoder.decode` run their first
+      pass synchronously.
+- [ ] ❓ Decide whether generic native types may derive `Encode` and `Decode`
+      with `#[sand(encode, decode)]`. The design doc denies both forms,
+      because a manual Rust codec cannot run callbacks for an erased `T`, so
+      types such as `Labeled<T>` lose the codecs that they had on main. The
+      derived form needs no Rust code.
+- [ ] ❓ Decide what `Decoder.kind()` reports for a host `Option.None`. It
+      reports `Null`, but the `unit()` read of `from_value` denies `None`.
+      Either `kind()` reports `Variant`, or `unit()` accepts `None` as it
+      accepts JSON `null`.
 - [ ] ⚪ Check the growth of a set or map table before the part, as the decode
       walker does for a list. After a callback, a set or map that grows past
       the limit stops the run, where a collection could help. The list check
@@ -514,6 +532,15 @@ Visible defects that rarely block users.
 
 ### Performance
 
+- [ ] ❓ Decide whether to add fast paths to the codec walkers. One walker for
+      each direction reads a trait dictionary for each value, so encoding and
+      decoding are 1.2 to 3.4 times as slow as on main
+      (`crates/sandlang/benches/codec.rs`: encode 469 -> 916 ns per item,
+      decode 1028 -> 1900, to_json 756 -> 2614). A custom impl costs about
+      500 ns for each value. `bench/run.py` does not measure the `json`
+      module. Fast paths could skip the dictionary reads for constant part
+      dictionaries or write JSON text without a `dyn` sink call, at the cost
+      of code that must stay in sync with the walker.
 - [ ] ⚪ Share the codec walkers' loop structure: both `run` loops repeat the
       memory check, the fuel charge, the method dispatch, and the handle
       setup. Also compute the payload base of each variant at compile time,
