@@ -233,3 +233,33 @@ Span(lo: 1, hi: 11)
 Name(name: "ab", label: "AB")
 Range2(lo: 1.5, hi: 2.5)
 true
+
+=== the encode walker copies a container when it begins it, as a for loop does
+import json
+struct Key { s: str }
+impl Encode for Key {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        items.clear()
+        names.push("late")
+        encoder.encode(self.s)
+    }
+}
+var items = [Key(s: "a"): 1, Key(s: "b"): 2]
+var names = ["x"]
+struct Doc { m: [Key: int], names: [str] }
+print(json.encode([Doc(m: items, names: names)]))
+--- stdout
+Ok("[{\"m\":{\"a\":1,\"b\":2},\"names\":[\"x\",\"late\",\"late\"]}]")
+
+=== json.encode returns an error for a value nested too deeply
+import json
+struct Envelope { data: json.Json }
+let doc = json.parse("[".repeat(512) + "]".repeat(512))?
+print(json.encode(doc).is_ok())
+print(json.encode(Envelope(data: doc)))
+let deep: Result<Envelope> = json.decode("{\"data\": " + "[".repeat(512) + "]".repeat(512) + "}")
+print(deep)
+--- stdout
+true
+Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))
+Err(Error(message: "nesting too deep at line 1, column 521", kind: "parse"))

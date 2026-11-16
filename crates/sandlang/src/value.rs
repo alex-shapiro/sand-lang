@@ -540,7 +540,7 @@ impl ValueSink {
     /// with that capacity.
     fn open<T>(&mut self, len: usize, partial: impl FnOnce(Vec<T>) -> Partial) -> CodecResult {
         if self.open.len() >= MAX_VALUE_DEPTH {
-            return Err(Fail::runtime_error("limit", "value too deeply nested to encode as a host value").into());
+            return crate::vm::codec::too_deep();
         }
         self.grow(len.saturating_mul(size_of::<T>()))?;
         self.open.push(partial(Vec::with_capacity(len)));

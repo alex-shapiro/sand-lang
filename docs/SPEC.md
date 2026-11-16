@@ -749,8 +749,9 @@ parameters differ from the fields, the struct does not derive `Encode`.
 
 A derived `Decode` gives a missing struct field its default. A duplicate struct
 field or `init` parameter in the input fails with kind `"parse"`. A duplicate map
-key replaces the earlier value. A value nested more than 512 levels deep fails
-with kind `"limit"`.
+key replaces the earlier value. Encoding or decoding a value nested more than
+512 levels deep fails with kind `"limit"`. JSON text nested more than 512
+levels deep fails to parse, with kind `"parse"`.
 
 ## 6. Expressions
 

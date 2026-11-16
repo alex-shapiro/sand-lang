@@ -482,7 +482,7 @@ fn encode_json(vm: &mut Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecR
             _ => return Err(mismatch::<Json>().into()),
         }
         if stack.len() > MAX_NESTING_DEPTH {
-            return Err(Fail::runtime_error("limit", "value too deeply nested to encode or decode").into());
+            return codec::too_deep();
         }
         node = loop {
             let Some(top) = stack.last_mut() else { return Ok(()) };
@@ -559,7 +559,7 @@ fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValu
                 }
             };
             if stack.len() > MAX_NESTING_DEPTH {
-                return Err(Fail::runtime_error("limit", "value too deeply nested to encode or decode").into());
+                return codec::too_deep();
             }
             loop {
                 let next = match stack.last_mut() {
@@ -898,7 +898,7 @@ impl TextOut {
 
     fn begin(&mut self, is_array: bool) -> CodecResult {
         if self.open.len() >= MAX_NESTING_DEPTH {
-            return Err(Fail::runtime_error("limit", "value too deeply nested to encode as JSON").into());
+            return codec::too_deep();
         }
         self.separate(1)?;
         self.out.push(if is_array { '[' } else { '{' });

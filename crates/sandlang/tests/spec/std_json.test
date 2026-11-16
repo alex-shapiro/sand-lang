@@ -136,7 +136,7 @@ for _ in 0..512 {
 }
 print(json.encode(o)?)
 --- fail
-value too deeply nested to encode as JSON
+value too deeply nested to encode or decode
 
 === to_json at max nesting depth
 import json
@@ -167,7 +167,7 @@ for _ in 0..170 {
 }
 print(json.to_json([t]))
 --- fail
-value too deeply nested to encode as JSON
+value too deeply nested to encode or decode
 
 === numbers
 import json

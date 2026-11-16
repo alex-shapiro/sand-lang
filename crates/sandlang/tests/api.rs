@@ -4493,13 +4493,12 @@ fn encode_deep_and_cyclic_values_on_a_small_stack() {
     assert_eq!(copies, 1);
     // In a host value, each `Link` after the first adds both a struct level
     // and a `Some` level, so `[chain(256)]` reaches 512 levels.
-    for (operation, message, too_deep_expr) in [
-        ("json.encode", "limit: value too deeply nested to encode as JSON", "chain(513)"),
-        ("json.to_json", "limit: value too deeply nested to encode as JSON", "chain(513)"),
-        ("host.copy", "limit: value too deeply nested to encode as a host value", "[[chain(256)]]"),
-    ] {
+    // `json.encode` returns the error, which `?` raises.
+    for (operation, too_deep_expr) in [("json.encode", "chain(513)"), ("json.to_json", "chain(513)"), ("host.copy", "[[chain(256)]]")] {
+        let message = "limit: value too deeply nested to encode or decode";
+        let raise = if operation == "json.encode" { "?" } else { "" };
         for value in [too_deep_expr, "ring"] {
-            let (r, _) = run(format!("{operation}({value})"));
+            let (r, _) = run(format!("{operation}({value}){raise}"));
             let Err(Error::Runtime { message: actual, .. }) = r else {
                 panic!("{operation}({value}): expected a runtime error, got {r:?}")
             };
