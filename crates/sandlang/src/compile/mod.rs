@@ -2735,7 +2735,13 @@ impl<'a> Compiler<'a> {
             return s;
         }
         let s = self.prog.codec_shapes.len() as u32;
-        self.prog.codec_shapes.push(CodecShape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None });
+        self.prog.codec_shapes.push(CodecShape {
+            kind: ShapeKind::Never,
+            parts: Vec::new(),
+            fills: Vec::new(),
+            init: None,
+            slot_index: None,
+        });
         self.codec_shapes.insert(impl_id, s);
         self.pending_shapes.push((impl_id, s));
         s
@@ -2757,7 +2763,7 @@ impl<'a> Compiler<'a> {
             Some(c) => c,
             None => {
                 self.errors.push(Diag::error(imp.span, "internal error: a structural impl has no parts"));
-                return CodecShape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None };
+                return CodecShape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None, slot_index: None };
             }
         };
         let parts = codec.parts.iter().map(|e| self.part_template(e)).collect();
@@ -2818,7 +2824,13 @@ impl<'a> Compiler<'a> {
             let names = cp.fns[*func as usize].params.iter().map(|p| cp.name(p.name).to_string()).collect();
             InitCall { func: self.fn_const(*func), dicts, names }
         });
-        CodecShape { kind, parts, fills, init }
+        let names: Vec<String> = match (&kind, &init) {
+            (ShapeKind::Struct(_), Some(init)) => init.names.to_vec(),
+            (ShapeKind::Struct(d), None) if decode => cp.types[*d as usize].fields().iter().map(|f| cp.name(f.name).to_string()).collect(),
+            _ => Vec::new(),
+        };
+        let slot_index = (names.len() > INDEXED_SLOTS).then(|| names.into_iter().enumerate().map(|(i, n)| (n, i as u32)).collect());
+        CodecShape { kind, parts, fills, init, slot_index }
     }
 
     /// Lowers the dictionary evidence `e` of a part to a template over the

@@ -518,6 +518,7 @@ impl EncodeWalk {
                 if variant.arity == 0 {
                     return sink.end();
                 }
+                charge_scan(vm, variant.index as usize)?;
                 let base = (id - variant.index..id).map(|v| prog.variants[v as usize].arity as u32).sum();
                 self.push_frame(vm, value, dict, s, EncodeKind::Payload { base }, 0)?;
             }
@@ -880,6 +881,7 @@ impl DecodeWalk {
                     let name = crate::stdlib::truncate(&name, 64).to_string();
                     return parse_error(source, format!("unknown variant `{name}` of {}", t.name));
                 };
+                charge_scan(vm, i)?;
                 let id = (first + i) as u32;
                 let variant = &prog.variants[id as usize];
                 let base = (first as u32..id).map(|v| prog.variants[v as usize].arity as u32).sum();
@@ -934,7 +936,10 @@ impl DecodeWalk {
                     let base = slots.base();
                     match slots.names(prog) {
                         Some(names) => match source.next_field()? {
-                            Some(name) => match field_index(names, &name, *next + usize::from(seen.get(*next) == Some(&true))) {
+                            Some(name) => match match &shape.slot_index {
+                                Some(index) if !matches!(slots, Slots::Variant { .. }) => index.get(&*name).map(|&i| i as usize),
+                                _ => field_index(vm, names, &name, *next + usize::from(seen.get(*next) == Some(&true)))?,
+                            } {
                                 Some(i) if seen[i] => {
                                     let name = crate::stdlib::truncate(&name, 64).to_string();
                                     return parse_error(source, format!("duplicate field `{name}`"));
@@ -951,7 +956,7 @@ impl DecodeWalk {
                             },
                             None => None,
                         },
-                        None => match seen.iter().position(|s| !s) {
+                        None => match charge_scan(vm, seen.len()).map(|()| seen.iter().position(|s| !s))? {
                             Some(i) if source.next()? => {
                                 (seen[i], *next) = (true, i);
                                 Some(base + i as u32)
@@ -970,7 +975,7 @@ impl DecodeWalk {
             }
         }
         if let DecodeKind::Slots { slots, seen, next } = &mut frame.kind
-            && let Some(missing) = seen.iter().position(|s| !s)
+            && let Some(missing) = charge_scan(vm, seen.len()).map(|()| seen.iter().position(|s| !s))?
         {
             let base = slots.base();
             let names = slots.names(prog);
@@ -1124,12 +1129,20 @@ pub(crate) fn structural_kind(vm: &Vm, dict: VmValue) -> Result<Option<&ShapeKin
     }
 }
 
-/// Returns the index of the field `name` in `names`, trying `guess` first.
-fn field_index(names: &[String], name: &str, guess: usize) -> Option<usize> {
+/// Charges fuel for a scan of `n` entries of a type, such as its fields or
+/// variants, so that fuel stays in proportion to work for wide types.
+fn charge_scan(vm: &Vm, n: usize) -> Result<(), Fail> {
+    vm.charge((n / 16) as u64)
+}
+
+/// Returns the index of `name` in `names`. Tries `guess` first, and charges
+/// fuel for a scan if the guess misses.
+fn field_index(vm: &Vm, names: &[String], name: &str, guess: usize) -> Result<Option<usize>, Fail> {
     if names.get(guess).is_some_and(|n| n == name) {
-        return Some(guess);
+        return Ok(Some(guess));
     }
-    names.iter().position(|n| n == name)
+    charge_scan(vm, names.len())?;
+    Ok(names.iter().position(|n| n == name))
 }
 
 /// Builds the heap value of constant `c`.

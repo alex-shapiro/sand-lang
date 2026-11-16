@@ -1305,7 +1305,14 @@ pub struct CodecShape {
     pub fills: Vec<Fill>,
     /// For `Decode` through `init`.
     pub init: Option<InitCall>,
+    /// For `Decode` of a struct with more than [`INDEXED_SLOTS`] fields or
+    /// `init` parameters: the slot of each name.
+    pub slot_index: Option<FxHashMap<String, u32>>,
 }
+
+/// The most struct fields or `init` parameters that the decode walker finds
+/// by a scan, not through [`CodecShape::slot_index`].
+pub const INDEXED_SLOTS: usize = 8;
 
 /// A call of `init` that ends the decode of a struct.
 #[derive(Clone, Debug)]
