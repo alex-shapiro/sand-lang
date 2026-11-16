@@ -420,8 +420,8 @@ impl<const N: u8> Encoded<N> {
         &self.0
     }
 
-    /// Returns the encoded argument, which the engine copies if it retries
-    /// the call.
+    /// Returns the encoded argument. The engine keeps its own reference, so
+    /// this copies the value.
     pub fn into_value(self) -> Value {
         Arc::unwrap_or_clone(self.0)
     }

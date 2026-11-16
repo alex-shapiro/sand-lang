@@ -11,8 +11,8 @@ use crate::syntax::lexer::is_ident;
 use crate::types::traits;
 use crate::value::{StructDesc, VariantDesc};
 use crate::vm::bytecode::{Program, ShapeKind};
-use crate::vm::codec::MAX_NESTING_DEPTH;
 use crate::vm::codec::{self, Shared};
+use crate::vm::codec::{MAX_NESTING_DEPTH, NODE_BYTES};
 use crate::vm::compare::str_hash;
 use crate::vm::heap::Staging;
 use crate::vm::iomem::{IoMemory, Reservation};
@@ -23,8 +23,6 @@ use hashbrown::HashTable;
 use std::borrow::Cow;
 use std::fmt::Write;
 use std::sync::Arc;
-
-const NODE_BYTES: usize = 64;
 
 /// Dynamic JSON value.
 ///
@@ -105,7 +103,7 @@ pub(crate) fn module() -> NativeModule {
         })
     });
     m.function("to_json", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>| {
-        if let Some(json) = scalar_json(vm, dict.raw(), value.raw())? {
+        if let Some(json) = direct_json(vm, dict.raw(), value.raw())? {
             return Ok(Later::ready(Ok(VmVal::<Json>::from_raw(json))));
         }
         let shared = Shared::new(JsonSink::new(TextOut::new(0, &vm.heap.io_memory)));
@@ -623,13 +621,23 @@ fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValu
     })
 }
 
-/// Returns the `Json` of a scalar with a structural `Encode` dictionary
-/// `dict`, without a walk. `json!` converts each interpolated value, and
-/// most of them are scalars. Returns `None` for other values, and for a
-/// float that JSON cannot represent.
-fn scalar_json(vm: &mut Vm, dict: VmValue, value: VmValue) -> Result<Option<VmValue>, Fail> {
+/// Returns the `Json` of a `Json` value, which is the value itself, or of a
+/// scalar with a structural `Encode` dictionary `dict`, without a walk.
+/// `json!` converts each interpolated value, and most of them are scalars or
+/// `Json`. Returns `None` for other values, and for a float that JSON cannot
+/// represent.
+fn direct_json(vm: &mut Vm, dict: VmValue, value: VmValue) -> Result<Option<VmValue>, Fail> {
     let ids = JsonIds::new(&vm.prog)?;
-    let id = match (codec::structural_kind(vm, dict)?, value) {
+    let kind = codec::structural_kind(vm, dict)?;
+    // Variant ids are unique in a program, so a value with a manual codec
+    // and the id of a `Json` variant is a `Json`.
+    if let Some(ShapeKind::ManualEncode(_)) = kind
+        && [ids.null, ids.bool_, ids.int, ids.float, ids.str_, ids.arr, ids.obj].contains(&vm.heap.variant_id(value))
+    {
+        vm.charge(1)?;
+        return Ok(Some(value));
+    }
+    let id = match (kind, value) {
         (Some(ShapeKind::Unit), _) => return Ok(Some(VmValue::Tag(ids.null))),
         (Some(ShapeKind::Bool), VmValue::Bool(_)) => ids.bool_,
         (Some(ShapeKind::Int), VmValue::Int(_)) => ids.int,

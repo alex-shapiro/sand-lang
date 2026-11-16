@@ -31,7 +31,7 @@ use parking_lot::Mutex;
 use std::sync::{Arc, Weak};
 
 /// Bytes that a walker reserves for each value that it builds.
-const NODE_BYTES: usize = 64;
+pub(crate) const NODE_BYTES: usize = 64;
 
 /// The number of parts that a walker visits between two checks of the memory
 /// limit.
