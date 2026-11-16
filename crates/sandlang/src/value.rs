@@ -4,6 +4,7 @@ use crate::native::codec::{CodecResult, DecodeSource, EncodeSink, InputKind, Pay
 use crate::native::convert::HostError;
 use crate::native::ty::Never;
 use crate::vm::Fail;
+use crate::vm::iomem::{IoMemory, Reservation};
 use crate::vm::value::{FxHashMap, ValueType};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -481,19 +482,15 @@ enum Partial {
 
 /// Builds a [`Value`] from the encode walker.
 pub(crate) struct ValueSink {
-    pub root: Option<Value>,
+    root: Option<Value>,
     open: Vec<Partial>,
+    /// The bytes of the value that the sink builds.
     allocated: usize,
-    /// The most bytes that the sink can allocate within the memory limit.
-    max_allocated: usize,
+    /// The memory of the value that the sink builds, which the memory limit
+    /// counts. It reserves up to twice `allocated` ahead.
+    reservation: Reservation,
     /// Cached qualified names of native value types.
     type_names: FxHashMap<String, Arc<str>>,
-}
-
-impl Default for ValueSink {
-    fn default() -> ValueSink {
-        ValueSink { root: None, open: Vec::new(), allocated: 0, max_allocated: usize::MAX, type_names: FxHashMap::default() }
-    }
 }
 
 fn option_desc(some: bool) -> Arc<VariantDesc> {
@@ -504,17 +501,39 @@ fn option_desc(some: bool) -> Arc<VariantDesc> {
 }
 
 impl ValueSink {
-    /// Counts `bytes` more against the memory limit.
+    pub(crate) fn new(memory: &Arc<IoMemory>) -> ValueSink {
+        ValueSink { root: None, open: Vec::new(), allocated: 0, reservation: Reservation::new(memory), type_names: FxHashMap::default() }
+    }
+
+    /// Returns the value that the walker wrote, and the reservation of its
+    /// memory.
+    pub(crate) fn take(&mut self) -> Option<(Value, Reservation)> {
+        let root = self.root.take()?;
+        let sibling = self.reservation.sibling();
+        Some((root, std::mem::replace(&mut self.reservation, sibling)))
+    }
+
+    /// Reserves `bytes` more within the memory limit.
     fn grow(&mut self, bytes: usize) -> CodecResult {
         self.allocated = self.allocated.saturating_add(bytes);
-        if self.allocated > self.max_allocated {
-            return crate::native::codec::memory_limit();
+        if self.allocated <= self.reservation.bytes() {
+            return Ok(());
         }
-        Ok(())
+        let ahead = self.allocated.saturating_mul(2).max(1 << 10);
+        match self.reservation.ensure(ahead).or_else(|_| self.reservation.ensure(self.allocated)) {
+            Ok(()) => Ok(()),
+            Err(_) => crate::native::codec::memory_limit(),
+        }
     }
 
     fn push(&mut self, value: Value) -> CodecResult {
         self.grow(VALUE_BYTES)?;
+        self.place(value);
+        Ok(())
+    }
+
+    /// Places `value` in the innermost open container, or as the root.
+    fn place(&mut self, value: Value) {
         match self.open.last_mut() {
             None => self.root = Some(value),
             Some(
@@ -533,7 +552,6 @@ impl ValueSink {
                 *has_key = !*has_key;
             }
         }
-        Ok(())
     }
 
     /// Opens a container of `len` parts, which `partial` builds in a vector
@@ -545,12 +563,6 @@ impl ValueSink {
         self.grow(len.saturating_mul(size_of::<T>()))?;
         self.open.push(partial(Vec::with_capacity(len)));
         Ok(())
-    }
-}
-
-impl crate::vm::codec::WalkSink for ValueSink {
-    fn set_max_allocated(&mut self, bytes: usize) {
-        self.max_allocated = bytes;
     }
 }
 
@@ -650,12 +662,8 @@ impl EncodeSink for ValueSink {
             Some(Partial::Some(payload)) => Value::Variant(VariantValue { variant: option_desc(true), payload: payload.into() }),
             None => return Ok(()),
         };
-        self.allocated -= VALUE_BYTES.min(self.allocated);
-        self.push(value)
-    }
-
-    fn allocated(&self) -> usize {
-        self.allocated
+        self.place(value);
+        Ok(())
     }
 }
 
@@ -979,10 +987,6 @@ impl DecodeSource for ValueSource {
             }
         }
         s
-    }
-
-    fn allocated(&self) -> usize {
-        0
     }
 
     fn work(&mut self) -> usize {

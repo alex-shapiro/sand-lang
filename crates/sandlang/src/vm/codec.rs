@@ -15,7 +15,7 @@
 //! again from the start, returns that failure as a retryable error.
 
 use super::bytecode::{CODEC_SHAPE_SLOT, CodecShape, Fill, PartTemplate, Program, ShapeKind};
-use super::meter::{SCRATCH_STEP, SLOW_BYTES_PER_UNIT};
+use super::meter::SLOW_BYTES_PER_UNIT;
 use super::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
 use super::{Fail, Vm, WaitKind};
 use crate::engine::LimitKind;
@@ -28,13 +28,13 @@ use crate::types::{ConstVal, traits};
 use crate::value::StructDesc;
 use crate::value::ValueSink;
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// Bytes that a walker reserves for each value that it builds.
 const NODE_BYTES: usize = 64;
 
-/// The number of values that the decode walker reads between two checks of
-/// the memory limit.
+/// The number of parts that a walker visits between two checks of the memory
+/// limit.
 const CHECKED_VALUES: u32 = 32;
 
 /// The maximum nesting depth of a value that a walker encodes or decodes.
@@ -84,6 +84,24 @@ pub(crate) struct Walk {
 impl Walk {
     fn new(values: Vec<VmValue>) -> Walk {
         Walk { values, ..Walk::default() }
+    }
+
+    /// Checks the memory limit before the next part, once for each
+    /// [`CHECKED_VALUES`] parts, and counts the part in `unchecked`. Returns
+    /// the step if the check failed. Sinks and sources reserve their own
+    /// memory, which the check counts.
+    fn check_memory(&mut self, vm: &Vm, unchecked: &mut u32) -> Option<CodecResult<Step>> {
+        let check = if *unchecked == 0 || vm.heap.fail_next_check.get() {
+            let held = self.values.capacity() * size_of::<VmValue>();
+            vm.check_memory(CHECKED_VALUES as usize * NODE_BYTES + held)
+        } else {
+            Ok(())
+        };
+        let step = self.checked(check);
+        if step.is_none() {
+            *unchecked = (*unchecked + 1) % CHECKED_VALUES;
+        }
+        step
     }
 
     /// Returns the step after the memory check before the next part, if the
@@ -321,15 +339,8 @@ impl<IO> Shared<IO> {
     }
 }
 
-/// A sink of the encode walker.
-pub(crate) trait WalkSink: EncodeSink {
-    /// Makes writes fail with the memory limit once the sink would allocate
-    /// more than `bytes` in total.
-    fn set_max_allocated(&mut self, bytes: usize);
-}
-
 /// A shared encode state with any sink.
-pub(crate) type EncodeCell = Arc<Mutex<Shared<dyn WalkSink>>>;
+pub(crate) type EncodeCell = Arc<Mutex<Shared<dyn EncodeSink>>>;
 
 /// A shared decode state with any source.
 pub(crate) type DecodeCell = Arc<Mutex<Shared<dyn DecodeSource>>>;
@@ -338,7 +349,8 @@ pub(crate) type DecodeCell = Arc<Mutex<Shared<dyn DecodeSource>>>;
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
 pub(crate) struct Encoder {
-    shared: EncodeCell,
+    /// The state of the walk, which a stored `Encoder` does not keep alive.
+    shared: Weak<Mutex<Shared<dyn EncodeSink>>>,
     token: u64,
 }
 
@@ -348,7 +360,8 @@ impl crate::native::NativeObject for Encoder {}
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
 pub(crate) struct Decoder {
-    shared: DecodeCell,
+    /// The state of the walk, which a stored `Decoder` does not keep alive.
+    shared: Weak<Mutex<Shared<dyn DecodeSource>>>,
     token: u64,
 }
 
@@ -389,8 +402,8 @@ enum EncodeKind {
 /// Walks a value and writes it to an [`EncodeSink`].
 pub(crate) struct EncodeWalk {
     walk: Walk,
-    /// The size of the sink at which the walk checks the memory limit next.
-    next_check: usize,
+    /// The values written since the last check of the memory limit.
+    unchecked: u32,
     frames: Vec<EncodeFrame>,
     /// The number of open containers other than `Some`.
     depth: usize,
@@ -404,7 +417,7 @@ pub(crate) struct EncodeWalk {
 impl EncodeWalk {
     pub(crate) fn new(value: VmValue, dict: VmValue) -> EncodeWalk {
         let walk = Walk::new(vec![value, dict]);
-        EncodeWalk { walk, next_check: 0, frames: Vec::new(), depth: 0, pending: Some((value, dict)), callback: None }
+        EncodeWalk { walk, unchecked: 0, frames: Vec::new(), depth: 0, pending: Some((value, dict)), callback: None }
     }
 
     /// Walks until the end or the next callback.
@@ -412,19 +425,9 @@ impl EncodeWalk {
         let prog = vm.prog.clone();
         let mut state = shared.lock();
         // Callbacks can have changed the heap since the last pass.
-        self.next_check = 0;
+        self.unchecked = 0;
         loop {
-            let allocated = state.io.allocated();
-            let check = if allocated >= self.next_check || vm.heap.fail_next_check.get() {
-                let held = self.walk.values.capacity() * size_of::<VmValue>();
-                vm.check_memory(NODE_BYTES + held + allocated).inspect(|()| {
-                    self.next_check = allocated + SCRATCH_STEP;
-                    state.io.set_max_allocated(allocated + vm.heap.room());
-                })
-            } else {
-                Ok(())
-            };
-            if let Some(step) = self.walk.checked(check) {
+            if let Some(step) = self.walk.check_memory(vm, &mut self.unchecked) {
                 return step;
             }
             let (value, dict) = match self.pending {
@@ -438,7 +441,7 @@ impl EncodeWalk {
             match method(vm, dict)? {
                 Method::Custom(callee) => {
                     let token = state.turn.next_token;
-                    let encoder = match (Encoder { shared: shared.clone(), token }).into_vm_value(vm) {
+                    let encoder = match (Encoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm) {
                         Ok(e) => e,
                         Err(e) => return self.walk.checked(Err(e)).expect("an error"),
                     };
@@ -738,22 +741,15 @@ impl DecodeWalk {
         let prog = vm.prog.clone();
         let mut state = shared.lock();
         loop {
-            let check = if self.unchecked == 0 || vm.heap.fail_next_check.get() {
-                let held = self.walk.values.capacity() * size_of::<VmValue>();
-                vm.check_memory(CHECKED_VALUES as usize * NODE_BYTES + held + state.io.allocated())
-            } else {
-                Ok(())
-            };
-            if let Some(step) = self.walk.checked(check) {
+            if let Some(step) = self.walk.check_memory(vm, &mut self.unchecked) {
                 return step;
             }
-            self.unchecked = (self.unchecked + 1) % CHECKED_VALUES;
             vm.charge(1 + (state.io.work() / SLOW_BYTES_PER_UNIT) as u64)?;
             if let Some(dict) = self.pending.take() {
                 match method(vm, dict)? {
                     Method::Custom(callee) => {
                         let token = state.turn.next_token;
-                        let decoder = match (Decoder { shared: shared.clone(), token }).into_vm_value(vm) {
+                        let decoder = match (Decoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm) {
                             Ok(d) => d,
                             Err(e) => {
                                 self.pending = Some(dict);
@@ -1214,7 +1210,7 @@ pub(crate) fn encode<S, T, E>(
     finish: impl FnOnce(&mut Vm, &mut S) -> CodecResult<T> + Send + 'static,
 ) -> Result<Later<T, E>, E>
 where
-    S: WalkSink + 'static,
+    S: EncodeSink + 'static,
     T: IntoVmValue + 'static,
     E: WalkError,
     Result<T, E::FutureError>: NativeReturn<Fail>,
@@ -1263,13 +1259,14 @@ where
 
 /// Encodes `value` with `dict` as a [`Value`](crate::value::Value).
 pub(crate) async fn to_value(cx: &mut NativeContext, value: VmValue, dict: VmValue) -> CodecResult<crate::value::Value> {
-    let shared = Shared::new(crate::value::ValueSink::default());
+    let memory = cx.with_vm(|vm| vm.heap.io_memory.clone());
+    let shared = Shared::new(ValueSink::new(&memory));
     let cell: EncodeCell = shared.clone();
     let mut walk = EncodeWalk::new(value, dict);
     let first = cx.with_vm(|vm| walk.run(vm, &cell))?;
     walk.finish(cx, &cell, first).await?;
-    let root = shared.lock().io.root.take();
-    root.ok_or_else(|| Fail::internal("to_value: no value").into())
+    let root = shared.lock().io.take();
+    root.map(|(value, _)| value).ok_or_else(|| Fail::internal("to_value: no value").into())
 }
 
 /// Decodes `value` with `dict`. Returns the decoded heap value, which is
@@ -1284,7 +1281,8 @@ pub(crate) async fn from_value(cx: &mut NativeContext, value: crate::value::Valu
 /// Writes `value` as the single value of `encoder`.
 fn write(vm: &mut Vm, dict: VmValue, value: VmValue, encoder: VmVal<Encoder>) -> Result<Later<(), HostError>, HostError> {
     let e = encoder.get(&vm.heap)?;
-    let (shared, token) = (e.shared.clone(), e.token);
+    let (shared, token) = (e.shared.upgrade(), e.token);
+    let Some(shared) = shared else { return Err(HostError::new("invalid", "an `Encoder` accepts a value only during its `encode` call")) };
     shared.lock().turn.claim(
         token,
         "an `Encoder` accepts a value only during its `encode` call",
@@ -1307,7 +1305,8 @@ fn write(vm: &mut Vm, dict: VmValue, value: VmValue, encoder: VmVal<Encoder>) ->
 /// Reads the single value of `decoder`.
 fn read(vm: &mut Vm, dict: VmValue, decoder: VmVal<Decoder>) -> Result<Later<Param<0>, HostError>, HostError> {
     let d = decoder.get(&vm.heap)?;
-    let (shared, token) = (d.shared.clone(), d.token);
+    let (shared, token) = (d.shared.upgrade(), d.token);
+    let Some(shared) = shared else { return Err(HostError::new("invalid", "a `Decoder` gives a value only during its `decode` call")) };
     shared.lock().turn.claim(
         token,
         "a `Decoder` gives a value only during its `decode` call",
@@ -1331,9 +1330,9 @@ fn read(vm: &mut Vm, dict: VmValue, decoder: VmVal<Decoder>) -> Result<Later<Par
 pub(crate) fn register(m: &mut crate::native::NativeModule) {
     m.bind::<Encoder>().bind::<Decoder>().bind::<InputKind>().bind::<EncodedArg>();
     m.function("encode_arg", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>| {
-        encode::<_, _, Fail>(vm, Shared::new(ValueSink::default()), value.raw(), dict.raw(), |vm, sink| {
-            let value = sink.root.take().ok_or_else(|| Fail::internal("encode_arg: no value"))?;
-            Ok(VmVal::<EncodedArg>::from_raw(EncodedArg(Arc::new(value)).into_vm_value(vm)?))
+        encode::<_, _, Fail>(vm, Shared::new(ValueSink::new(&vm.heap.io_memory)), value.raw(), dict.raw(), |vm, sink| {
+            let (value, reservation) = sink.take().ok_or_else(|| Fail::internal("encode_arg: no value"))?;
+            Ok(VmVal::<EncodedArg>::from_raw(EncodedArg { value: Arc::new(value), _reservation: reservation }.into_vm_value(vm)?))
         })
     });
     m.function("Encode.encode", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>, encoder: VmVal<Encoder>| {
@@ -1346,7 +1345,10 @@ pub(crate) fn register(m: &mut crate::native::NativeModule) {
     m.function("Decoder.decode", |vm: &mut Vm, dict: TraitDict<0, traits::Decode>, decoder: VmVal<Decoder>| read(vm, dict.raw(), decoder));
     m.function("Decoder.kind", |vm: &mut Vm, decoder: VmVal<Decoder>| -> Result<InputKind, HostError> {
         let d = decoder.get(&vm.heap)?;
-        let mut state = d.shared.lock();
+        let Some(shared) = d.shared.upgrade() else {
+            return Err(HostError::new("invalid", "a `Decoder` gives a value only during its `decode` call"));
+        };
+        let mut state = shared.lock();
         if state.turn.active != d.token {
             return Err(state.turn.misuse("a `Decoder` gives a value only during its `decode` call"));
         }

@@ -443,14 +443,18 @@ impl<const N: u8> SandType for Encoded<N> {
 /// to the Rust function.
 #[derive(crate::SandObject)]
 #[sand(module = "prelude", private)]
-pub(crate) struct EncodedArg(pub(crate) Arc<Value>);
+pub(crate) struct EncodedArg {
+    pub(crate) value: Arc<Value>,
+    /// The memory of `value`, which the memory limit counts.
+    pub(crate) _reservation: crate::vm::iomem::Reservation,
+}
 
 impl super::NativeObject for EncodedArg {}
 
 impl<const N: u8> crate::native::convert::FromVmValue for Encoded<N> {
     type Item<'a> = Self;
     fn from_vm_value(vm: &crate::vm::Vm, v: VmValue, _: &mut crate::native::convert::Conversion) -> Result<Self, crate::vm::Fail> {
-        Ok(Encoded(VmVal::<EncodedArg>::from_raw(v).get(&vm.heap)?.0.clone()))
+        Ok(Encoded(VmVal::<EncodedArg>::from_raw(v).get(&vm.heap)?.value.clone()))
     }
 }
 

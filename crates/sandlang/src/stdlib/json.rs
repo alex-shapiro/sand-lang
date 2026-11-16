@@ -15,6 +15,7 @@ use crate::vm::codec::MAX_NESTING_DEPTH;
 use crate::vm::codec::{self, Shared};
 use crate::vm::compare::str_hash;
 use crate::vm::heap::Staging;
+use crate::vm::iomem::{IoMemory, Reservation};
 use crate::vm::meter::{Meter, SLOW_BYTES_PER_UNIT};
 use crate::vm::value::{KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, VmValue, slot_fits};
 use crate::vm::{Fail, Vm, fail, internal};
@@ -96,9 +97,9 @@ pub(crate) fn module() -> NativeModule {
     });
     m.function("encode", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>, indent: i64| {
         let indent = indent.clamp(0, 1 << 16) as usize;
-        let shared = Shared::new(JsonSink::new(TextOut::new(indent)));
+        let shared = Shared::new(JsonSink::new(TextOut::new(indent, &vm.heap.io_memory)));
         codec::encode::<_, _, HostError>(vm, shared, value.raw(), dict.raw(), |vm, sink| {
-            Ok(VmVal::<String>::from_raw(vm.new_str(std::mem::take(&mut sink.out.out))))
+            Ok(VmVal::<String>::from_raw(vm.new_str(sink.out.take_text())))
         })
     });
     m.function(
@@ -691,12 +692,6 @@ impl JsonSink {
     }
 }
 
-impl codec::WalkSink for JsonSink {
-    fn set_max_allocated(&mut self, bytes: usize) {
-        self.out.max_allocated = bytes;
-    }
-}
-
 impl EncodeSink for JsonSink {
     fn unit(&mut self) -> CodecResult {
         self.scalar(|| None, |o| o.null())
@@ -823,10 +818,6 @@ impl EncodeSink for JsonSink {
         }
         Ok(())
     }
-
-    fn allocated(&self) -> usize {
-        self.out.allocated()
-    }
 }
 
 const SPACES: &str = "                                                                ";
@@ -834,8 +825,8 @@ const SPACES: &str = "                                                          
 /// Writes JSON text.
 struct TextOut {
     out: String,
-    /// The most bytes that `out` can hold within the memory limit.
-    max_allocated: usize,
+    /// The memory of `out`, which the memory limit counts.
+    reservation: Reservation,
     /// Spaces per level, or 0 for compact text.
     indent: usize,
     /// For each open array or object: whether it is an array, and whether it
@@ -849,17 +840,36 @@ struct TextOut {
 const SCALAR_BYTES: usize = 32;
 
 impl TextOut {
-    fn new(indent: usize) -> TextOut {
-        TextOut { out: String::new(), max_allocated: usize::MAX, indent, open: Vec::new(), after_key: false }
+    fn new(indent: usize, memory: &Arc<IoMemory>) -> TextOut {
+        TextOut { out: String::new(), reservation: Reservation::new(memory), indent, open: Vec::new(), after_key: false }
     }
 
-    /// Fails with the memory limit if `out` cannot grow by `bytes`.
+    /// Returns the text, and releases its reservation for the heap string
+    /// that the caller builds from it.
+    fn take_text(&mut self) -> String {
+        self.reservation = self.reservation.sibling();
+        std::mem::take(&mut self.out)
+    }
+
+    /// Makes room for `bytes` more in `out` within the memory limit.
     #[inline(always)]
-    fn reserve(&self, bytes: usize) -> CodecResult {
+    fn reserve(&mut self, bytes: usize) -> CodecResult {
         let need = self.out.len().saturating_add(bytes);
-        if need > self.out.capacity() && need.max(2 * self.out.capacity()) > self.max_allocated {
-            return crate::native::codec::memory_limit();
+        if need <= self.out.capacity() {
+            return Ok(());
         }
+        self.grow(need)
+    }
+
+    #[cold]
+    fn grow(&mut self, need: usize) -> CodecResult {
+        let generous = need.max(2 * self.out.capacity());
+        let target = match self.reservation.ensure(generous) {
+            Ok(()) => generous,
+            Err(_) if self.reservation.ensure(need).is_ok() => need,
+            Err(_) => return crate::native::codec::memory_limit(),
+        };
+        self.out.reserve_exact(target - self.out.len());
         Ok(())
     }
 
@@ -964,10 +974,6 @@ impl TextOut {
         self.out.push(if is_array { ']' } else { '}' });
         Ok(())
     }
-
-    fn allocated(&self) -> usize {
-        self.out.capacity()
-    }
 }
 
 /// The longest key that a path quotes in full.
@@ -1010,6 +1016,8 @@ enum LevelKind {
 /// Reads JSON text for the decode walker.
 pub(crate) struct JsonSource {
     text: Box<str>,
+    /// The memory of `text`, which the memory limit counts.
+    _reservation: Reservation,
     pos: usize,
     /// The position at the last call of [`DecodeSource::work`].
     charged: usize,
@@ -1036,10 +1044,13 @@ impl JsonSource {
     /// Copies `text`, a Sand `str`, into a new source.
     fn new(vm: &Vm, text: VmValue) -> Result<JsonSource, Fail> {
         let text = vm.heap.str(text);
-        vm.check_memory(text.len())?;
-        let text: Box<str> = text.into();
+        let mut reservation = Reservation::new(&vm.heap.io_memory);
+        if reservation.ensure(text.len()).is_err() {
+            return Err(Fail::limit(crate::engine::LimitKind::Memory));
+        }
         Ok(JsonSource {
-            text,
+            text: text.into(),
+            _reservation: reservation,
             pos: 0,
             charged: 0,
             levels: Vec::new(),
@@ -1716,10 +1727,6 @@ impl DecodeSource for JsonSource {
             }
         }
         s
-    }
-
-    fn allocated(&self) -> usize {
-        self.text.len() + self.scratch.capacity() + self.levels.capacity() * std::mem::size_of::<Level>()
     }
 
     fn work(&mut self) -> usize {

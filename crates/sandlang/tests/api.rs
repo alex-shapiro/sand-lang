@@ -3224,6 +3224,30 @@ print(r.body == json.to_json(rows))
 }
 
 #[test]
+fn a_stored_decoder_does_not_keep_its_input_alive() {
+    let src = r#"
+import json
+let ch: Channel<Decoder> = Channel()
+struct Spy {}
+impl Decode for Spy {
+    fn decode(decoder: Decoder) -> Result<Spy> {
+        ch.send(decoder)
+        Ok(Spy())
+    }
+}
+let big = "[" + "1,".repeat(2000000) + "1]"
+for _ in 0..150 {
+    let _: Spy = json.decode(big)?
+}
+print(ch.recv().unwrap().kind())
+"#;
+    let config = Config::new().limits(Limits { max_memory: Some(64 << 20), ..Limits::default() });
+    let (r, out, err) = run_src(config, src);
+    r.unwrap_or_else(|e| panic!("{e}: {err}"));
+    assert_eq!(out, "Err(Error(message: \"a `Decoder` gives a value only during its `decode` call\", kind: \"invalid\"))\n");
+}
+
+#[test]
 fn a_native_runs_once_when_its_result_needs_a_collection() {
     let pops = Arc::new(AtomicUsize::new(0));
     let p = pops.clone();

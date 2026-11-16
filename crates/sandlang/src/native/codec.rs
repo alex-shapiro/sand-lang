@@ -88,9 +88,6 @@ pub trait EncodeSink: Send {
     fn begin_variant(&mut self, desc: &Arc<VariantDesc>, len: usize) -> CodecResult;
     /// Ends the innermost container.
     fn end(&mut self) -> CodecResult;
-    /// Returns the bytes of memory that the output holds. The engine counts
-    /// them against the memory limit of the run.
-    fn allocated(&self) -> usize;
 }
 
 /// The kind of the value that a `Decoder` reads next.
@@ -183,9 +180,6 @@ pub trait DecodeSource: Send {
     fn end(&mut self) -> CodecResult;
     /// Returns the path of the current position, such as `$.items[2]`.
     fn path(&self) -> String;
-    /// Returns the bytes of memory that the source holds. The engine counts
-    /// them against the memory limit of the run.
-    fn allocated(&self) -> usize;
     /// Returns the work since the last call, in bytes of input. The engine
     /// charges fuel for it.
     fn work(&mut self) -> usize;
