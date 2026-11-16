@@ -695,44 +695,41 @@ enum DecodeKind {
     /// a variant, in slots. `seen` marks the slots that hold values. `next`
     /// is the slot of the part that the walk reads.
     Slots {
-        names: Names,
-        form: PayloadForm,
+        slots: Slots,
         seen: Vec<bool>,
         next: usize,
-        end: SlotsEnd,
     },
 }
 
-/// The names of the slots of a [`DecodeKind::Slots`].
-enum Names {
-    Fields(Arc<StructDesc>),
-    Params(Arc<[String]>),
-    /// The named payload of variant `id`.
-    Payload(u32),
-    Positional,
+/// What the slots of a [`DecodeKind::Slots`] hold.
+enum Slots {
+    /// The fields of struct `def`.
+    Struct(u32, Arc<StructDesc>),
+    /// The parameters of `init`.
+    Init(Arc<[String]>),
+    /// The payload of variant `id`, whose parts start at part `base` of the
+    /// shape. `named` is whether the payload has field names.
+    Variant { id: u32, base: u32, named: bool },
 }
 
-impl Names {
-    fn get<'a>(&'a self, prog: &'a Program) -> Option<&'a [String]> {
+impl Slots {
+    /// Returns the names of the slots, or `None` for a positional payload.
+    fn names<'a>(&'a self, prog: &'a Program) -> Option<&'a [String]> {
         match self {
-            Names::Fields(desc) => Some(&desc.fields),
-            Names::Params(names) => Some(names),
-            Names::Payload(id) => prog.variants[*id as usize].field_names.as_deref(),
-            Names::Positional => None,
+            Slots::Struct(_, desc) => Some(&desc.fields),
+            Slots::Init(names) => Some(names),
+            Slots::Variant { id, named: true, .. } => prog.variants[*id as usize].field_names.as_deref(),
+            Slots::Variant { .. } => None,
         }
     }
-}
 
-/// What the decode walker builds from the slots of a [`DecodeKind::Slots`].
-#[derive(Clone, Copy)]
-enum SlotsEnd {
-    Struct(u32),
-    Init,
-    /// Variant `id`, whose parts start at `base`.
-    Variant {
-        id: u32,
-        base: u32,
-    },
+    /// Returns the part of the shape of the first slot.
+    fn base(&self) -> u32 {
+        match self {
+            Slots::Variant { base, .. } => *base,
+            _ => 0,
+        }
+    }
 }
 
 /// Builds a value from a [`DecodeSource`].
@@ -849,12 +846,11 @@ impl DecodeWalk {
             ShapeKind::Struct(def) | ShapeKind::Init(def) => {
                 let desc = prog.types[*def as usize].desc();
                 source.begin_struct(desc)?;
-                let (names, end, n) = match (&shape.kind, &shape.init) {
-                    (ShapeKind::Init(_), Some(init)) => (Names::Params(init.names.clone()), SlotsEnd::Init, init.names.len()),
-                    _ => (Names::Fields(desc.clone()), SlotsEnd::Struct(*def), desc.fields.len()),
+                let (slots, n) = match (&shape.kind, &shape.init) {
+                    (ShapeKind::Init(_), Some(init)) => (Slots::Init(init.names.clone()), init.names.len()),
+                    _ => (Slots::Struct(*def, desc.clone()), desc.fields.len()),
                 };
-                let kind = DecodeKind::Slots { names, form: PayloadForm::Named, seen: vec![false; n], next: 0, end };
-                return self.push_frame(dict, s, kind, n);
+                return self.push_frame(dict, s, DecodeKind::Slots { slots, seen: vec![false; n], next: 0 }, n);
             }
             ShapeKind::Enum { def, first } => {
                 let (def, first) = (*def, *first as usize);
@@ -879,10 +875,9 @@ impl DecodeWalk {
                     self.place(VmValue::Tag(id));
                     return Ok(());
                 }
-                let names = if variant.field_names.is_some() { Names::Payload(id) } else { Names::Positional };
+                let slots = Slots::Variant { id, base, named: form == PayloadForm::Named };
                 let n = variant.arity;
-                let kind = DecodeKind::Slots { names, form, seen: vec![false; n], next: 0, end: SlotsEnd::Variant { id, base } };
-                return self.push_frame(dict, s, kind, n);
+                return self.push_frame(dict, s, DecodeKind::Slots { slots, seen: vec![false; n], next: 0 }, n);
             }
             ShapeKind::ManualEncode(_) => return Err(Fail::internal("decode: an encode shape").into()),
         };
@@ -906,17 +901,11 @@ impl DecodeWalk {
                 DecodeKind::Map if children % 2 == 1 => Some(1),
                 DecodeKind::Map => source.next()?.then_some(0),
                 DecodeKind::Some => (children == 0).then_some(0),
-                DecodeKind::Slots { names, form, seen, next, end } => {
-                    let base = match end {
-                        SlotsEnd::Variant { base, .. } => *base,
-                        _ => 0,
-                    };
-                    match form {
-                        PayloadForm::Named => match source.next_field()? {
-                            Some(name) => match names
-                                .get(prog)
-                                .and_then(|ns| field_index(ns, &name, *next + usize::from(seen.get(*next) == Some(&true))))
-                            {
+                DecodeKind::Slots { slots, seen, next } => {
+                    let base = slots.base();
+                    match slots.names(prog) {
+                        Some(names) => match source.next_field()? {
+                            Some(name) => match field_index(names, &name, *next + usize::from(seen.get(*next) == Some(&true))) {
                                 Some(i) if seen[i] => {
                                     let name = crate::stdlib::truncate(&name, 64).to_string();
                                     return parse_error(source, format!("duplicate field `{name}`"));
@@ -933,8 +922,7 @@ impl DecodeWalk {
                             },
                             None => None,
                         },
-                        PayloadForm::Unit => None,
-                        PayloadForm::Positional(_) => match seen.iter().position(|s| !s) {
+                        None => match seen.iter().position(|s| !s) {
                             Some(i) if source.next()? => {
                                 (seen[i], *next) = (true, i);
                                 Some(base + i as u32)
@@ -952,31 +940,27 @@ impl DecodeWalk {
                 None => frame.ended = true,
             }
         }
-        if let DecodeKind::Slots { names, seen, next, end, .. } = &mut frame.kind
+        if let DecodeKind::Slots { slots, seen, next } = &mut frame.kind
             && let Some(missing) = seen.iter().position(|s| !s)
         {
-            let base = match end {
-                SlotsEnd::Variant { base, .. } => *base,
-                _ => 0,
-            };
-            let name = || names.get(prog).map_or_else(|| missing.to_string(), |ns| ns[missing].clone());
+            let base = slots.base();
+            let names = slots.names(prog);
             let value = match shape.fills.get(missing).cloned().unwrap_or(Fill::Required) {
                 Fill::Required => {
                     let d = self.walk.part_dict(vm, prog, s, base + missing as u32, dict)?;
                     match method(vm, d)? {
                         Method::Structural(p) if matches!(shape_kind(vm, p)?, ShapeKind::Option) => VmValue::Tag(vm.prog.ids.none),
-                        _ if matches!(names, Names::Positional) => {
-                            let arity = seen.len();
-                            return parse_error(source, format!("expected {arity} payload values"));
-                        }
-                        _ => return parse_error(source, format!("missing field `{}`", name())),
+                        _ => match names {
+                            Some(names) => return parse_error(source, format!("missing field `{}`", names[missing])),
+                            None => return parse_error(source, format!("expected {} payload values", seen.len())),
+                        },
                     }
                 }
                 Fill::Const(c) => constant(vm, &c)?,
                 Fill::Call(f, dicts) => {
                     let mut args = dicts.iter().map(|t| eval_template(vm, t, dict)).collect::<Result<Vec<_>, _>>()?;
                     // The default helper of an `init` parameter takes the parameters before it.
-                    if matches!(names, Names::Params(_)) {
+                    if matches!(slots, Slots::Init(_)) {
                         args.extend_from_slice(&self.walk.values[at + 1..at + 1 + missing]);
                     }
                     (seen[missing], *next) = (true, missing);
@@ -1009,9 +993,9 @@ impl DecodeWalk {
                 Err(e) => return self.walk.checked(Err(e)).transpose(),
             },
             DecodeKind::Some => vm.some(children[0]),
-            DecodeKind::Slots { end: SlotsEnd::Struct(def), .. } => vm.heap.alloc(Obj::Struct(*def, children.into())),
-            DecodeKind::Slots { end: SlotsEnd::Variant { id, .. }, .. } => vm.heap.new_variant(*id, children),
-            DecodeKind::Slots { end: SlotsEnd::Init, .. } => {
+            DecodeKind::Slots { slots: Slots::Struct(def, _), .. } => vm.heap.alloc(Obj::Struct(*def, children.into())),
+            DecodeKind::Slots { slots: Slots::Variant { id, .. }, .. } => vm.heap.new_variant(*id, children),
+            DecodeKind::Slots { slots: Slots::Init(_), .. } => {
                 let Some(init) = &shape.init else { return Err(Fail::internal("decode: an init shape without init").into()) };
                 let mut args = init.dicts.iter().map(|t| eval_template(vm, t, dict)).collect::<Result<Vec<_>, _>>()?;
                 args.extend_from_slice(children);
