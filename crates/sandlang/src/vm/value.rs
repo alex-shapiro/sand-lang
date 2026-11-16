@@ -1127,7 +1127,6 @@ pub(crate) fn parse_value<T: ValueType>(text: &str) -> Result<Obj, String> {
     Ok(value_obj(T::parse(text)?))
 }
 
-/// Struct field descriptor: `(name, type, default)`.
 /// The state of an [`Obj::IterFn`].
 #[derive(Debug, Clone, Copy)]
 pub enum IterSrc {

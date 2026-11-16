@@ -2,8 +2,8 @@
 //!
 //! The engine encodes a Sand value by walking it and writing each part to an
 //! [`EncodeSink`]. It decodes a Sand value by reading each part from a
-//! [`DecodeSource`]. JSON text, the `json.Json` tree, and the host
-//! [`Value`](crate::value::Value) each provide a sink or a source.
+//! [`DecodeSource`]. JSON text and the host [`Value`](crate::value::Value)
+//! each provide a sink and a source.
 //!
 //! A native type implements the Sand traits only if its derive attribute
 //! declares them. `#[sand(encode, decode)]` derives them from the structure of
@@ -92,7 +92,7 @@ pub trait EncodeSink: Send {
 
 /// The kind of the value that a `Decoder` reads next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, crate::SandEnum)]
-#[sand(module = "prelude")]
+#[sand(module = "prelude", encode, decode)]
 pub enum InputKind {
     /// `()`, `None`, or JSON `null`.
     Null,

@@ -406,6 +406,19 @@ Visible defects that rarely block users.
 
 ### Embedding
 
+- [ ] ⚪ Check the growth of a set or map table before the part, as the decode
+      walker does for a list. After a callback, a set or map that grows past
+      the limit stops the run, where a collection could help. The list check
+      also runs before the walker knows that another element follows, so a
+      full list that ends needs room it never uses.
+- [ ] ❓ Decide whether `JsonSource` denies numbers out of range, as
+      serde_json does. `json.parse("[1e999]")` gives `Float(inf)`, which
+      `json.encode` then denies.
+- [ ] ⚪ Say in each codec doc what a nesting level is. The walker counts Sand
+      containers without `Some`, `TextOut` and `JsonSource` count JSON
+      brackets, and `ValueSink` counts `Value` nodes with `Some`.
+- [ ] ⚪ Deny `impl Encode for T {}` on a struct whose `init` parameters differ
+      from its fields, with the reason that the derived impl gives.
 - [ ] ⚪ Derive `ToValue` only for native types whose codec is derived. For a
       type with a manual codec, `x.to_value()` gives a different `Value` than
       `NativeContext::to_value`, so `from_value` of the first form fails.

@@ -155,7 +155,7 @@ impl Checker {
     }
 
     /// Returns `true` if struct `d` declares no `init`, or if the parameters
-    /// of its `init` have the names and types of its fields.
+    /// of its `init` have the names and types of its fields, in any order.
     fn init_matches_fields(&mut self, d: TypeDefId) -> bool {
         let Some(init) = self.init_method(Ctor::Def(d)) else { return true };
         let (fi, def) = (self.fns[init as usize].clone(), self.types[d as usize].clone());
@@ -163,7 +163,10 @@ impl Checker {
         let own: Vec<TypeId> = def.generics.iter().map(|&p| self.arena.param(p)).collect();
         fi.generics.len() == def.generics.len()
             && fi.params.len() == fields.len()
-            && fi.params.iter().zip(fields).all(|(p, f)| p.name == f.name && self.arena.instantiate(p.ty, &fi.generics, &own) == f.ty)
+            && fi.params.iter().all(|p| {
+                let ty = self.arena.instantiate(p.ty, &fi.generics, &own);
+                fields.iter().any(|f| p.name == f.name && ty == f.ty)
+            })
     }
 
     fn add_codec_impl(&mut self, tr: TraitRef, d: TypeDefId) -> ImplId {

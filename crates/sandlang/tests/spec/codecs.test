@@ -372,3 +372,20 @@ main().unwrap()
 "a"
 2
 [true][true]
+
+=== an init with the fields as parameters in another order keeps Encode, and InputKind encodes
+import json
+struct P2 {
+    a: int
+    b: str
+    fn init(b: str, a: int) -> P2 { P2(a: a, b: b) }
+}
+let text = json.encode(P2("x", 1))?
+print(text)
+let back: P2 = json.decode(text)?
+print(back)
+print(json.encode([InputKind.Int, InputKind.Map])?)
+--- stdout
+{"a":1,"b":"x"}
+P2(a: 1, b: "x")
+["Int","Map"]
