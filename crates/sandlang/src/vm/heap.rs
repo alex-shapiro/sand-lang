@@ -584,6 +584,14 @@ impl Heap {
         }
     }
 
+    /// The bytes that can still be allocated within the memory limit.
+    pub(crate) fn room(&self) -> usize {
+        match self.limit {
+            Some(l) => l.saturating_sub(self.used().saturating_add(self.io_memory.reserved())),
+            None => usize::MAX,
+        }
+    }
+
     /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
     /// Allocate the bytes immediately after this check, or use [`Scratch`](super::meter::Scratch) to track a growing buffer.
     pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Fail> {

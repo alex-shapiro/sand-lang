@@ -666,16 +666,13 @@ impl JsonSink {
     }
 
     /// Writes a scalar: as a key if it is a map key, or else as `value`.
-    fn scalar(&mut self, key: impl FnOnce() -> Option<String>, value: impl FnOnce(&mut TextOut)) -> CodecResult {
+    fn scalar(&mut self, key: impl FnOnce() -> Option<String>, value: impl FnOnce(&mut TextOut) -> CodecResult) -> CodecResult {
         match self.slot()? {
             true => match key() {
                 Some(k) => self.out.key(&k),
                 None => invalid_key(),
             },
-            false => {
-                value(&mut self.out);
-                Ok(())
-            }
+            false => value(&mut self.out),
         }
     }
 
@@ -685,6 +682,12 @@ impl JsonSink {
         }
         self.frames.push(frame);
         Ok(())
+    }
+}
+
+impl codec::WalkSink for JsonSink {
+    fn set_max_allocated(&mut self, bytes: usize) {
+        self.out.max_allocated = bytes;
     }
 }
 
@@ -733,14 +736,13 @@ impl EncodeSink for JsonSink {
         self.out.begin_object(2 + usize::from(inclusive))?;
         for (name, bound) in [("start", start), ("end", end)] {
             self.out.key(name)?;
-            self.out.int(bound);
+            self.out.int(bound)?;
         }
         if inclusive {
             self.out.key("inclusive")?;
-            self.out.bool(true);
+            self.out.bool(true)?;
         }
-        self.out.end();
-        Ok(())
+        self.out.end()
     }
 
     fn native(&mut self, _: &str, text: &str) -> CodecResult {
@@ -808,10 +810,10 @@ impl EncodeSink for JsonSink {
         match self.frames.pop() {
             Some(Frame::Bare) | None => {}
             Some(Frame::Named { .. } | Frame::Positional) => {
-                self.out.end();
-                self.out.end();
+                self.out.end()?;
+                self.out.end()?;
             }
-            Some(_) => self.out.end(),
+            Some(_) => self.out.end()?,
         }
         Ok(())
     }
@@ -826,6 +828,8 @@ const SPACES: &str = "                                                          
 /// Writes JSON text.
 struct TextOut {
     out: String,
+    /// The most bytes that `out` can hold within the memory limit.
+    max_allocated: usize,
     /// Spaces per level, or 0 for compact text.
     indent: usize,
     /// For each open array or object: whether it is an array, and whether it
@@ -835,73 +839,93 @@ struct TextOut {
     after_key: bool,
 }
 
+/// The most bytes that a scalar other than a string writes.
+const SCALAR_BYTES: usize = 32;
+
 impl TextOut {
     fn new(indent: usize) -> TextOut {
-        TextOut { out: String::new(), indent, open: Vec::new(), after_key: false }
+        TextOut { out: String::new(), max_allocated: usize::MAX, indent, open: Vec::new(), after_key: false }
+    }
+
+    /// Fails with the memory limit if `out` cannot grow by `bytes`.
+    #[inline(always)]
+    fn reserve(&self, bytes: usize) -> CodecResult {
+        let need = self.out.len().saturating_add(bytes);
+        if need > self.out.capacity() && need.max(2 * self.out.capacity()) > self.max_allocated {
+            return crate::native::codec::memory_limit();
+        }
+        Ok(())
     }
 
     /// Writes the separator before the next member of the innermost
-    /// container.
+    /// container, and reserves `bytes` for the member.
     #[inline(always)]
-    fn separate(&mut self) {
+    fn separate(&mut self, bytes: usize) -> CodecResult {
         if std::mem::replace(&mut self.after_key, false) {
-            return;
+            return self.reserve(bytes);
         }
         if let Some((_, empty)) = self.open.last_mut() {
             if !std::mem::replace(empty, false) {
                 self.out.push(',');
             }
-            self.start_line();
+            self.start_line()?;
         }
+        self.reserve(bytes)
     }
 
     /// Writes a newline and indentation if `self.indent` is positive.
     #[inline(always)]
-    fn start_line(&mut self) {
+    fn start_line(&mut self) -> CodecResult {
         if self.indent == 0 {
-            return;
+            return Ok(());
         }
-        self.out.push('\n');
         let mut left = self.indent.saturating_mul(self.open.len());
+        self.reserve(left.saturating_add(2))?;
+        self.out.push('\n');
         while left > 0 {
             let spaces = &SPACES[..left.min(SPACES.len())];
             self.out.push_str(spaces);
             left -= spaces.len();
         }
+        Ok(())
     }
 
     fn begin(&mut self, is_array: bool) -> CodecResult {
         if self.open.len() >= MAX_NESTING_DEPTH {
             return Err(Fail::runtime_error("limit", "value too deeply nested to encode as JSON").into());
         }
-        self.separate();
+        self.separate(1)?;
         self.out.push(if is_array { '[' } else { '{' });
         self.open.push((is_array, true));
         Ok(())
     }
 
-    fn null(&mut self) {
-        self.separate();
+    fn null(&mut self) -> CodecResult {
+        self.separate(SCALAR_BYTES)?;
         self.out.push_str("null");
+        Ok(())
     }
 
-    fn bool(&mut self, b: bool) {
-        self.separate();
+    fn bool(&mut self, b: bool) -> CodecResult {
+        self.separate(SCALAR_BYTES)?;
         self.out.push_str(if b { "true" } else { "false" });
+        Ok(())
     }
 
-    fn int(&mut self, i: i64) {
-        self.separate();
+    fn int(&mut self, i: i64) -> CodecResult {
+        self.separate(SCALAR_BYTES)?;
         self.out.push_str(itoa::Buffer::new().format(i));
+        Ok(())
     }
 
-    fn float(&mut self, f: f64) {
-        self.separate();
+    fn float(&mut self, f: f64) -> CodecResult {
+        self.separate(SCALAR_BYTES)?;
         let _ = write!(self.out, "{f:?}");
+        Ok(())
     }
 
     fn str(&mut self, s: &str) -> CodecResult {
-        self.separate();
+        self.separate(quoted_len(s))?;
         write_str(&mut self.out, s);
         Ok(())
     }
@@ -915,7 +939,7 @@ impl TextOut {
     }
 
     fn key(&mut self, k: &str) -> CodecResult {
-        self.separate();
+        self.separate(quoted_len(k) + 2)?;
         write_str(&mut self.out, k);
         self.out.push(':');
         if self.indent > 0 {
@@ -925,12 +949,14 @@ impl TextOut {
         Ok(())
     }
 
-    fn end(&mut self) {
-        let Some((is_array, empty)) = self.open.pop() else { return };
+    fn end(&mut self) -> CodecResult {
+        let Some((is_array, empty)) = self.open.pop() else { return Ok(()) };
         if !empty {
-            self.start_line();
+            self.start_line()?;
         }
+        self.reserve(1)?;
         self.out.push(if is_array { ']' } else { '}' });
+        Ok(())
     }
 
     fn allocated(&self) -> usize {
@@ -1698,6 +1724,13 @@ impl DecodeSource for JsonSource {
 }
 
 #[inline(always)]
+/// Returns a bound on the bytes that [`write_str`] writes for `s`. The bound
+/// of a short string skips the scan for escapes.
+fn quoted_len(s: &str) -> usize {
+    let escaped = if s.len() <= 4096 || has_escape(s.as_bytes()) { 6 * s.len() } else { s.len() };
+    escaped + 2
+}
+
 fn write_str(out: &mut String, s: &str) {
     out.reserve(s.len() + 2);
     out.push('"');

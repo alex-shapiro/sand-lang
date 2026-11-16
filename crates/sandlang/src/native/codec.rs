@@ -49,6 +49,12 @@ use std::sync::Arc;
 /// Result of an [`EncodeSink`] or [`DecodeSource`] request.
 pub type CodecResult<T = ()> = Result<T, HostError<Fail>>;
 
+/// Fails with the memory limit.
+#[cold]
+pub(crate) fn memory_limit<T>() -> CodecResult<T> {
+    Err(Fail::limit(crate::engine::LimitKind::Memory).into())
+}
+
 /// Receives a single Sand value from the encode walker.
 ///
 /// The walker writes a scalar with a single call. It writes a container with

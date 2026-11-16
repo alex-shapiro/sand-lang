@@ -15,7 +15,7 @@
 //! again from the start, returns that failure as a retryable error.
 
 use super::bytecode::{CodecShape, Fill, PartTemplate, Program, ShapeKind};
-use super::meter::{SLOW_BYTES_PER_UNIT, Scratch};
+use super::meter::{SCRATCH_STEP, SLOW_BYTES_PER_UNIT};
 use super::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
 use super::{Fail, Vm, WaitKind};
 use crate::engine::LimitKind;
@@ -248,14 +248,21 @@ pub(crate) struct EncodeShared<S: ?Sized> {
     pub sink: S,
 }
 
-impl<S: EncodeSink + 'static> EncodeShared<S> {
+/// A sink of the encode walker.
+pub(crate) trait WalkSink: EncodeSink {
+    /// Makes writes fail with the memory limit once the sink would allocate
+    /// more than `bytes` in total.
+    fn set_max_allocated(&mut self, bytes: usize);
+}
+
+impl<S: WalkSink + 'static> EncodeShared<S> {
     pub(crate) fn new(sink: S) -> Arc<Mutex<EncodeShared<S>>> {
         Arc::new(Mutex::new(EncodeShared { active: 0, written: false, next_token: 1, failed: None, sink }))
     }
 }
 
 /// A shared encode state with any sink.
-pub(crate) type EncodeCell = Arc<Mutex<EncodeShared<dyn EncodeSink>>>;
+pub(crate) type EncodeCell = Arc<Mutex<EncodeShared<dyn WalkSink>>>;
 
 /// The state that a walk shares with the `Decoder`s of its callbacks.
 pub(crate) struct DecodeShared<S: ?Sized> {
@@ -324,8 +331,8 @@ enum EncodeKind {
 /// Walks a value and writes it to an [`EncodeSink`].
 pub(crate) struct EncodeWalk {
     walk: Walk,
-    /// Checks the growth of the sink against the memory limit.
-    scratch: Scratch,
+    /// The size of the sink at which the walk checks the memory limit next.
+    next_check: usize,
     frames: Vec<EncodeFrame>,
     /// The number of open containers other than `Some`.
     depth: usize,
@@ -339,15 +346,26 @@ pub(crate) struct EncodeWalk {
 impl EncodeWalk {
     pub(crate) fn new(value: VmValue, dict: VmValue) -> EncodeWalk {
         let walk = Walk::new(vec![value, dict]);
-        EncodeWalk { walk, scratch: Scratch::new(), frames: Vec::new(), depth: 0, pending: Some((value, dict)), callback: None }
+        EncodeWalk { walk, next_check: 0, frames: Vec::new(), depth: 0, pending: Some((value, dict)), callback: None }
     }
 
     /// Walks until the end or the next callback.
     pub(crate) fn run(&mut self, vm: &mut Vm, shared: &EncodeCell) -> CodecResult<Step> {
         let prog = vm.prog.clone();
         let mut state = shared.lock();
+        // Callbacks can have changed the heap since the last pass.
+        self.next_check = 0;
         loop {
-            if let Some(step) = self.walk.checked(self.scratch.check(&vm.heap, NODE_BYTES + state.sink.allocated())) {
+            let allocated = state.sink.allocated();
+            let check = if allocated >= self.next_check || vm.heap.fail_next_check.get() {
+                vm.check_memory(NODE_BYTES + allocated).inspect(|()| {
+                    self.next_check = allocated + SCRATCH_STEP;
+                    state.sink.set_max_allocated(allocated + vm.heap.room());
+                })
+            } else {
+                Ok(())
+            };
+            if let Some(step) = self.walk.checked(check) {
                 return step;
             }
             let (value, dict) = match self.pending {
@@ -1124,7 +1142,7 @@ pub(crate) fn encode<S, T, E>(
     finish: impl FnOnce(&mut Vm, &mut S) -> CodecResult<T> + Send + 'static,
 ) -> Result<Later<T, E>, E>
 where
-    S: EncodeSink + 'static,
+    S: WalkSink + 'static,
     T: IntoVmValue + 'static,
     E: WalkError,
     Result<T, E::FutureError>: NativeReturn<Fail>,

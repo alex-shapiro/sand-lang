@@ -480,13 +480,20 @@ enum Partial {
 }
 
 /// Builds a [`Value`] from the encode walker.
-#[derive(Default)]
 pub(crate) struct ValueSink {
     pub root: Option<Value>,
     open: Vec<Partial>,
     allocated: usize,
+    /// The most bytes that the sink can allocate within the memory limit.
+    max_allocated: usize,
     /// Cached qualified names of native value types.
     type_names: FxHashMap<String, Arc<str>>,
+}
+
+impl Default for ValueSink {
+    fn default() -> ValueSink {
+        ValueSink { root: None, open: Vec::new(), allocated: 0, max_allocated: usize::MAX, type_names: FxHashMap::default() }
+    }
 }
 
 fn option_desc(some: bool) -> Arc<VariantDesc> {
@@ -497,8 +504,17 @@ fn option_desc(some: bool) -> Arc<VariantDesc> {
 }
 
 impl ValueSink {
+    /// Counts `bytes` more against the memory limit.
+    fn grow(&mut self, bytes: usize) -> CodecResult {
+        self.allocated = self.allocated.saturating_add(bytes);
+        if self.allocated > self.max_allocated {
+            return crate::native::codec::memory_limit();
+        }
+        Ok(())
+    }
+
     fn push(&mut self, value: Value) -> CodecResult {
-        self.allocated += VALUE_BYTES;
+        self.grow(VALUE_BYTES)?;
         match self.open.last_mut() {
             None => self.root = Some(value),
             Some(
@@ -520,13 +536,21 @@ impl ValueSink {
         Ok(())
     }
 
-    fn open(&mut self, partial: Partial, len: usize) -> CodecResult {
+    /// Opens a container of `len` parts, which `partial` builds in a vector
+    /// with that capacity.
+    fn open<T>(&mut self, len: usize, partial: impl FnOnce(Vec<T>) -> Partial) -> CodecResult {
         if self.open.len() >= MAX_VALUE_DEPTH {
             return Err(Fail::runtime_error("limit", "value too deeply nested to encode as a host value").into());
         }
-        self.allocated += len.saturating_mul(VALUE_BYTES);
-        self.open.push(partial);
+        self.grow(len.saturating_mul(size_of::<T>()))?;
+        self.open.push(partial(Vec::with_capacity(len)));
         Ok(())
+    }
+}
+
+impl crate::vm::codec::WalkSink for ValueSink {
+    fn set_max_allocated(&mut self, bytes: usize) {
+        self.max_allocated = bytes;
     }
 }
 
@@ -552,12 +576,12 @@ impl EncodeSink for ValueSink {
     }
 
     fn str(&mut self, value: &str) -> CodecResult {
-        self.allocated += value.len();
+        self.grow(value.len())?;
         self.push(Value::Str(value.to_string()))
     }
 
     fn bytes(&mut self, value: &[u8]) -> CodecResult {
-        self.allocated += value.len();
+        self.grow(value.len())?;
         self.push(Value::Bytes(value.to_vec()))
     }
 
@@ -569,13 +593,13 @@ impl EncodeSink for ValueSink {
         let type_name = match self.type_names.get(type_name) {
             Some(n) => n.clone(),
             None => {
-                self.allocated += 2 * type_name.len();
+                self.grow(2 * type_name.len())?;
                 let n: Arc<str> = type_name.into();
                 self.type_names.insert(type_name.to_string(), n.clone());
                 n
             }
         };
-        self.allocated += text.len() + size_of::<NativeValue>();
+        self.grow(text.len() + size_of::<NativeValue>())?;
         self.push(Value::Native(Box::new(NativeValue { type_name, text: text.to_string() })))
     }
 
@@ -584,27 +608,27 @@ impl EncodeSink for ValueSink {
     }
 
     fn begin_some(&mut self) -> CodecResult {
-        self.open(Partial::Some(Vec::with_capacity(1)), 1)
+        self.open(1, Partial::Some)
     }
 
     fn begin_list(&mut self, len: usize) -> CodecResult {
-        self.open(Partial::List(Vec::with_capacity(len)), len)
+        self.open(len, Partial::List)
     }
 
     fn begin_tuple(&mut self, len: usize) -> CodecResult {
-        self.open(Partial::Tuple(Vec::with_capacity(len)), len)
+        self.open(len, Partial::Tuple)
     }
 
     fn begin_set(&mut self, len: usize) -> CodecResult {
-        self.open(Partial::Set(Vec::with_capacity(len)), len)
+        self.open(len, Partial::Set)
     }
 
     fn begin_map(&mut self, len: usize) -> CodecResult {
-        self.open(Partial::Map(Vec::with_capacity(len), false), 2 * len)
+        self.open(len, |entries| Partial::Map(entries, false))
     }
 
     fn begin_struct(&mut self, desc: &Arc<StructDesc>) -> CodecResult {
-        self.open(Partial::Struct(desc.clone(), Vec::with_capacity(desc.fields.len())), desc.fields.len())
+        self.open(desc.fields.len(), |fields| Partial::Struct(desc.clone(), fields))
     }
 
     fn begin_variant(&mut self, desc: &Arc<VariantDesc>, len: usize) -> CodecResult {
@@ -612,7 +636,7 @@ impl EncodeSink for ValueSink {
             self.open.push(Partial::Variant(desc.clone(), Vec::new()));
             return Ok(());
         }
-        self.open(Partial::Variant(desc.clone(), Vec::with_capacity(len)), len)
+        self.open(len, |payload| Partial::Variant(desc.clone(), payload))
     }
 
     fn end(&mut self) -> CodecResult {
