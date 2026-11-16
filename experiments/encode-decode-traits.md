@@ -4,7 +4,7 @@ We propose to make `Encode` and `Decode` ordinary traits that users can implemen
 
 ## Goals
 
-The design has six goals:
+Design goals:
 
 - `Encode` and `Decode` follow the same rules as every other trait.
 - `Encode` and `Decode` implementations are composable and nestable.
@@ -12,6 +12,8 @@ The design has six goals:
 - A script can encode any `Encode` value as JSON text. It can decode JSON text into any `Decode` type.
 - Host code can encode any `Encode` value into a `Value`. It can decode a `Value` into any `Decode` type.
 - The walkers encode and decode `json.Json` under the same rules as every other type.
+- The checker, the compiler, and the VM use the same mechanism for every trait with a native default method.
+- Encoding and decoding stay close to the speed of `main`.
 
 ## Architecture
 
@@ -35,6 +37,18 @@ We rejected three alternatives:
 
 The decode walker can invoke a callback before rejecting a later field. The decode walker runs custom `decode` methods, `init` constructors, and computed defaults as it reaches each part. Previously, `json.decode` ran computed field defaults only after it parsed the entire input.
 
+### Trait-agnostic native default methods over codec support in the compiler
+
+The checker automatically derives every trait with a native default method.
+
+The compiler records a shape for each derived implementation. A shape holds the type constructor and a dictionary template for each part. A trait builds values if its native default method is a static method with `Self` in its return type, as in `Decode.decode`. A trait reads values if its native default method takes `self`, as in `Encode.encode`. The shapes of a trait that builds values also hold constructor data: the `init` call and the default value of each parameter or field. Each derived dictionary stores its shape index after its method slots.
+
+The walkers form a standard library module.
+
+We rejected one alternative:
+
+- **Codec metadata in the compiler and the bytecode.** If the compiler built shapes only for `Encode` and `Decode`, the VM would depend on one standard library module. Each new derived trait would also need compiler changes.
+
 ### Format-agnostic sinks and sources over per-format walkers
 
 The encode walker writes to an `EncodeSink` interface. The decode walker reads from a `DecodeSource` interface. JSON text and host `Value` each provide a sink and a source.
@@ -46,12 +60,17 @@ We rejected two alternatives:
 - **Separate walkers for each format.** Per-format walkers would duplicate callback suspension, heap rooting, and resume logic across formats.
 - **JSON conventions inside the `Value` source.** If the `Value` source accepted Base64 strings for `bytes`, host callers would have to follow JSON rules. Other libraries such as `serde_json` encode byte strings differently. Hosts with JSON input can call `json.decode` directly.
 
-### On-demand part dictionaries over eager nested dictionaries
+### Cached plans over per-part dictionary reads
 
-Structural dictionaries store part templates instead of child dictionaries. The walker builds each child dictionary from its template only if it visits that child. It caches built child dictionaries for the rest of the walk.
+Structural dictionaries store part templates instead of child dictionaries. Before a walk, the walker resolves the templates below the root dictionary into a plan: a Rust tree with a node for each distinct dictionary. The walker then visits values by the plan without dictionary reads.
 
-We rejected two alternatives:
+If a dictionary below the root runs Sand code, the walker reads each part dictionary as it reaches the part, and awaits each callback. A plan also stops at 1,024 distinct dictionaries. A polymorphically recursive type such as `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }` exceeds that limit.
 
+The walkers cache plans across calls in per-VM storage for native modules. That storage maps a Rust type to a value, so two modules cannot collide. Each VM has its own map, so engines in one process do not share caches. The cache keys plans by constant root dictionaries, whose handles last for the life of the VM.
+
+We rejected three alternatives:
+
+- **Per-part dictionary reads.** In release-build benchmarks of small and large `json.encode` and `json.decode` calls, reading each part's dictionary and shape made calls take 1.7 to 2.3 times as long as on `main`.
 - **Eagerly nested dictionaries.** If parent dictionaries stored child dictionaries directly, the compiler would need cyclic constants for recursive types such as `Tree`. On a polymorphically recursive type such as `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }`, the compiler would expand nested dictionaries without bound.
 - **Generated Sand lookup functions.** Each call to a generated Sand helper function costs about 90 ns per uncached child dictionary. The walker would pay that callback cost even on derived types.
 
@@ -119,7 +138,7 @@ We rejected two alternatives:
 
 For a struct with an `init` constructor, the compiler derives `Decode` from `init`'s parameters. At runtime, the decode walker reads those parameters and calls `init`. The derived implementation includes `init`'s trait bounds. The walker passes their dictionaries to `init`. The walker sets missing `Option` parameters to `None`. For other missing parameters with defaults, the walker evaluates their defaults. The walker ignores `init`'s visibility. Field-based decoding likewise populates private fields.
 
-If `init`'s parameter names or types differ from the struct's fields, the compiler omits derived `Encode`. The compiler still accepts the struct definition. It reports a compile error only if code requires `Encode` without a custom `Encode` implementation.
+For a trait that builds values, such as `Decode`, the derived implementation visits a struct's `init` parameters. For a trait that reads values, such as `Encode`, the derived implementation visits the struct's fields. The checker derives a trait that reads values for a struct with `init` only if the `init` parameters match the fields by name and type. The compiler accepts the struct definition in both cases.
 
 We rejected six alternatives:
 
@@ -155,18 +174,18 @@ We rejected two alternatives:
 - **Outside-VM codec traits on Rust types.** Host code cannot run Sand's codec rules through outside-VM Rust traits alone. The engine executes custom Sand methods, `init` constructors, and computed defaults inside an active `Vm`.
 - **Keeping `Value::Opaque` and an untyped synchronous `Vm::to_value`.** With an untyped synchronous `Vm::to_value`, the engine would ignore custom `Encode` implementations. It would also require a second heap walker. An unbounded type parameter lacks an `Encode` dictionary. A synchronous call also cannot await a Sand callback.
 
-### Explicit opt-in and Rust traits for native types
+### Explicit opt-in and native methods for native types
 
-A module author opts a native Rust type into `Encode` and `Decode` with `#[sand(encode, decode)]` or `#[sand(encode = "manual", decode = "manual")]`. With `#[sand(encode, decode)]`, the VM walker encodes and decodes the type structurally. With `"manual"`, the walker calls a custom Rust implementation. The `SandObject` macro accepts only the manual form. The macro cannot inspect the Rust fields of an opaque reference type.
+A module author opts a native Rust type into a derived trait by name, as in `#[sand(derive(Encode, Decode))]`. The walkers then encode and decode the type structurally. The derive macros reject `derive(...)` on generic native types and on `SandObject` types.
 
-Manual codecs implement `native::codec::Encode` and `native::codec::Decode` over `&mut Vm` and `VmVal<Self>`. They read and write the VM heap in place through `EncodeSink` and `DecodeSource`. They avoid copying heap data into owned Rust values. Derived native types use the VM walker directly without generated Rust codec code. The derive macros reject `encode` and `decode` on generic native types.
+For a custom implementation, the module source declares an ordinary `impl` block with a native method, as in `impl Encode for Money { native fn encode(self, encoder: Encoder) -> Result<()> }`. The Rust body takes `VmVal<Self>` and reads the VM heap in place. It writes through the sink of the `Encoder` handle, or reads through the source of the `Decoder` handle. If a custom method is a native function, the walker calls it directly through a general VM call for native function values, without an async callback.
 
 We rejected four alternatives:
 
 - **Automatic derivation for all bound Rust types.** If the checker derived codecs automatically for all bound types, it would expose internal Rust struct layouts as wire formats.
-- **Writing custom codecs for native types in Sand.** Rust manual codecs run directly in the walker without async VM callbacks.
-- **Defining `native::codec::Encode` and `native::codec::Decode` over owned Rust values.** If those traits took `&Self` and `Self` instead of `VmVal<Self>`, the engine would copy heap values such as `Json` trees into Rust on every call.
-- **Supporting generic native types.** To support generic native types, the Rust codec traits would need trait dictionaries and async VM callbacks. The standard library defines zero public generic native types.
+- **Writing custom codecs for native types in Sand.** Native methods run directly in the walker without async VM callbacks.
+- **Registering Rust codec functions on the type binding.** The checker and the compiler would then carry codec data in type definitions and shapes.
+- **Native methods over owned Rust values.** If native methods took `Self` instead of `VmVal<Self>`, the engine would copy heap values such as `Json` trees into Rust on every call.
 
 ### Fallible `json.encode` and infallible `json.to_json`
 
@@ -181,7 +200,7 @@ We rejected two alternatives:
 
 ### `json.Json` as an ordinary native type
 
-`json.Json` implements `Encode` and `Decode` manually in Rust as an ordinary native type. Its Rust implementation reads and writes the VM heap in place through `EncodeSink` and `DecodeSource`. The walkers contain zero `Json`-specific branches.
+`json.Json` implements `Encode` and `Decode` with native methods in `json.sand`, as an ordinary native type. The walkers contain zero `Json`-specific branches.
 
 If the walkers branched on `Json`, `Json` would diverge from the rules for other types.
 
