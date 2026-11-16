@@ -372,6 +372,16 @@ impl Vm {
 
     /// Pushes a [`CALLBACK_PROTO`] frame on `fiber` to call `callee` with `args`.
     fn begin_callback(&mut self, fiber: &mut Fiber, callee: VmValue, args: &[VmValue]) -> Result<(), RunEnding> {
+        let arity = match self.heap.get(callee) {
+            Obj::Closure(proto, _) => self.prog.protos.get(*proto as usize).map(|p| p.nparams as usize),
+            Obj::NativeFn(n) => self.prog.native_argc.get(*n as usize).map(|&a| a as usize),
+            _ => None,
+        };
+        if arity.is_some_and(|n| n != args.len()) {
+            let fail =
+                Fail::internal(format!("a callback has {} parameters, but its caller passes {} arguments", arity.unwrap_or(0), args.len()));
+            return Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
+        }
         let base = fiber.live_top(&self.prog);
         let need = base + 1 + MAX_CALLBACK_ARGS;
         let grow = |vm: &mut Vm, fiber: &mut Fiber| -> Result<(), Fail> {

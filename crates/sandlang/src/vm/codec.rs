@@ -1014,7 +1014,11 @@ impl DecodeWalk {
                 }
                 Fill::Const(c) => constant(vm, &c)?,
                 Fill::Call(f, dicts) => {
-                    let args = dicts.iter().map(|t| eval_template(vm, t, dict)).collect::<Result<Vec<_>, _>>()?;
+                    let mut args = dicts.iter().map(|t| eval_template(vm, t, dict)).collect::<Result<Vec<_>, _>>()?;
+                    // The default helper of an `init` parameter takes the parameters before it.
+                    if matches!(names, Names::Params(_)) {
+                        args.extend_from_slice(&self.walk.values[at + 1..at + 1 + missing]);
+                    }
                     (seen[missing], *next) = (true, missing);
                     return Ok(Some(Callback { callee: vm.consts[f as usize], args, purpose: Purpose::Fill }));
                 }

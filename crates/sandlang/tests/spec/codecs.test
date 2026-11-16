@@ -201,3 +201,35 @@ let e: Email = json.decode("{\"raw\": \"B\"}").unwrap()
 --- error
 10: Wrapper<str> does not implement `Encode`
 11: Email does not implement `Encode` because the parameters of `Email.init` differ from its fields
+
+=== an init default reads the parameters before it, as a call does
+import json
+struct Span {
+    lo: int
+    hi: int
+    fn init(lo: int, hi: int = lo + 10) -> Span { Span(lo: lo, hi: hi) }
+}
+struct Name {
+    name: str
+    label: str
+    fn init(name: str, label: str = name.to_upper()) -> Name { Name(name: name, label: label) }
+}
+struct Range2<T: Num> {
+    lo: T
+    hi: T
+    fn init(lo: T, hi: T = lo + T.one()) -> Range2<T> { Range2(lo: lo, hi: hi) }
+}
+let s: Span = json.decode("{\"lo\": 1}")?
+print(s == Span(lo: 1))
+print(s)
+let n: Name = json.decode("{\"name\": \"ab\"}")?
+print(n)
+let r: Range2<float> = json.decode("{\"lo\": 1.5}")?
+print(r)
+print(r == Range2(lo: 1.5))
+--- stdout
+true
+Span(lo: 1, hi: 11)
+Name(name: "ab", label: "AB")
+Range2(lo: 1.5, hi: 2.5)
+true
