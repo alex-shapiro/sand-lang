@@ -326,8 +326,8 @@ pub trait Encode {
 ///
 /// The compiler derives `Decode` for `never` and for tuples, structs, and
 /// enums whose components implement `Decode`. If a struct declares `init`, the
-/// derived implementation decodes the `init` parameters. It then calls `init`
-/// to construct the struct. Write an `impl` block to override the derived
+/// derived decoder reads the `init` parameters. It then calls `init` to
+/// construct the struct. Write an `impl` block to override the derived
 /// implementation.
 pub trait Decode {
     /// Reads a value of type `Self` from `decoder`.
@@ -363,23 +363,23 @@ native fn encode_arg<T: Encode>(value: T) -> EncodedArg
 extend Encoder {
     /// Writes `value` as the output of `self`.
     ///
-    /// An `Encoder` accepts a single value during its `encode` call. Fails
-    /// with kind `"invalid"` if called again or after that call returns.
+    /// An `Encoder` accepts a single value during its `Encode.encode` call.
+    /// Fails with kind `"invalid"` if called again or after that call returns.
     pub native fn encode<T: Encode>(self, value: T) -> Result<()>
 }
 
 extend Decoder {
     /// Reads the input of `self` as a value of type `T`.
     ///
-    /// A `Decoder` reads a single value during its `decode` call. Fails with
-    /// kind `"invalid"` if called again or after that call returns.
+    /// A `Decoder` reads a single value during its `Decode.decode` call. Fails
+    /// with kind `"invalid"` if called again or after that call returns.
     pub native fn decode<T: Decode>(self) -> Result<T>
 
     /// Returns the kind of the next input value without consuming it.
     ///
     /// Returns `InputKind.Str` for a JSON object key. Fails with kind
-    /// `"invalid"` after `decode` consumes the value or after the `decode`
-    /// call returns.
+    /// `"invalid"` after `self.decode()` reads the value or after the
+    /// `Decode.decode` call returns.
     pub native fn kind(self) -> Result<InputKind>
 }
 

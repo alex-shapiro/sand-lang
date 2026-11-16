@@ -405,30 +405,31 @@ Visible defects that rarely block users.
 
 ### Embedding
 
-- [ ] ❓ Decide whether a codec walk should rewind a part that hits `max_memory`
-      after a callback. Today, the run stops if the part has already read from
-      the source or written to the sink. In a request loop with a custom
-      `Decode` implementation and heap garbage, the run passes at 40 MB and
-      52 MB. That same loop stops at 44 MB and 48 MB. Each source and sink could
-      save a position before each part. The walker could then restore its
-      frames. `JsonSource` and `JsonTextWriter` can reset their positions
-      cheaply. `ValueSource` would need indexed reads. With saved positions,
-      `Encoder.encode` and `Decoder.decode` could also run their first pass
-      synchronously.
+- [ ] ❓ Decide whether the codec walkers should rewind the current part on a
+      post-callback `max_memory` error. Today, the engine stops the run if the
+      walker has already read from the source or written to the sink. With a
+      custom `Decode` implementation and heap garbage, the engine finishes a
+      request loop at 40 MB and 52 MB. At 44 MB and 48 MB, the engine stops
+      that same loop. Each source and sink could save a position before each
+      part. The walker could then restore its frames. `JsonSource` and
+      `JsonTextWriter` can reset their positions cheaply. `ValueSource` would
+      need indexed reads. With saved positions, `Encoder.encode` and
+      `Decoder.decode` could also run their first pass synchronously.
 - [ ] ❓ Decide whether generic native types can derive `Encode` and `Decode`
       with `#[sand(encode, decode)]`. Today, the derive macros reject both
       manual and derived codecs on generic native types. Manual Rust codecs
-      cannot run callbacks for an erased type parameter `T`. Derived codecs run
-      in the VM walker without generated Rust code.
+      cannot run callbacks for an erased type parameter `T`. The VM walker runs
+      derived codecs directly without generated Rust code.
 - [ ] ❓ Align `Decoder.kind()` and `ValueSource::unit` on host `Option.None`.
       `Decoder.kind()` reports `Null` for `Option.None`. `ValueSource::unit`
       rejects `Option.None`. Either report `Variant` from `kind()`, or accept
       `Option.None` in `ValueSource::unit` to match JSON `null`.
 - [ ] ⚪ Check set and map table growth before decoding the next entry. If table
       growth exceeds `max_memory` after a callback, the engine stops the run
-      instead of collecting garbage. Also check list capacity only after the
-      source confirms another element. Today, the decode walker reserves space
-      for another element before checking for the end of a full list.
+      instead of collecting garbage.
+- [ ] ⚪ Check list capacity only after the source confirms another element.
+      Today, the decode walker reserves space for another element before
+      checking for the end of a full list.
 - [ ] ❓ Decide whether `JsonSource` should reject out-of-range numbers like
       `serde_json`. `json.parse("[1e999]")` returns `Float(inf)`. `json.encode`
       then rejects that infinite float.
@@ -461,8 +462,8 @@ Visible defects that rarely block users.
       copies the full input string because `json.decode` cannot borrow the VM
       heap across Sand callbacks.
 - [ ] ❓ _Testing._ Fail the Nth memory check of a native call in a stress mode.
-      `retry_stress` fails only the first check. It misses memory checks that
-      run after a side effect. After a callback, a codec walk stops on a
+      `retry_stress` fails only the first check. It misses memory checks after
+      a side effect. After a callback, the codec walker stops the run on a
       mid-part memory limit check. The stress test must expect that stop.
 - [ ] ⚪ Reject `Value::Set` if the target type is a Sand list. Today,
       `NativeContext::from_value` accepts `Value::Set` for a list type because
@@ -522,27 +523,29 @@ Visible defects that rarely block users.
 
 ### Diagnostics
 
-- [ ] ⚪ Report a distinct error if a nested callback reuses an outer `Encoder`
-      or `Decoder` whose call is still running.
+- [ ] ⚪ Report a distinct error if a nested callback reuses an active outer
+      `Encoder` or `Decoder`.
 - [ ] ⚪ Suggest a `Decode` bound if the parser sees `<reflect T>`.
 - [ ] ⚪ Include the field or element path in encode errors, as decode errors
       do. Encode errors for non-finite floats, non-text map keys, and custom
       `encode` methods omit the failing path.
 - [ ] ⚪ Print every bound of a prelude implementation in `help`. `help(Decode)`
-      prints `Set<T> where T: Decode` and omits `T: Hash` because the help
-      printer skips marker trait bounds without dictionaries.
+      prints `Set<T> where T: Decode` without `T: Hash`. The help printer skips
+      marker trait bounds without dictionaries.
 - [ ] ⚪ Deduplicate missing trait diagnostics within a single expression.
 
 ### Performance
 
 - [ ] ❓ Decide whether to add fast paths to the codec walkers. Each walker
-      reads a trait dictionary at every value. In
-      `crates/sandlang/benches/codec.rs`, `json.encode` takes 916 ns per item
-      versus 469 ns on `main`. `json.decode` takes 1900 ns versus 1028 ns.
-      `json.to_json` takes 2614 ns versus 756 ns. A custom implementation adds
-      about 500 ns per value. `bench/run.py` omits the `json` module. Fast paths
-      could skip constant part dictionary reads or format JSON text without
-      dynamic sink calls. Those fast paths must stay aligned with the walker.
+      reads a trait dictionary at every value. Fast paths could skip constant
+      part dictionary reads or format JSON text without dynamic sink calls.
+      Those fast paths must stay aligned with the walker. Benchmarks in
+      `crates/sandlang/benches/codec.rs`:
+      - `json.encode`: 916 ns per item versus 469 ns on `main`
+      - `json.decode`: 1900 ns versus 1028 ns on `main`
+      - `json.to_json`: 2614 ns versus 756 ns on `main`
+      - custom implementation overhead: about 500 ns per value
+      - `bench/run.py` omits the `json` module
 - [ ] ⚪ Deduplicate and simplify the codec walkers:
       - Share the common memory check, fuel charge, method dispatch, and handle
         setup across both `run` loops.
@@ -581,6 +584,8 @@ Visible defects that rarely block users.
       variant as `{"Banned":"spam"}` instead of `{"Banned":["spam"]}` to match
       `serde` newtype variants. Hosts often exchange JSON with `serde_json`. A
       later change to the derived format would break scripts that expect the
-      array wrapper. `JsonSink` also writes `Some(None)` as `null`. `JsonSource`
-      then decodes `null` as `None`.
+      array wrapper.
+- [ ] ❓ Decide how JSON should represent nested `Option` values such as
+      `Some(None)`. `JsonSink` writes `Some(None)` as `null`. `JsonSource` then
+      decodes `null` as `None`.
 - [ ] ⚪ Support non-constant default expressions on trait method parameters.

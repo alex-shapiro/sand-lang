@@ -106,7 +106,7 @@ Native default methods follow the same rules as other default methods. If an `im
 
 ### `Num` keeps `Encode`
 
-`Num` keeps `pub trait Num: Ord + Encode` in `crates/sandlang/src/stdlib/prelude.sand:321`. In `crates/sandlang/tests/spec/std_json.test:554`, the spec test `"data implements Encode, and Num implies it"` passes a `T: Num` value to a function that requires `T: Encode`.
+`Num` keeps `pub trait Num: Ord + Encode` in `crates/sandlang/src/stdlib/prelude.sand:321`. On `main`, in `crates/sandlang/tests/spec/std_json.test:554`, the spec test `"data implements Encode, and Num implies it"` passes a `T: Num` value to a function that requires `T: Encode`.
 
 The `Encode` supertrait on `Num` adds a single supertrait slot to two constant dictionaries. Existing `Num` method offsets stay unchanged. `crates/sandlang/src/check/traits.rs:491-497` restricts `Num` implementations to the prelude. `crates/sandlang/src/stdlib/prelude.sand:328-337` implements `Num` only for `int` and `float`. `native::Num` reads `zero` and `one` by slot index in `crates/sandlang/src/check/traits.rs:466-474`. Dictionary layout places method slots before supertrait slots. `zero` and `one` stay at slots 0 and 1.
 
@@ -139,7 +139,7 @@ Rust setup code registers each native default method with its supported types:
 - Type definition categories: structs, enums, and native value types.
 - Support for `never`.
 
-Registration lists type categories rather than type definition IDs because Rust setup runs before the checker reads source files.
+Setup code registers type categories rather than type definition IDs. The engine runs Rust setup before the checker reads source files.
 
 Each walker module defines a single exhaustive `match` function over type constructors and categories. That function maps each variant to a walker handler or marks it unsupported. Registration calls the same function. A single definition governs both registration and dispatch. Because the `match` covers every variant, the Rust compiler requires an explicit choice for each new constructor or category.
 
@@ -163,7 +163,7 @@ The derivation pass on `main` cannot propagate custom trait bounds from part typ
 
 - `Derived::Needs` in `crates/sandlang/src/check/derive.rs:14-19` records only parameter indices for the same trait.
 - The pass consults only its own derivation table for type definitions in `crates/sandlang/src/check/derive.rs:28-33`.
-- The pass runs before the checker declares module `impl` headers in `crates/sandlang/src/check/mod.rs:1328-1330`, `1365`, and `1366-1374`.
+- The checker runs the pass before declaring module `impl` headers in `crates/sandlang/src/check/mod.rs:1328-1330`, `1365`, and `1366-1374`.
 
 We reuse `propagate_to_fixed_point` in `crates/sandlang/src/check/derive.rs:166-190`. As `crates/sandlang/src/check/derive.rs:123-125` states, greatest fixed-point iteration ensures "that mutually recursive types implement a trait unless a component type refutes it". We replace its per-type index list with type-parameter and trait pairs. The checker runs this pass after declaring `impl` headers and before `check_impl_supertraits` in `crates/sandlang/src/check/mod.rs:1375-1377`.
 
@@ -178,7 +178,7 @@ We reuse `propagate_to_fixed_point` in `crates/sandlang/src/check/derive.rs:166-
 
 The checker accepts user `impl` blocks for `Encode` and `Decode` under standard trait rules.
 
-A custom implementation replaces the structural implementation for its type constructor. See `crates/sandlang/src/check/traits.rs:537-550`. The checker rejects a second implementation for a trait, type constructor, and tuple arity if the trait arguments unify. Because `Encode` and `Decode` take zero trait arguments, an `impl Encode for W<int>` block replaces the structural `Encode` implementation for every `W<T>`. `W<str>` then does not implement `Encode`. [Open question 4](#open-questions) asks whether to keep this rule.
+A custom implementation replaces the structural implementation for its type constructor. See `crates/sandlang/src/check/traits.rs:537-550`. The checker rejects a second implementation for a trait, type constructor, and tuple arity if it can unify their trait arguments. Because `Encode` and `Decode` take zero trait arguments, an `impl Encode for W<int>` block replaces the structural `Encode` implementation for every `W<T>`. `W<str>` then does not implement `Encode`. [Open question 4](#open-questions) asks whether to keep this rule.
 
 If an `impl` block omits the method body, the checker builds a structural implementation with the block's declared bounds. The checker verifies that every part implements the trait under those bounds. For example, `impl<T: Encode> Encode for Box<T> {}` is valid if every part of `Box<T>` implements `Encode` under `T: Encode`.
 
@@ -242,7 +242,7 @@ The compiler emits a template for each part kind:
 - **Type parameter.** For elements in `impl<T: Encode> Encode for [T]`, the compiler emits `Bound(0)`. The walker reads the first bound dictionary from the enclosing dictionary.
 - **Generic part.** For `items: [T]` in `impl<T: Encode> Encode for Page<T>`, the compiler emits `Tuple([Constant(native_encode), Constant(list_shape), Bound(0)])`. The walker evaluates those three elements to build the `[T]` dictionary.
 
-Part template evaluation charges fuel and enforces a depth limit. On `main`, `op_describe` in `crates/sandlang/src/vm/interp.rs:1952-1954` charges fuel per template instantiation. `DescTemplate::instantiate` in `crates/sandlang/src/vm/value.rs:1384-1389` enforces the depth limit.
+The walker charges fuel during part template evaluation. It also enforces a template depth limit. On `main`, `op_describe` in `crates/sandlang/src/vm/interp.rs:1952-1954` charges fuel per template instantiation. `DescTemplate::instantiate` in `crates/sandlang/src/vm/value.rs:1384-1389` enforces the depth limit.
 
 ### How the compiler builds part templates
 
@@ -284,7 +284,7 @@ The user writes a custom `Encode` implementation for `Email`. The checker genera
 
 ### Dictionaries on demand
 
-The walker builds a part's dictionary only if it visits a value of that part. On-demand construction terminates on all three forms of recursive types:
+The walker builds a part's dictionary only if it visits a value of that part. With on-demand construction, the walker terminates on all three forms of recursive types:
 
 - **Direct recursion.** In `struct Tree { children: [Tree] }`, `Tree`'s shape holds `Constant(k)` for `children`. Here `k` indexes the constant `[Tree]` dictionary. That `[Tree]` dictionary holds `Tree`'s dictionary in its bound slot. See [The shape table](#the-shape-table) for why these constants stay acyclic.
 - **Generic recursion.** For `Tree<T>`, the compiler emits the finite template `Tuple([native, list_shape, Tuple([native, tree_shape, Bound(0)])])` for `children`. At a `children` field, the walker builds the `[Tree<T>]` dictionary. From that dictionary, it builds the inner `Tree<T>` dictionary.
@@ -323,17 +323,17 @@ Each async native call owns a root table. `NativeContext::root` in `crates/sandl
 
 Rooted handles remain valid across callbacks because the collector in `crates/sandlang/src/vm/heap.rs:1-3` never moves heap objects.
 
-This design lets an async native call release roots before the call returns. `TODO.md:46-53` tracks this change: "Let an async native function release roots during a call." On `main`, the root table only grows during a call. Without mid-call release, a walk with many callbacks would retain every rooted value until the walk ends.
+This design lets an async native call release roots before the call returns. `TODO.md:46-53` tracks this change: "Let an async native function release roots during a call." On `main`, the engine only appends to the root table during a call. Without mid-call release, a walk with many callbacks would retain every rooted value until the walk ends.
 
 Before each callback, the decode walker closes its active `Staging` closure. After the callback returns, it opens a fresh `Staging` closure. As `crates/sandlang/src/vm/heap.rs:447-450` documents, staged heap values become valid only after their staging closure returns.
 
-A callback can mutate an open container. For example, a custom `encode` callback can remove an element from an open list. The walker reads each child as it reaches that index. Because rooting keeps every open container live, container mutation changes the output without accessing freed memory. `TODO.md:42-45` tracks mutation detection.
+A callback can mutate an open container. For example, a custom `encode` callback can remove an element from an open list. The walker reads each child as it reaches that index. Because the walker roots every open container, the collector keeps mutated containers live. A mutating callback changes only the output. `TODO.md:42-45` tracks mutation detection.
 
 ### Synchronous start
 
-Each native codec call starts its walker synchronously. If the walk completes without callbacks, the function returns `Later::ready` in `crates/sandlang/src/native/func.rs:411-413` without allocating a `Future`. At the first callback, the walker moves its state into a `Future` with `Later::new` in `crates/sandlang/src/native/func.rs:403-408`. Between callbacks, the walker processes derived parts inside a single `NativeContext::with_vm` call rather than calling `with_vm` per part.
+Each native codec function starts its walker synchronously. If the walker finishes without callbacks, the function returns `Later::ready` in `crates/sandlang/src/native/func.rs:411-413` without allocating a `Future`. At the first callback, the walker moves its state into a `Future` with `Later::new` in `crates/sandlang/src/native/func.rs:403-408`. Between callbacks, the walker processes derived parts inside a single `NativeContext::with_vm` call rather than calling `with_vm` per part.
 
-Before the first callback, a memory-limit error triggers garbage collection and restarts the native function from the start. See `crates/sandlang/src/vm/mod.rs:927-929`. A full restart is safe before any Sand callback runs. After the first callback, a full restart would repeat callback side effects. Post-callback allocations instead run inside `NativeContext::step` in `crates/sandlang/src/native/context.rs:179-199`. On a memory-limit error, `NativeContext::step` collects garbage and retries only its own closure.
+Before the first callback, the engine collects garbage on a memory-limit error. It then restarts the native function from the start. See `crates/sandlang/src/vm/mod.rs:927-929`. A full restart is safe before the walker invokes a Sand callback. After the first callback, a full restart would repeat callback side effects. The walker instead runs post-callback allocations inside `NativeContext::step` in `crates/sandlang/src/native/context.rs:179-199`. On a memory-limit error, `NativeContext::step` collects garbage. It then retries only its own closure.
 
 ### Speed of the walker
 
@@ -352,9 +352,9 @@ The proposed walker differs from both prototypes. It avoids per-node boxed futur
 The encode walker reads a Sand value and writes to an `EncodeSink`. At each part, it builds the part dictionary from the part template and checks slot 0:
 
 - **Native default method.** The walker writes the part directly to the sink in Rust.
-- **Custom method.** The walker creates an `Encoder` handle to the shared sink. It calls the custom method through a callback. Inside the callback, `encoder.encode(value)` runs the encode walker on `value` with the same sink. That nested walk writes `value` at the part's output position.
+- **Custom method.** The walker creates an `Encoder` handle to the shared sink. It calls the custom method through a callback. Inside the callback, `encoder.encode(value)` runs the encode walker on `value` with the same sink. The nested walker writes `value` at the part's output position.
 
-`encoder.encode` returns `Result<()>`. If the nested walk fails, `encoder.encode` returns that error for propagation with `?`. If a custom method returns `Err`, the outer walk stops and returns that error.
+`encoder.encode` returns `Result<()>`. If the nested walk fails, `encoder.encode` returns that error for propagation with `?`. If a custom method returns `Err`, the outer walker stops. It returns that error.
 
 Both the outer walker and `Encoder` hold handles to the shared sink. During a callback, the outer walker waits for the callback to finish. Only the active nested walk writes to the sink.
 
@@ -364,7 +364,7 @@ An `Encoder` accepts a single value during its callback. The engine returns an `
 - The custom method writes a second value.
 - Sand code calls `encoder.encode` after the callback returns.
 
-Each nested `encoder.encode` call increments the nesting depth. A custom `encode` method that writes `self` stops at the 512-level limit.
+Each nested `encoder.encode` call increments the nesting depth. If a custom `encode` method writes `self`, the walker stops it at the 512-level limit.
 
 ### Encode sink interface
 
@@ -396,15 +396,15 @@ The decode walker builds a Sand value from each dictionary's shape. It reads inp
 
 Sets and maps hash and insert only finished values because each callback finishes before the walker inserts its result.
 
-Both the outer walker and `Decoder` share the source. A `Decoder` reads at most one value during its callback. If the custom method returns without reading, the source skips that unread value. If `decoder.decode()` fails, the decode walker returns that read error regardless of what the custom method returns. After a failed read, the walker stops because the source can sit partway through a value. A custom method cannot retry a failed read as another type. In this draft, a Sand `decode` method also cannot query the next input kind. [Open question 3](#open-questions) asks whether `Decoder` should expose that query.
+Both the outer walker and `Decoder` share the source. A `Decoder` reads at most a single value during its callback. If the custom method returns without reading, the decode walker skips that unread value. If `decoder.decode()` fails, the decode walker returns that read error regardless of what the custom method returns. After a failed read, the walker stops. A failed read can leave the source partway through a value. A custom method cannot retry a failed read as another type. In this draft, a Sand `decode` method also cannot query the next input kind. [Open question 3](#open-questions) asks whether `Decoder` should expose that query.
 
-If a struct field or `init` parameter appears twice in the input, the decode walker returns a `"parse"` error. The run continues after that error. For duplicate map keys, the decode walker overwrites the earlier entry with the later value.
+If a struct field or `init` parameter appears twice in the input, the decode walker returns a `"parse"` error. Callers can handle that error without stopping the run. For duplicate map keys, the decode walker overwrites the earlier entry with the later value.
 
 ### Order of callbacks
 
-Because the decode walker awaits each callback in place, a custom method or computed default can run before a later field fails to decode. This order differs from `main`. On `main`, `crates/sandlang/src/stdlib/json.sand:137-138` runs computed field defaults "in post-order after parsing succeeds". In `serde_derive` 1.0.229, `src/de.rs:766-779` likewise calls a `default = "path"` function as soon as it finds a missing field.
+Because the decode walker awaits each callback in place, it can invoke a custom method or computed default before rejecting a later field. This order differs from `main`. On `main`, `crates/sandlang/src/stdlib/json.sand:137-138` runs computed field defaults "in post-order after parsing succeeds". In `serde_derive` 1.0.229, `src/de.rs:766-779` likewise calls a `default = "path"` function as soon as it finds a missing field.
 
-In `crates/sandlang/tests/spec/std_json.test:634-660`, the spec test `"decode runs the defaults that are not constants, as a construction does"` prints the default call count after a failed decode. The test prints 6 instead of 5 because `inner.a`'s default runs before the walker reaches the invalid `items` field.
+On `main`, in `crates/sandlang/tests/spec/std_json.test:634-660`, the spec test `"decode runs the defaults that are not constants, as a construction does"` prints the default call count after a failed decode. Under this design, the test prints 6 instead of 5. The walker evaluates `inner.a`'s default before reaching the invalid `items` field.
 
 ### Decode source interface
 
@@ -448,7 +448,7 @@ A native type implements `Encode` or `Decode` only if its `#[sand(...)]` derive 
 
 The `SandObject` macro accepts only `"manual"` because opaque reference types hide their internal structure. The derive macros reject `encode` and `decode` on generic native types. Every public native type in the standard library is concrete.
 
-On `main`, the checker in `crates/sandlang/src/check/derive.rs:196-199` automatically derives `Encode` for every bound struct, enum, and value type. Under this design, native types implement `Encode` and `Decode` only if their attributes opt in. Standard library data types add explicit codec attributes where needed.
+On `main`, the checker in `crates/sandlang/src/check/derive.rs:196-199` automatically derives `Encode` for every bound struct, enum, and value type. Under this design, a native type implements `Encode` or `Decode` only if its `#[sand(...)]` attribute declares the trait. Standard library data types add explicit codec attributes where needed.
 
 Manual codecs still require the macro attribute because `bind` is a generic function. Generic code in stable Rust cannot test whether `T: Encode` holds. Rust trait specialization remains unstable. See `https://github.com/rust-lang/rust/issues/31844`. `#[sand(manual_conversion)]` in `crates/sandlang-macros/src/lib.rs:9` already uses this explicit opt-in to omit derived `FromVmValue` and `IntoVmValue` implementations. `json::Json` uses `manual_conversion` in `crates/sandlang/src/stdlib/json.rs:36`. For a `"manual"` codec declaration, the derive macro emits a compile-time assertion that the Rust trait implementation exists.
 
@@ -470,7 +470,7 @@ pub trait Decode: Sized {
 
 `native::Encode` replaces `value::Encode` in `crates/sandlang/src/value.rs:243-275`. A helper converts a Rust value into a `Value` by running its `native::Encode` implementation into the `Value` sink. In `serde_json` 1.0.154, `to_value` in `src/value/mod.rs:995-998` similarly runs `Serialize` into a value builder.
 
-For example, this host type encodes money in integer cents instead of text:
+For example, this manual implementation encodes `Money` as integer cents instead of text:
 
 ```rust
 /// An amount of money in cents, such as `1250`.
@@ -498,7 +498,7 @@ impl sandlang::native::Decode for Money {
 Each type binding records whether each declared codec trait is derived or manual:
 
 - **Derived.** A derived native type has two implementations of a single encoding: the VM walker for heap values and a macro-generated Rust implementation for host values. For Sand calls, the checker builds a structural implementation from struct fields, enum variants, or `ValueType` text. The VM walker reads or builds the heap value directly without calling Rust codec methods. For host `Value` conversion, the derive macro also generates `native::Encode` from the same field list. On `main`, `crates/sandlang/src/value.rs:250-251` states the same rule for `value::Encode`: a derived `encode` "returns the same `Value` that [`Vm::to_value`] copies from the VM". Tests compare the two outputs. [Open question 1](#open-questions) asks how to avoid maintaining two implementations.
-- **Manual.** The derive macro generates a Rust wrapper function for each manual trait and stores it in the binding as the Sand trait method. If the walker reaches that wrapper method, it calls the wrapper directly in the active Rust walk with the current sink or source. The walker skips Sand callbacks and executes zero Sand bytecode:
+- **Manual.** The derive macro generates a Rust wrapper function for each manual trait. It stores that wrapper in the binding as the Sand trait method. If the walker reaches that wrapper method, it calls the wrapper directly in the active Rust walk with the current sink or source. The walker skips Sand callbacks and executes zero Sand bytecode:
   - For `SandObject`, the `Encode` wrapper borrows `&T` from the heap with `VmVal::get` in `crates/sandlang/src/native/mod.rs:571` and calls `T::encode`. For other native types, the wrapper converts the heap value to `T` with `FromVmValue` before calling `T::encode`.
   - The `Decode` wrapper calls `T::decode` and converts the result into a heap value with `IntoVmValue`.
 
@@ -553,8 +553,8 @@ This design also removes two existing checker limits on traits with methods acro
 
   This change also updates `Value` conversion for `Json`. On `main`, `Vm::to_value` copies a `Json` value as a `Value::Variant` of `json.Json`. The `Value` sink converts a `Json` value into plain `Value` data such as `Value::Int(3)` for `Json.Int(3)`.
 
-- **`json.to_json`.** `to_json` writes directly to the `Json` sink. Both the JSON text sink and the `Json` sink share a single set of JSON rules. `to_json` keeps `Json` as its return type. The `json!` macro keeps its current form without `Result` unwrapping. If conversion fails, `to_json` stops the run. Under the shared JSON rules, `to_json` rejects non-finite floats and stops the run. On `main`, `to_json` keeps a non-finite float as `Json.Float(NaN)`.
-- **Conversion to `Value`.** Every conversion to `Value` requires `T: Encode` and takes an `Encode` dictionary. Because a custom `Encode` method can invoke a callback, conversion runs through a single routine that starts synchronously and suspends only on callbacks. Async native functions call `NativeContext::to_value(value, dictionary)`. Synchronous native functions receive a `Value` that the engine converts before the call. We delete `Value::Opaque` and synchronous `Vm::to_value`.
+- **`json.to_json`.** `to_json` writes directly to the `Json` sink. Both the JSON text sink and the `Json` sink share a single set of JSON rules. `to_json` keeps `Json` as its return type. The `json!` macro keeps its current form without `Result` unwrapping. If conversion fails, `to_json` stops the run. Under the shared JSON rules, `to_json` also rejects non-finite floats. On `main`, `to_json` keeps a non-finite float as `Json.Float(NaN)`.
+- **Conversion to `Value`.** Every conversion to `Value` requires `T: Encode` and takes an `Encode` dictionary. Because a custom `Encode` method can invoke a callback, the engine converts values through a single routine. That routine starts synchronously and suspends only on callbacks. `Later::new` futures call `NativeContext::to_value(value, dictionary)`. Synchronous native functions receive a `Value` that the engine converts before the call. We delete `Value::Opaque` and synchronous `Vm::to_value`.
 
 ## Changes to the plan in `SPLIT.md`
 
@@ -599,10 +599,10 @@ Changeset 16 needs a new scope for JSON-to-Sand decoding. Changeset 16 adds only
 - **Runtime lookup of custom implementations from value tags.** A table keyed by trait and type definition ID would duplicate dictionary dispatch. Because heap objects omit type arguments, value-tag lookup fails on generic implementations such as `impl<T: Encode> Encode for Box<T>`. The decode walker would also still require runtime type descriptors.
 - **Generated Sand methods for all structural implementations.** Swift SE-0166 synthesizes `Encodable` and `Decodable` methods "in cases where all properties are also `Encodable` or `Decodable`". In `experiments/encode-decode-design-causes.md` on branch `encode-decode-design-causes`, Sand `ToJson` and `FromJson` methods took 2.3 to 3.7 times as long as the native walkers on `main`. An all-Sand prototype took up to 7 times as long.
 - **Generated Sand codecs beside native walkers.** Two parallel codec paths must produce identical output, error paths, and retry behavior. That same report found that "at least a quarter" of the 8,210 new production lines on `origin/encode-decode-traits` existed only to keep the native and Sand paths aligned.
-- **Placeholder walks without callbacks.** An encode walker without callbacks would build an intermediate `Value` tree with placeholders. A second pass would fill those placeholders. A decode walker would read its input twice. That approach allocates an intermediate tree on every `json.encode` and `json.decode` call. It also requires placeholder values, child-index paths, and a second decode pass. Finally, it forces JSON rules into the walker because an untyped JSON pass cannot distinguish Base64 `bytes` from plain strings.
-- **Part dictionaries stored inside parent dictionaries.** Recursive types would require cyclic constant tuples. Polymorphic recursion would expand nested dictionaries without bound.
-- **Generated Sand helper functions for part dictionaries.** Each uncached lookup would require a callback. A callback round trip took about 90 ns in `experiments/native-async-sand-calls.md`. Purely derived types would also pay that callback cost.
-- **Shapes as constant tuples.** Constant tuples cannot represent recursive shapes. In `crates/sandlang/src/vm/mod.rs:740-752`, the VM builds constant tuples in index order. Each constant tuple can reference only earlier constants. Recursive types require a cycle through their shapes. Integer IDs in a side table break that cycle.
+- **Placeholder walks without callbacks.** Without callbacks, the encode walker would build an intermediate `Value` tree with placeholders. It would then fill those placeholders in a second pass. The decode walker would read its input twice. Both walkers would allocate an intermediate tree on every `json.encode` and `json.decode` call. They would also need placeholder values, child-index paths, and a second decode pass. Finally, the walker could not distinguish Base64 `bytes` from plain strings in an untyped first pass without built-in JSON rules.
+- **Part dictionaries stored inside parent dictionaries.** For recursive types, the compiler would have to emit cyclic constant tuples. On polymorphically recursive types, the compiler would expand nested dictionaries without bound.
+- **Generated Sand helper functions for part dictionaries.** Each uncached lookup would require a callback. A callback round trip took about 90 ns in `experiments/native-async-sand-calls.md`. The walker would pay that callback cost even on derived types.
+- **Shapes as constant tuples.** The compiler cannot store recursive shapes as constant tuples. In `crates/sandlang/src/vm/mod.rs:740-752`, the VM builds constant tuples in index order. Each constant tuple can reference only earlier constants. A recursive type forms a cycle through its shape. The compiler breaks that cycle by storing shapes in a side table indexed by integer IDs.
 - **`Decode` with `Encode` as a supertrait.** Users implement `Decode` directly under this design. Both `serde` and Swift also keep the two traits separate. See [Independent traits](#independent-traits).
 
 ## Existing code that this design reuses
@@ -639,7 +639,7 @@ Each item below lists an existing component and how this design reuses it.
 
 **Walkers, sinks, and sources:**
 
-- **`Vm::to_value` heap copier in `crates/sandlang/src/value.rs:442-678`.** Its explicit-stack walk models the encode walker. Index-based stack entries replace borrowed `ContainerChildren` iterators.
+- **`Vm::to_value` heap copier in `crates/sandlang/src/value.rs:442-678`.** We model the encode walker on its explicit-stack walk. We replace borrowed `ContainerChildren` iterators with index-based stack entries.
 - **`Value` builders and cached type names.** The `Value` sink reuses these builders from `Vm::to_value`.
 - **JSON text encoder in `crates/sandlang/src/stdlib/json.rs:1430-1655`.** The JSON sink reuses its string escaping, number formatting, indentation, map key formatting, and memory checks. We move its value traversal into the encode walker.
 - **Typed JSON decoder in `crates/sandlang/src/stdlib/json.rs:890-1386`.** The explicit-stack decode walker reuses its struct, enum, map key, field lookup, and constant default logic.
@@ -678,7 +678,7 @@ Each item below lists an existing component and how this design reuses it.
   - Error paths reported from failed custom `Decode` implementations.
   - Struct decoding through `init` with missing `Option` parameters, parameter defaults, and `init` errors.
   - `Value` source rejection of JSON-encoded input such as Base64 `Value::Str` for `bytes`.
-  - Duplicate struct fields: `json.decode` returns a recoverable `"parse"` error. Execution continues.
+  - Duplicate struct fields: `json.decode` returns a recoverable `"parse"` error without stopping the run.
   - Non-finite floats: `json.encode` returns an `"invalid"` error. `json.to_json` stops the run.
   - Open-list mutation inside a custom `encode` callback during traversal.
 - **Robustness checks:**
@@ -706,7 +706,7 @@ The repository owner settled these decisions during review:
 - **Field options are deferred.** This branch omits field attributes such as rename or skip. Authors who need custom field handling write custom `impl` blocks. A later change can add field attributes.
 - **Custom `decode` methods read at most once without retries.** Input rewinding cannot undo side effects from callbacks that already ran.
 - **The `Value` source accepts only exact `Value` variants.** JSON conversion rules stay in the JSON source. Hosts with JSON text call `json.decode` directly. Libraries disagree on JSON byte encodings. For example, `serde_json` 1.0.154 in `src/value/de.rs:414-420` reads bytes from a JSON string as UTF-8 text rather than Base64.
-- **The decode walker returns a `"parse"` error on duplicate struct fields or `init` parameters.** Execution continues after the error. In `serde_derive` 1.0.229, `src/de/struct_.rs:269` likewise reports `duplicate_field`. For duplicate map keys, the decode walker overwrites the earlier value.
+- **The decode walker returns a `"parse"` error on duplicate struct fields or `init` parameters.** Callers can handle the error without stopping the run. In `serde_derive` 1.0.229, `src/de/struct_.rs:269` likewise reports `duplicate_field`. For duplicate map keys, the decode walker overwrites the earlier value.
 - **The decode walker ignores `init` visibility.** Field-based decoding on `main` likewise ignores field visibility.
 - **Native types opt in to each trait.** `#[sand(encode, decode)]` selects derived codecs. `#[sand(encode = "manual")]` and `#[sand(decode = "manual")]` declare manual Rust codecs that run without Sand callbacks.
 - **Generic native types cannot implement `Encode` or `Decode`.**
@@ -721,14 +721,14 @@ The repository owner settled these decisions during review:
 - **The VM walker** operates on a heap value.
 - **Host code** converts a Rust value into a `Value` in place of `value::Encode`.
 
-A Rust `&self` receiver in `fn encode(&self, sink)` imposes two costs:
+With a `&self` receiver in `fn encode(&self, sink)`, the engine pays two costs:
 
 - **Heap copies on manual codecs.** Manual `Encode` wrappers for `SandStruct`, `SandEnum`, and `SandValue` convert heap values to Rust values with `FromVmValue`. Manual `Decode` wrappers convert Rust values back to the heap with `IntoVmValue`. Every `json.parse` and `json.encode` call on `Json` copies a full tree because `FromVmValue` in `crates/sandlang/src/stdlib/json.rs:369` clones the entire tree.
 - **Duplicate implementations on derived native types.** The VM walker encodes heap values from field shapes. The derive macro also generates a Rust `native::Encode` implementation from the same fields for host `Value` conversion. Only tests keep the two implementations aligned.
 
 Candidate options:
 
-- **Option A: a single trait over Rust values.** Keeps the design in this document and pays both costs above.
+- **Option A: a single trait over Rust values.** Keep the design in this document. The engine pays both costs above.
 - **Option B: both heap and Rust methods on each trait.** The walker calls an in-place method that takes a heap handle and avoids heap copies. Native functions already read heap values in place. For example, `json.parse` reads `text.str(heap)` from `VmVal<String>` in `crates/sandlang/src/stdlib/json.rs:100-105`. Host code calls a second method that takes a Rust value. Manual codec authors must implement both methods. The derive macro generates both methods for derived types.
 - **Option C: heap-only Rust traits plus `serde` for host conversion.** `native::Encode` and `native::Decode` expose only heap-handle methods. Derived native types then rely solely on the VM walker. Host code converts Rust values to and from `Value` through `serde` instead of `native::Encode`. This option reverses the decision that `native::Encode` replaces `value::Encode`. It also expands changeset 16 in `SPLIT.md`. Today changeset 16 adds `Serialize` and `Deserialize` only on `Value` itself. To convert arbitrary `T: Serialize` values into `Value`, `sandlang` would need a `Value` serializer. The equivalent serializer in `serde_json` 1.0.154, `src/value/ser.rs`, is 1,063 lines.
 
@@ -740,7 +740,7 @@ Structural `Encode` writes struct fields. Structural `Decode` reads `init` param
 
 - **Option A: allow both structural implementations.** `json.decode` rejects `json.encode`'s output at runtime until the author writes a custom implementation.
 - **Option B: report a compile error.** The checker reports an error if it derives both traits on a struct whose `init` parameters differ from its fields in name or type.
-- **Option C: omit structural `Encode`.** If `init` parameters differ from struct fields, the checker derives only `Decode` and requires a custom `Encode` implementation.
+- **Option C: omit structural `Encode`.** If `init` parameters differ from struct fields, the checker derives only `Decode`. Users must write a custom `Encode` implementation to encode that struct.
 
 **Recommendation:** We leave this decision to the repository owner.
 
@@ -755,7 +755,7 @@ A custom Sand `decode` method reads input through `decoder.decode()` without ret
 
 ### 4. Should a concrete custom implementation replace structural implementations for other instantiations?
 
-As [Custom implementations](#custom-implementations) explains, `impl Encode for W<int>` replaces the structural `Encode` implementation for every `W<T>`. `W<str>` then does not implement `Encode`. The two implementations cannot coexist because the checker rejects a second implementation for a type constructor if the trait arguments unify. See `crates/sandlang/src/check/traits.rs:537-550`:
+As [Custom implementations](#custom-implementations) explains, `impl Encode for W<int>` replaces the structural `Encode` implementation for every `W<T>`. `W<str>` then does not implement `Encode`. The checker rejects a second implementation for a type constructor if it can unify the trait arguments. The checker therefore rejects keeping both implementations. See `crates/sandlang/src/check/traits.rs:537-550`:
 
 - **Option A: keep standard coherence.** `Encode` and `Decode` follow the same overlap rules as every other trait.
 - **Option B: reject concrete type arguments on custom codec implementations.** Authors must write generic targets such as `impl<T: Encode> Encode for W<T>`.

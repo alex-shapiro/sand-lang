@@ -371,7 +371,7 @@ impl<T: ToValue> ToValue for Option<T> {
         static SOME: OnceLock<Arc<VariantDesc>> = OnceLock::new();
         static NONE: OnceLock<Arc<VariantDesc>> = OnceLock::new();
         let (desc, name, payload): (_, _, Box<[Value]>) = match self {
-            Some(x) => (&SOME, "Some", Box::new([x.to_value()])),
+            Some(inner) => (&SOME, "Some", Box::new([inner.to_value()])),
             None => (&NONE, "None", Box::default()),
         };
         Value::Variant(VariantValue { variant: desc.get_or_init(|| VariantDesc::new("Option", name)).clone(), payload })
@@ -400,7 +400,7 @@ impl<K: ToValue, V: ToValue> ToValue for indexmap::IndexMap<K, V> {
 }
 
 fn map_to_value<'a, K: ToValue + 'a, V: ToValue + 'a>(entries: impl IntoIterator<Item = (&'a K, &'a V)>) -> Value {
-    Value::Map(entries.into_iter().map(|(k, v)| (k.to_value(), v.to_value())).collect())
+    Value::Map(entries.into_iter().map(|(key, value)| (key.to_value(), value.to_value())).collect())
 }
 
 /// Sorts elements for deterministic iteration order.
@@ -798,29 +798,29 @@ impl DecodeSource for ValueSource {
 
     fn bool(&mut self) -> CodecResult<bool> {
         match self.take("bool")? {
-            Value::Bool(b) => Ok(b),
+            Value::Bool(flag) => Ok(flag),
             value => self.expected("bool", &value),
         }
     }
 
     fn int(&mut self) -> CodecResult<i64> {
         match self.take("int")? {
-            Value::Int(i) => Ok(i),
+            Value::Int(num) => Ok(num),
             value => self.expected("int", &value),
         }
     }
 
     fn float(&mut self) -> CodecResult<f64> {
         match self.take("float")? {
-            Value::Float(f) => Ok(f),
+            Value::Float(num) => Ok(num),
             value => self.expected("float", &value),
         }
     }
 
     fn duration(&mut self) -> CodecResult<i64> {
         match self.take("duration")? {
-            Value::Duration(d) => match i64::try_from(d.as_nanos()) {
-                Ok(n) => Ok(n),
+            Value::Duration(duration) => match i64::try_from(duration.as_nanos()) {
+                Ok(nanos) => Ok(nanos),
                 Err(_) => self.fail("duration out of range"),
             },
             value => self.expected("duration", &value),
@@ -829,14 +829,14 @@ impl DecodeSource for ValueSource {
 
     fn str(&mut self) -> CodecResult<Cow<'_, str>> {
         match self.take("str")? {
-            Value::Str(s) => Ok(Cow::Owned(s)),
+            Value::Str(text) => Ok(Cow::Owned(text)),
             value => self.expected("str", &value),
         }
     }
 
     fn bytes(&mut self) -> CodecResult<Cow<'_, [u8]>> {
         match self.take("bytes")? {
-            Value::Bytes(b) => Ok(Cow::Owned(b)),
+            Value::Bytes(bytes) => Ok(Cow::Owned(bytes)),
             value => self.expected("bytes", &value),
         }
     }
@@ -964,7 +964,7 @@ impl DecodeSource for ValueSource {
         let payload = std::mem::take(&mut self.payload);
         match form {
             PayloadForm::Unit if payload.is_empty() => Ok(()),
-            PayloadForm::Positional(n) if payload.len() == n => {
+            PayloadForm::Positional(len) if payload.len() == len => {
                 self.open(ValueSourceFrameKind::Items(payload.into_iter()));
                 Ok(())
             }
@@ -976,7 +976,7 @@ impl DecodeSource for ValueSource {
             _ => {
                 let want = match form {
                     PayloadForm::Unit => "no payload".to_string(),
-                    PayloadForm::Positional(n) => format!("{n} payload values"),
+                    PayloadForm::Positional(len) => format!("{len} payload values"),
                     PayloadForm::Named => "named payload fields".to_string(),
                 };
                 self.fail(format!("expected {want}, found {} payload values", payload.len()))

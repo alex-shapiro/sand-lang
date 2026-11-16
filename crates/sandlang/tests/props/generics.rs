@@ -363,7 +363,9 @@ impl World {
     /// Returns `true` if trait `i` or a supertrait declares methods. The
     /// built-in `Encode` declares `encode`.
     fn has_dict(&self, i: usize) -> bool {
-        self.closure(i).iter().any(|&j| self.traits[j].methods || self.traits[j].builtin == Some(BuiltinTrait::Encode))
+        self.closure(i)
+            .iter()
+            .any(|&trait_idx| self.traits[trait_idx].methods || self.traits[trait_idx].builtin == Some(BuiltinTrait::Encode))
     }
 
     /// Returns the transitive supertraits of `i` that declare methods.

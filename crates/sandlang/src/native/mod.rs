@@ -209,8 +209,9 @@ pub type VariantDescCell = OnceLock<Arc<VariantDesc>>;
 
 #[doc(hidden)]
 pub fn struct_to_value<T: StructType>(desc_cell: &StructDescCell, fields: impl IntoIterator<Item = Value>) -> Value {
-    let desc = desc_cell
-        .get_or_init(|| StructDesc::new(qualified_name(qualified_name_module(T::MODULE), T::NAME), T::FIELDS.iter().map(|f| f.name)));
+    let desc = desc_cell.get_or_init(|| {
+        StructDesc::new(qualified_name(qualified_name_module(T::MODULE), T::NAME), T::FIELDS.iter().map(|field| field.name))
+    });
     Value::Struct(StructValue { ty: desc.clone(), fields: fields.into_iter().collect() })
 }
 

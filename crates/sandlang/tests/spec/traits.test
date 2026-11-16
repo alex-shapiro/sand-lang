@@ -1548,7 +1548,7 @@ fn f(x: Keys<float>) -> int { x.len() }
 --- error
 1: the type parameters of a type alias cannot require traits; require them on the functions that use the alias
 
-=== never implements only the traits without methods
+=== never implements Encode, Decode, and traits without methods
 trait D { fn d(self) -> int }
 trait Make { fn make() -> Self }
 impl D for int { fn d(self) -> int { self } }

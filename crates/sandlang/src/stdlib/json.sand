@@ -6,11 +6,12 @@
 //! - Tuple variants are encoded as `{"Variant": [f0, f1, ...]}`.
 //! - Struct variants are encoded as `{"Variant": {...}}`.
 //! - `Some(x)` is encoded as `x`.
-//! - `None` and `()` are encoded as `null`.
+//! - `None` is encoded as `null`.
 //! - `Json` values are encoded directly as their JSON data.
 //!
 //! ### Other Type Representations
 //!
+//! - `()` is encoded as `null`.
 //! - `bytes` is encoded as a standard Base64 string.
 //! - `duration` is encoded as an integer nanosecond count.
 //! - `Range` is encoded as an object with `start`, `end`, and optional `inclusive` fields.
@@ -119,7 +120,7 @@ extend Json {
 /// exceeds 512 levels.
 pub native fn parse(text: str) -> Result<Json>
 
-/// Serializes `value` as JSON text.
+/// Encodes `value` as JSON text.
 ///
 /// Emits compact output if `indent <= 0`. Pretty-prints with `indent` spaces
 /// per level if `indent > 0`. Finite floats are formatted with a decimal point
@@ -147,13 +148,13 @@ pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>
 ///
 /// If a JSON object omits a struct field, `decode` uses the field's declared
 /// default. If an omitted `Option` field lacks a declared default, `decode`
-/// sets it to `None`. If a struct declares `init`, `decode` decodes each `init`
-/// parameter from the JSON object and calls `init`. Any `init` parameter can be
-/// provided in the JSON object, even if the parameter has a default.
+/// sets it to `None`. If a struct declares `init`, `decode` reads each `init`
+/// parameter from the JSON object. It then calls `init`. Any `init` parameter
+/// can be provided in the JSON object, even if the parameter has a default.
 ///
 /// `decode` runs custom `Decode.decode` methods, `init`, and computed defaults
-/// as it visits each value. Those calls still run even if a later value fails
-/// to decode.
+/// as it visits each value. `decode` executes earlier callbacks even if it
+/// rejects a later value.
 ///
 /// Fails with kind `"parse"` on invalid JSON syntax, missing required fields,
 /// or type mismatches. `decode` prefixes value error messages with the JSON

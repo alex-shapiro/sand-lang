@@ -729,18 +729,18 @@ impl Checker {
     fn impl_wheres(&self, impl_id: ImplId) -> Vec<String> {
         let imp = &self.impls[impl_id as usize];
         let hash = self.builtin_trait(Builtin::Hash);
-        let is_declared = |t: TypeId, tr: &TraitRef| match self.arena.get(imp.target) {
-            Ty::Named(d, args) => self.arena.list(args).iter().position(|&a| a == t).is_some_and(|k| {
-                let p = self.types[d as usize].generics[k];
-                self.params[p as usize].traits.contains(tr)
+        let is_declared = |bound_ty: TypeId, trait_ref: &TraitRef| match self.arena.get(imp.target) {
+            Ty::Named(def_id, args) => self.arena.list(args).iter().position(|&arg| arg == bound_ty).is_some_and(|idx| {
+                let param = self.types[def_id as usize].generics[idx];
+                self.params[param as usize].traits.contains(trait_ref)
             }),
-            Ty::Set(x) | Ty::Map(x, _) => x == t && Some(*tr) == hash,
+            Ty::Set(hashed_ty) | Ty::Map(hashed_ty, _) => hashed_ty == bound_ty && Some(*trait_ref) == hash,
             _ => false,
         };
         imp.evidence
             .iter()
-            .filter(|(t, tr)| !is_declared(*t, tr))
-            .map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr)))
+            .filter(|(bound_ty, trait_ref)| !is_declared(*bound_ty, trait_ref))
+            .map(|(bound_ty, trait_ref)| format!("{}: {}", self.show(*bound_ty), self.show_trait(trait_ref)))
             .collect()
     }
 

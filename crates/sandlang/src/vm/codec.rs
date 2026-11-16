@@ -121,8 +121,8 @@ impl WalkState {
             return Err(Fail::internal("a codec shape has too few parts"));
         };
         match template {
-            PartTemplate::Const(k) => Ok(vm.consts[*k as usize]),
-            PartTemplate::Bound(i) => dict_slot(vm, outer_dict, *i),
+            PartTemplate::Const(const_idx) => Ok(vm.consts[*const_idx as usize]),
+            PartTemplate::Bound(slot) => dict_slot(vm, outer_dict, *slot),
             _ => {
                 let key = (shape_idx, part, heap_handle(outer_dict));
                 if let Some(&dict) = self.dict_cache.get(&key) {
@@ -143,7 +143,7 @@ impl WalkState {
 
     /// Runs garbage collection while keeping all walk values rooted.
     async fn collect(&mut self, context: &mut NativeContext) {
-        context.collect_keeping(self.roots()).await;
+        context.collect_with_roots(self.roots()).await;
         self.collected = true;
     }
 }
@@ -168,11 +168,11 @@ fn dict_slot(vm: &Vm, dict: VmValue, slot: u32) -> Result<VmValue, Fail> {
 /// allocations.
 fn eval_template(vm: &mut Vm, template: &PartTemplate, outer_dict: VmValue) -> Result<VmValue, Fail> {
     Ok(match template {
-        PartTemplate::Const(k) => vm.consts[*k as usize],
-        PartTemplate::Bound(i) => dict_slot(vm, outer_dict, *i)?,
-        PartTemplate::Field(inner, i) => {
+        PartTemplate::Const(const_idx) => vm.consts[*const_idx as usize],
+        PartTemplate::Bound(slot) => dict_slot(vm, outer_dict, *slot)?,
+        PartTemplate::Field(inner, slot) => {
             let dict = eval_template(vm, inner, outer_dict)?;
-            dict_slot(vm, dict, *i)?
+            dict_slot(vm, dict, *slot)?
         }
         PartTemplate::Dict(items) => {
             vm.charge(1)?;
@@ -484,10 +484,10 @@ impl EncodeWalker {
         let shape_mismatch = || -> CodecResult { Err(Fail::internal("encode: a value does not match its shape").into()) };
         match (&shape.kind, value) {
             (ShapeKind::Unit, _) => sink.unit()?,
-            (ShapeKind::Bool, VmValue::Bool(b)) => sink.bool(b)?,
-            (ShapeKind::Int, VmValue::Int(i)) => sink.int(i)?,
-            (ShapeKind::Float, VmValue::Float(f)) => sink.float(f)?,
-            (ShapeKind::Duration, VmValue::Dur(d)) => sink.duration(d)?,
+            (ShapeKind::Bool, VmValue::Bool(flag)) => sink.bool(flag)?,
+            (ShapeKind::Int, VmValue::Int(num)) => sink.int(num)?,
+            (ShapeKind::Float, VmValue::Float(num)) => sink.float(num)?,
+            (ShapeKind::Duration, VmValue::Dur(nanos)) => sink.duration(nanos)?,
             (ShapeKind::Str, _) => {
                 let text = vm.heap.str(value);
                 vm.meter.charge_bytes(text.len())?;
@@ -503,7 +503,7 @@ impl EncodeWalker {
                 _ => shape_mismatch()?,
             },
             (ShapeKind::Native(def, _), _) => {
-                let Some(text) = vm.heap.get(value).value().map(|v| v.text()) else { return shape_mismatch() };
+                let Some(text) = vm.heap.get(value).value().map(|native| native.text()) else { return shape_mismatch() };
                 vm.meter.charge_bytes(text.len())?;
                 sink.native(&prog.types[*def as usize].desc().type_name, &text)?;
             }
@@ -547,7 +547,7 @@ impl EncodeWalker {
                     return sink.end();
                 }
                 charge_scan(vm, variant.index as usize)?;
-                let part_base = (id - variant.index..id).map(|v| prog.variants[v as usize].arity as u32).sum();
+                let part_base = (id - variant.index..id).map(|variant_id| prog.variants[variant_id as usize].arity as u32).sum();
                 self.push_frame(vm, value, dict, shape_idx, EncodeKind::Payload { part_base }, 0)?;
             }
             _ => shape_mismatch()?,
@@ -565,13 +565,13 @@ impl EncodeWalker {
             let child = match frame.kind {
                 EncodeKind::List => {
                     let items = vm.heap.list(container);
-                    items[..frame.list_len.min(items.len())].get(next).map(|&v| (v, 0, next + 1))
+                    items[..frame.list_len.min(items.len())].get(next).map(|&item| (item, 0, next + 1))
                 }
                 EncodeKind::Set => {
                     let mut element = VmValue::Unit;
                     vm.set_step(self.state.values[base + 2], &mut element).then_some((element, 0, next + 1))
                 }
-                EncodeKind::Fields => field(vm, container, next)?.map(|v| (v, next as u32, next + 1)),
+                EncodeKind::Fields => field(vm, container, next)?.map(|item| (item, next as u32, next + 1)),
                 EncodeKind::Map if next % 2 == 1 => Some((self.state.values[base + 3], 1, next + 1)),
                 EncodeKind::Map => {
                     let mut entry = [VmValue::Unit; 2];
@@ -581,7 +581,7 @@ impl EncodeWalker {
                 }
                 EncodeKind::Some => (frame.next == 0).then(|| (vm.heap.payload_if(&container, vm.prog.ids.some), 0, 1)),
                 EncodeKind::Payload { part_base } => {
-                    payload(vm, container, frame.next).map(|v| (v, part_base + frame.next as u32, frame.next + 1))
+                    payload(vm, container, frame.next).map(|item| (item, part_base + frame.next as u32, frame.next + 1))
                 }
             };
             match child {
@@ -666,7 +666,7 @@ impl Walker for EncodeWalker {
 /// Reads element or field `index` from a tuple or struct.
 fn field(vm: &Vm, container: VmValue, index: usize) -> Result<Option<VmValue>, Fail> {
     Ok(match container {
-        VmValue::Pair(a, b) => [VmValue::Int(i64::from(a)), VmValue::Int(b)].get(index).copied(),
+        VmValue::Pair(first, second) => [VmValue::Int(i64::from(first)), VmValue::Int(second)].get(index).copied(),
         _ => match vm.heap.get(container) {
             Obj::Tuple(items) | Obj::Struct(_, items) => items.get(index).copied(),
             _ => return Err(Fail::internal("encode: not a tuple or a struct")),
@@ -695,7 +695,7 @@ struct DecodeFrame {
 
 enum DecodeKind {
     /// List or set at `base + 1`. The walker appends elements as they arrive.
-    Seq,
+    Sequence,
     Tuple,
     /// Map at `base + 1` and pending key slot at `base + 2`.
     Map {
@@ -790,7 +790,7 @@ impl DecodeWalker {
         let base = frame.base;
         match &mut frame.kind {
             DecodeKind::Slots { active_slot, .. } => self.state.values[base + 1 + *active_slot] = value,
-            DecodeKind::Seq => {
+            DecodeKind::Sequence => {
                 let container = self.state.values[base + 1];
                 match vm.heap.get(container) {
                     Obj::List(_) => vm.heap.list_push(container, value).map_err(Fail::limit)?,
@@ -879,7 +879,7 @@ impl DecodeWalker {
                     ShapeKind::Set => vm.heap.alloc(Obj::Set(Box::<SetObj>::default())),
                     _ => vm.heap.new_list(Vec::new()),
                 };
-                self.push_frame(dict, shape_idx, DecodeKind::Seq, 1)?;
+                self.push_frame(dict, shape_idx, DecodeKind::Sequence, 1)?;
                 return self.set_slot(1, container);
             }
             ShapeKind::Tuple => {
@@ -918,7 +918,10 @@ impl DecodeWalker {
                 let (def, first_variant) = (*def, *first_variant as usize);
                 let enum_rt = &prog.types[def as usize];
                 let name = source.begin_variant(&enum_rt.desc().type_name)?;
-                let found = prog.variants[first_variant..].iter().take_while(|v| v.def == def).position(|v| v.name == *name);
+                let found = prog.variants[first_variant..]
+                    .iter()
+                    .take_while(|variant| variant.def == def)
+                    .position(|variant| variant.name == *name);
                 let Some(variant_offset) = found else {
                     let name = crate::stdlib::truncate(&name, 64).to_string();
                     return parse_error(source, format!("unknown variant `{name}` of {}", enum_rt.name));
@@ -926,7 +929,7 @@ impl DecodeWalker {
                 charge_scan(vm, variant_offset)?;
                 let id = (first_variant + variant_offset) as u32;
                 let variant = &prog.variants[id as usize];
-                let part_base = (first_variant as u32..id).map(|v| prog.variants[v as usize].arity as u32).sum();
+                let part_base = (first_variant as u32..id).map(|variant_id| prog.variants[variant_id as usize].arity as u32).sum();
                 let form = match (variant.arity, &variant.field_names) {
                     (0, _) => PayloadForm::Unit,
                     (_, Some(_)) => PayloadForm::Named,
@@ -964,7 +967,7 @@ impl DecodeWalker {
         let shape = shape(prog, shape_idx)?;
         if !frame.ended {
             let part = match &mut frame.kind {
-                DecodeKind::Seq => {
+                DecodeKind::Sequence => {
                     // Check memory for doubling a full list before advancing `source`
                     // so garbage collection can run safely.
                     if let Obj::List(items) = vm.heap.get(self.state.values[frame_base + 1])
@@ -984,7 +987,9 @@ impl DecodeWalker {
                     match target.names(prog) {
                         Some(names) => match source.next_field()? {
                             Some(name) => match match &shape.slot_index {
-                                Some(index) if !matches!(target, SlotTarget::Variant { .. }) => index.get(&*name).map(|&i| i as usize),
+                                Some(index) if !matches!(target, SlotTarget::Variant { .. }) => {
+                                    index.get(&*name).map(|&slot| slot as usize)
+                                }
                                 _ => field_index(vm, names, &name, *active_slot + usize::from(seen.get(*active_slot) == Some(&true)))?,
                             } {
                                 Some(slot) if seen[slot] => {
@@ -1003,7 +1008,7 @@ impl DecodeWalker {
                             },
                             None => None,
                         },
-                        None => match charge_scan(vm, seen.len()).map(|()| seen.iter().position(|s| !s))? {
+                        None => match charge_scan(vm, seen.len()).map(|()| seen.iter().position(|filled| !filled))? {
                             Some(slot) if source.next()? => {
                                 (seen[slot], *active_slot) = (true, slot);
                                 Some(part_base + slot as u32)
@@ -1022,7 +1027,7 @@ impl DecodeWalker {
             }
         }
         if let DecodeKind::Slots { target, seen, active_slot } = &mut frame.kind
-            && let Some(missing) = charge_scan(vm, seen.len()).map(|()| seen.iter().position(|s| !s))?
+            && let Some(missing) = charge_scan(vm, seen.len()).map(|()| seen.iter().position(|filled| !filled))?
         {
             let part_base = target.part_base();
             let names = target.names(prog);
@@ -1041,7 +1046,7 @@ impl DecodeWalker {
                 }
                 DecodeFill::Const(const_val) => constant(vm, &const_val)?,
                 DecodeFill::Call(helper_const, dicts) => {
-                    let mut args = dicts.iter().map(|tmpl| eval_template(vm, tmpl, dict)).collect::<Result<Vec<_>, _>>()?;
+                    let mut args = dicts.iter().map(|template| eval_template(vm, template, dict)).collect::<Result<Vec<_>, _>>()?;
                     // Pass preceding parameter values to an `init` parameter default helper.
                     if matches!(target, SlotTarget::Init(_)) {
                         args.extend_from_slice(&self.state.values[frame_base + 1..frame_base + 1 + missing]);
@@ -1059,7 +1064,7 @@ impl DecodeWalker {
         }
         let children = &self.state.values[frame_base + 1..];
         let value = match &self.frames.last().expect("an open frame").kind {
-            DecodeKind::Seq | DecodeKind::Map { .. } => children[0],
+            DecodeKind::Sequence | DecodeKind::Map { .. } => children[0],
             DecodeKind::Tuple if children.len() != shape.parts.len() => {
                 return parse_error(source, format!("expected {} elements, found {}", shape.parts.len(), children.len()));
             }
@@ -1069,7 +1074,7 @@ impl DecodeWalker {
             DecodeKind::Slots { target: SlotTarget::Variant { id, .. }, .. } => vm.heap.new_variant(*id, children),
             DecodeKind::Slots { target: SlotTarget::Init(_), .. } => {
                 let Some(init) = &shape.init else { return Err(Fail::internal("decode: an init shape without init").into()) };
-                let mut args = init.dicts.iter().map(|tmpl| eval_template(vm, tmpl, dict)).collect::<Result<Vec<_>, _>>()?;
+                let mut args = init.dicts.iter().map(|template| eval_template(vm, template, dict)).collect::<Result<Vec<_>, _>>()?;
                 args.extend_from_slice(children);
                 source.end()?;
                 return Ok(Some(Step::Call(Callback { callee: vm.consts[init.func as usize], args, kind: CallbackKind::Init })));
@@ -1201,17 +1206,17 @@ pub(crate) fn constant(vm: &mut Vm, const_val: &ConstVal) -> Result<VmValue, Fai
     let alloc_items = |vm: &mut Vm, items: &[ConstVal]| items.iter().map(|item| constant(vm, item)).collect::<Result<Vec<_>, _>>();
     Ok(match const_val {
         ConstVal::Unit => VmValue::Unit,
-        ConstVal::Bool(b) => VmValue::Bool(*b),
-        ConstVal::Int(i) => VmValue::Int(*i),
-        ConstVal::Float(f) => VmValue::Float(*f),
-        ConstVal::Dur(d) => VmValue::Dur(*d),
-        ConstVal::Str(s) => {
-            vm.charge_bytes(s.len())?;
-            vm.heap.new_str(s.as_str())
+        ConstVal::Bool(flag) => VmValue::Bool(*flag),
+        ConstVal::Int(num) => VmValue::Int(*num),
+        ConstVal::Float(num) => VmValue::Float(*num),
+        ConstVal::Dur(nanos) => VmValue::Dur(*nanos),
+        ConstVal::Str(text) => {
+            vm.charge_bytes(text.len())?;
+            vm.heap.new_str(text.as_str())
         }
-        ConstVal::Bytes(b) => {
-            vm.charge_bytes(b.len())?;
-            vm.heap.new_bytes(b.as_slice())
+        ConstVal::Bytes(bytes) => {
+            vm.charge_bytes(bytes.len())?;
+            vm.heap.new_bytes(bytes.as_slice())
         }
         ConstVal::Range(start, end, inclusive) => vm.heap.alloc(Obj::Range(*start, *end, *inclusive)),
         ConstVal::Tuple(items) => {
@@ -1303,7 +1308,7 @@ async fn finish_walk<W: Walker>(
         match step {
             Step::Done => return Ok(walker.output()?),
             Step::Call(callback) => {
-                let result = context.call_keeping(callback.callee, &callback.args, walker.state().roots()).await;
+                let result = context.call_with_roots(callback.callee, &callback.args, walker.state().roots()).await;
                 context.with_vm(|vm| walker.apply(vm, shared, callback.kind, result))?;
                 walker.state().collected = false;
             }

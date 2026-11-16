@@ -97,7 +97,7 @@ impl ActiveNativeCall {
     pub fn trace(&self, roots: &mut Vec<VmValue>) {
         let state = self.call.state.lock();
         roots.extend_from_slice(&state.roots);
-        state.temp_roots.iter().for_each(|temp_root| roots.extend_from_slice(temp_root));
+        state.request_roots.iter().for_each(|group| roots.extend_from_slice(group));
     }
 }
 
@@ -373,10 +373,10 @@ impl Vm {
     fn begin_callback(&mut self, fiber: &mut Fiber, callee: VmValue, args: &[VmValue]) -> Result<(), RunEnding> {
         let arity = match self.heap.get(callee) {
             Obj::Closure(proto, _) => self.prog.protos.get(*proto as usize).map(|proto_def| proto_def.nparams as usize),
-            Obj::NativeFn(id) => self.prog.native_argc.get(*id as usize).map(|&argc| argc as usize),
+            Obj::NativeFn(id) => self.prog.native_argc.get(*id as usize).map(|&count| count as usize),
             _ => None,
         };
-        if arity.is_some_and(|argc| argc != args.len()) {
+        if arity.is_some_and(|param_count| param_count != args.len()) {
             let fail =
                 Fail::internal(format!("a callback has {} parameters, but its caller passes {} arguments", arity.unwrap_or(0), args.len()));
             return Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
@@ -511,7 +511,7 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
         let (request, root_capacity) = {
             let mut state = active_call.call.state.lock();
             state.lent_vm = None;
-            (state.request.take(), state.roots.capacity() + state.temp_roots.iter().map(Vec::capacity).sum::<usize>())
+            (state.request.take(), state.roots.capacity() + state.request_roots.iter().map(Vec::capacity).sum::<usize>())
         };
         let polled = match polled {
             Ok(polled) => polled,

@@ -133,7 +133,9 @@ struct TypeAttrs {
     decode: Option<bool>,
 }
 
-/// Parses an `encode` or `decode` attribute and returns `true` for `= "manual"`.
+/// Parses an `encode` or `decode` attribute.
+///
+/// Returns `true` for `= "manual"`.
 fn parse_codec_is_manual(meta: &syn::meta::ParseNestedMeta, derive: &str) -> syn::Result<bool> {
     if meta.input.peek(syn::Token![=]) {
         let mode: LitStr = meta.value()?.parse()?;
@@ -315,10 +317,10 @@ fn reject_member_attrs(data: &Data) -> syn::Result<()> {
 
 fn expand_named_type(input: &DeriveInput, a: &TypeAttrs, type_params: &TypeParams, binding: Tokens) -> Tokens {
     let TypeAttrs { module, name, public, krate, doc, encode, decode, .. } = a;
-    let codec_tokens = |manual: Option<bool>, f: Tokens| match manual {
+    let codec_tokens = |is_manual: Option<bool>, manual_fn: Tokens| match is_manual {
         None => quote!(::std::option::Option::None),
         Some(false) => quote!(::std::option::Option::Some(#krate::native::codec::NativeCodec::Derived)),
-        Some(true) => quote!(::std::option::Option::Some(#krate::native::codec::NativeCodec::Manual(#f))),
+        Some(true) => quote!(::std::option::Option::Some(#krate::native::codec::NativeCodec::Manual(#manual_fn))),
     };
     let encode = codec_tokens(*encode, quote!(#krate::native::codec::manual_encode::<Self>));
     let decode = codec_tokens(*decode, quote!(#krate::native::codec::manual_decode::<Self>));

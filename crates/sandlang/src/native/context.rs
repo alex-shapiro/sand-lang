@@ -72,8 +72,8 @@ pub(crate) struct NativeCallState {
     pub request: Option<VmRequest>,
     /// Rooted return value from the most recent [`VmRequest::Call`].
     pub callback_result: Option<RootedValue>,
-    /// Temporary root vectors for the active [`VmRequest`].
-    pub temp_roots: Vec<Vec<VmValue>>,
+    /// Extra root vectors held for the active [`VmRequest`].
+    pub request_roots: Vec<Vec<VmValue>>,
 }
 
 impl NativeCallState {
@@ -183,16 +183,16 @@ impl NativeContext {
 
     /// Calls the Sand function `callee` with `args` on the calling task.
     ///
-    /// Keeps `temp_roots`, `callee`, and `args` rooted during the call. Leaves
+    /// Keeps `extra_roots`, `callee`, and `args` rooted during the call. Leaves
     /// the persistent root table unchanged. The returned [`VmValue`] remains
     /// valid until the next wait.
-    pub(crate) async fn call_keeping(&mut self, callee: VmValue, args: &[VmValue], temp_roots: [&mut Vec<VmValue>; 2]) -> VmValue {
+    pub(crate) async fn call_with_roots(&mut self, callee: VmValue, args: &[VmValue], extra_roots: [&mut Vec<VmValue>; 2]) -> VmValue {
         assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
         let saved_root_len = self.state.lock().roots.len();
         let mut call_roots = Vec::with_capacity(args.len() + 1);
         call_roots.push(callee);
         call_roots.extend_from_slice(args);
-        self.wait_keeping(VmRequest::Call { callee, args: args.to_vec() }, temp_roots, call_roots).await;
+        self.wait_with_roots(VmRequest::Call { callee, args: args.to_vec() }, extra_roots, call_roots).await;
         let mut state = self.state.lock();
         let rooted = state.callback_result.take().expect("the scheduler stores the callback result before polling again");
         let result = state.roots[rooted.0 as usize];
@@ -200,17 +200,17 @@ impl NativeContext {
         result
     }
 
-    /// Triggers garbage collection while keeping `temp_roots` rooted.
-    pub(crate) async fn collect_keeping(&mut self, temp_roots: [&mut Vec<VmValue>; 2]) {
-        self.wait_keeping(VmRequest::Collect, temp_roots, Vec::new()).await;
+    /// Triggers garbage collection while keeping `extra_roots` rooted.
+    pub(crate) async fn collect_with_roots(&mut self, extra_roots: [&mut Vec<VmValue>; 2]) {
+        self.wait_with_roots(VmRequest::Collect, extra_roots, Vec::new()).await;
     }
 
-    /// Submits `request` while keeping `temp_roots` and `values` rooted.
-    async fn wait_keeping(&mut self, request: VmRequest, temp_roots: [&mut Vec<VmValue>; 2], values: Vec<VmValue>) {
-        let [first, second] = temp_roots;
-        self.state.lock().temp_roots = vec![std::mem::take(first), std::mem::take(second), values];
+    /// Submits `request` while keeping `extra_roots` and `values` rooted.
+    async fn wait_with_roots(&mut self, request: VmRequest, extra_roots: [&mut Vec<VmValue>; 2], values: Vec<VmValue>) {
+        let [first, second] = extra_roots;
+        self.state.lock().request_roots = vec![std::mem::take(first), std::mem::take(second), values];
         self.wait_for_request(request).await;
-        let mut lists = std::mem::take(&mut self.state.lock().temp_roots).into_iter();
+        let mut lists = std::mem::take(&mut self.state.lock().request_roots).into_iter();
         (*first, *second) = (lists.next().unwrap_or_default(), lists.next().unwrap_or_default());
     }
 
@@ -242,7 +242,8 @@ impl NativeContext {
     ///
     /// Returns a `"parse"` error at the path of any mismatched part. Returns a
     /// `"limit"` error if `value` exceeds 512 nesting levels or the VM memory
-    /// limit. Returns any error produced by a callback.
+    /// limit. Returns any error from a custom `decode` method, `init`
+    /// constructor, or field default.
     pub async fn from_value(&mut self, value: Value, decode_dict: RootedValue) -> Result<RootedValue, HostError<Fail>> {
         let decode_dict = self.value(decode_dict);
         let decoded = crate::vm::codec::from_value(self, value, decode_dict).await?;

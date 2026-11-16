@@ -185,7 +185,7 @@ print(json.encode(ok)?)
 Err(Error(message: "$[0]: cannot decode a value of type never", kind: "parse"))
 {"Ok":[3]}
 
-=== diagnostics explain why a type lacks a derived Encode implementation
+=== the type checker explains why a type lacks a derived Encode implementation
 import json
 struct Wrapper<T> { v: T }
 impl Encode for Wrapper<int> {
@@ -234,7 +234,7 @@ Name(name: "ab", label: "AB")
 Interval(lo: 1.5, hi: 2.5)
 true
 
-=== the encode walker snapshots maps and reads container lengths on entry
+=== container mutation during custom Encode callbacks
 import json
 struct Key { s: str }
 impl Encode for Key {
@@ -282,7 +282,7 @@ print(json.encode(chain(513)))
 499
 Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))
 
-=== json.encode fails if an encode method returns before a spawned write finishes
+=== json.encode rejects an encode method that returns with a spawned write in flight
 import json
 struct Slow { n: int }
 impl Encode for Slow {
@@ -309,7 +309,7 @@ print("after")
 Err(Error(message: "an `encode` method returned before its write ended", kind: "invalid"))
 after
 
-=== json.decode fails if a decode method returns before a spawned read finishes
+=== json.decode rejects a decode method that returns with a spawned read in flight
 import json
 struct Slow { n: int }
 impl Decode for Slow {

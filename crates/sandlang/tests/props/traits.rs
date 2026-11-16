@@ -280,7 +280,7 @@ proptest! {
             Err(msgs) => {
                 prop_assert!(!t.implements(tr), "rejected: {msgs:?}\n{src}");
                 let want = format!("does not implement `{}`", tr.name());
-                prop_assert!(msgs.iter().all(|m| m.contains(&want) && m.contains(", which trait `Via` requires")), "{msgs:?}\n{src}");
+                prop_assert!(msgs.iter().all(|msg| msg.contains(&want) && msg.contains(", which trait `Via` requires")), "{msgs:?}\n{src}");
             }
         }
     }

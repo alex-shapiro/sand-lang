@@ -1653,16 +1653,22 @@ impl Checker {
     /// Attaches each struct's type parameter dictionaries to its field default
     /// helpers for structs from `first_type` onward.
     fn add_field_default_dicts(&mut self, first_type: usize) {
-        for d in first_type..self.types.len() {
-            let gens = self.types[d].generics.clone();
+        for def_idx in first_type..self.types.len() {
+            let generics = self.types[def_idx].generics.clone();
             let mut dicts = Vec::new();
-            for &p in &gens {
-                let pt = self.param_ty(p);
-                dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
+            for &param in &generics {
+                let param_ty = self.param_ty(param);
+                dicts.extend(
+                    self.params[param as usize]
+                        .traits
+                        .iter()
+                        .filter(|trait_ref| self.has_dict(trait_ref))
+                        .map(|&trait_ref| (param_ty, trait_ref)),
+                );
             }
-            let helpers: Vec<FnId> = self.types[d].fields().iter().filter_map(|f| f.default).collect();
-            for h in helpers {
-                self.fns[h as usize].dicts = dicts.clone();
+            let helpers: Vec<FnId> = self.types[def_idx].fields().iter().filter_map(|field| field.default).collect();
+            for helper in helpers {
+                self.fns[helper as usize].dicts = dicts.clone();
             }
         }
     }

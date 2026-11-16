@@ -72,8 +72,7 @@ pub struct ImplDef {
     /// Resolved codec metadata for a structural implementation. See
     /// [`Checker::is_structural_codec_impl`].
     pub codec: Option<Arc<super::codec::CodecImpl>>,
-    /// Indicates whether the checker generated this implementation without an
-    /// `impl` block.
+    /// Indicates whether the checker generated this implementation.
     pub derived: bool,
 }
 

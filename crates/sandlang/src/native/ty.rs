@@ -150,9 +150,9 @@ impl Type {
                 out.push_str(") -> ");
                 r.write(module, param, out);
             }
-            Type::Param(i, _) => out.push_str(&param(*i)),
-            Type::TraitDict(i, b) => out.push_str(&format!("<{} dictionary of {}>", b.name(), param(*i))),
-            Type::Encoded(i) => out.push_str(&param(*i)),
+            Type::Param(index, _) => out.push_str(&param(*index)),
+            Type::TraitDict(index, builtin) => out.push_str(&format!("<{} dictionary of {}>", builtin.name(), param(*index))),
+            Type::Encoded(index) => out.push_str(&param(*index)),
             Type::Named(n) if n.module == "prelude" && n.name == "Option" && n.args.len() == 1 => {
                 let fn_type = matches!(n.args[0], Type::Fn(..));
                 out.push_str(if fn_type { "(" } else { "" });

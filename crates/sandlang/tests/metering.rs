@@ -783,7 +783,7 @@ fn dictionaries_of_polymorphic_recursion_share_their_parts() {
     // instead of copying the exponentially growing type tree.
     let doubling = "struct P<A, B> { a: A, b: B }\nfn grow<A: Decode, B: Decode>(n: int, a: A?, b: B?) -> int {\n    \
                     let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))";
-    expect_stop(limits(|l| l.max_memory = Some(64 << 20)), doubling, is_limit(LimitKind::Memory), Duration::from_secs(10));
+    expect_stop(limits(|limits| limits.max_memory = Some(64 << 20)), doubling, is_limit(LimitKind::Memory), Duration::from_secs(10));
     let shared = "import json\nstruct P<T> { v: T }\nfn grow<A: Decode + Hash>(n: int, a: A?) -> int {\n    if n == 0 {\n        \
                   let m: Result<[A: int]> = json.decode(\"{\\\"k\\\": 1}\")\n        let p: Result<P<A>> = json.decode(\"{\\\"v\\\": 1}\")\n        \
                   print(m)\n        print(p)\n        return 0\n    }\n    let x: (A, A)? = None\n    grow(n - 1, x)\n}\nlet a: int? = None\nprint(grow(200, a))";
@@ -803,7 +803,7 @@ fn shared_dictionary_parts_are_counted_once() {
     let src = "import json\nstruct P<A, B> { a: A, b: B }\nfn deep<A: Decode, B: Decode>(n: int, x: [A], y: [B]) -> int {\n    \
                if n == 0 {\n        let r: Result<[(A, B)]> = json.decode(\"[]\")\n        return if r.is_ok() { 0 } else { -1 }\n    }\n    \
                let w: [P<A, B>] = []\n    deep(n - 1, w, w) + 1\n}\nlet w: [int] = []\nprint(deep(200, w, w))";
-    let (result, out) = run(limits(|l| l.max_memory = Some(16 << 20)), src);
+    let (result, out) = run(limits(|limits| limits.max_memory = Some(16 << 20)), src);
     result.unwrap();
     assert_eq!(out, "200\n");
 }

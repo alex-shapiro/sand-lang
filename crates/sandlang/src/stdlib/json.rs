@@ -937,13 +937,13 @@ impl JsonTextWriter {
     ///
     /// Tries progressively smaller growth steps before failing. Reallocation
     /// holds both the old and new buffers in memory at once. The reservation
-    /// therefore checks `target + cap` bytes.
+    /// therefore checks `target + capacity` bytes.
     #[cold]
     fn grow(&mut self, need: usize) -> CodecResult {
-        let cap = self.out.capacity();
-        for target in [cap.saturating_mul(2), cap + cap / 2, cap + cap / 4, cap + cap / 8] {
+        let capacity = self.out.capacity();
+        for target in [capacity.saturating_mul(2), capacity + capacity / 2, capacity + capacity / 4, capacity + capacity / 8] {
             let target = target.max(need);
-            if self.reservation.ensure(target.saturating_add(cap)).is_ok() {
+            if self.reservation.ensure(target.saturating_add(capacity)).is_ok() {
                 self.out.reserve_exact(target - self.out.len());
                 return Ok(());
             }
@@ -1853,12 +1853,12 @@ impl DecodeSource for JsonSource {
     }
 }
 
-/// Returns an upper bound on the byte length that [`write_str`] writes for `s`.
+/// Returns an upper bound on the byte length that [`write_str`] writes for `text`.
 ///
 /// Assumes worst-case escaping for strings up to 4096 bytes to avoid scanning twice.
 #[inline(always)]
-fn quoted_len(s: &str) -> usize {
-    let escaped = if s.len() <= 4096 || has_escape(s.as_bytes()) { 6 * s.len() } else { s.len() };
+fn quoted_len(text: &str) -> usize {
+    let escaped = if text.len() <= 4096 || has_escape(text.as_bytes()) { 6 * text.len() } else { text.len() };
     escaped + 2
 }
 

@@ -224,7 +224,7 @@ proptest! {
                 // The checker stops at the first unsatisfied bound on an `impl` block.
                 // Either missing trait diagnostic can therefore suppress the other.
                 let (missing_decode, missing_hash) =
-                    (ds.iter().any(|d| trait_of(d) == Some(true)), ds.iter().any(|d| trait_of(d) == Some(false)));
+                    (ds.iter().any(|diag| trait_of(diag) == Some(true)), ds.iter().any(|diag| trait_of(diag) == Some(false)));
                 if t.well_formed() {
                     prop_assert!(missing_decode && !missing_hash, "{:?}\n{}", ds, src);
                 }

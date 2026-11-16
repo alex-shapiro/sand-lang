@@ -650,13 +650,13 @@ impl Checker {
             self.push_scope();
             let mut params = Vec::new();
             let dicts = self.local_fn_dicts(self_local);
-            for &(t, tr) in &dicts {
+            for &(bound_ty, trait_ref) in &dicts {
                 let dict_local = self.declare_local_sym(Symbol::DICT, TypeId::UNIT, false, f.name.span, true);
                 self.fs.data[dict_local as usize].used = true;
                 // Each local function owns distinct `ParamId`s. Its dictionary
                 // parameters can therefore stay in `fs.evidence` for the rest
                 // of the enclosing function.
-                self.fs.evidence.push((t, tr, mk(HKind::Local(dict_local), TypeId::UNIT, f.name.span)));
+                self.fs.evidence.push((bound_ty, trait_ref, mk(HKind::Local(dict_local), TypeId::UNIT, f.name.span)));
                 params.push(dict_local);
             }
             for (p, &t) in f.params.iter().zip(&ptys) {
@@ -1011,9 +1011,15 @@ impl Checker {
     /// that have runtime dictionaries.
     fn local_fn_dicts(&mut self, local_id: LocalId) -> Vec<(TypeId, TraitRef)> {
         let mut dicts = Vec::new();
-        for p in self.fs.data[local_id as usize].scheme.clone() {
-            let pt = self.arena.param(p);
-            dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
+        for param in self.fs.data[local_id as usize].scheme.clone() {
+            let param_ty = self.arena.param(param);
+            dicts.extend(
+                self.params[param as usize]
+                    .traits
+                    .iter()
+                    .filter(|trait_ref| self.has_dict(trait_ref))
+                    .map(|&trait_ref| (param_ty, trait_ref)),
+            );
         }
         dicts
     }
@@ -2272,12 +2278,14 @@ impl Checker {
                 (Some(h), _, _) => h,
                 (None, Some(b), _) => mk(HKind::Field { obj: Box::new(b.clone()), index: i as u32 }, fty, span),
                 (None, None, Some(helper)) => {
-                    let gens = self.types[d as usize].generics.clone();
+                    let generics = self.types[d as usize].generics.clone();
                     let mut args = Vec::new();
-                    for (t, tr) in self.fns[helper as usize].dicts.clone() {
-                        let t = self.arena.instantiate(t, &gens, &targs);
-                        let tr = tr.subst_params(&mut self.arena, &|p| gens.iter().position(|&g| g == p).map(|i| targs[i]));
-                        args.push(HArg::Expr(self.evidence_hole(t, tr, false, span)));
+                    for (bound_ty, trait_ref) in self.fns[helper as usize].dicts.clone() {
+                        let bound_ty = self.arena.instantiate(bound_ty, &generics, &targs);
+                        let trait_ref = trait_ref.subst_params(&mut self.arena, &|param| {
+                            generics.iter().position(|&generic| generic == param).map(|idx| targs[idx])
+                        });
+                        args.push(HArg::Expr(self.evidence_hole(bound_ty, trait_ref, false, span)));
                     }
                     mk(HKind::Call { func: helper, targs: targs.clone(), args }, fty, span)
                 }

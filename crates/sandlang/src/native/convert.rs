@@ -16,11 +16,10 @@ use std::hash::Hash;
 /// borrow `&str`, `&[u8]`, or `&T` from the VM heap. Owned types allocate a
 /// Rust copy.
 ///
-/// A Sand value can contain shared references to the same heap object.
-/// Converting a value into an owned Rust type copies each reachable reference.
-/// Implementations must charge fuel to `vm` and record allocated bytes in
-/// [`Conversion`] so that instruction and memory limits bound shared-value
-/// expansion.
+/// A Sand value can contain shared references to the same heap object. An
+/// owned Rust conversion copies each reachable reference. Implementations must
+/// charge fuel to `vm` and record allocated bytes in [`Conversion`] so that
+/// instruction and memory limits bound shared-value expansion.
 pub trait FromVmValue: SandType {
     type Item<'a>;
 

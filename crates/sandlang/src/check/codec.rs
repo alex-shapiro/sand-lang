@@ -338,18 +338,19 @@ impl Checker {
     fn infer_codec_bounds(&mut self, impl_id: ImplId) -> Result<Vec<(TypeId, TraitRef)>, usize> {
         let imp = self.impls[impl_id as usize].clone();
         let requirements: Vec<(TypeId, TraitRef)> = self.unresolved_codec(&imp).ok_or(usize::MAX)?.dicts().copied().collect();
-        let evidence = imp.evidence.iter().map(|&(t, tr)| (t, tr, dict_expr(HKind::Error))).collect();
+        let evidence = imp.evidence.iter().map(|&(bound_ty, trait_ref)| (bound_ty, trait_ref, dict_expr(HKind::Error))).collect();
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
         let outer_collector =
             self.codec_bound_collector.replace(CodecBoundCollector { type_params: imp.generics.clone(), bounds: Vec::new() });
-        let failed_index = requirements.into_iter().position(|(t, tr)| match self.resolve_evidence(t, tr, 0) {
+        let failed_index = requirements.into_iter().position(|(bound_ty, trait_ref)| match self.resolve_evidence(bound_ty, trait_ref, 0) {
             Ok(_) => false,
-            Err(m) => !m.unknown,
+            Err(unmet) => !unmet.unknown,
         });
-        let bounds = std::mem::replace(&mut self.codec_bound_collector, outer_collector).map(|c| c.bounds).unwrap_or_default();
+        let bounds =
+            std::mem::replace(&mut self.codec_bound_collector, outer_collector).map(|collector| collector.bounds).unwrap_or_default();
         self.fs.evidence = saved;
         match failed_index {
-            Some(i) => Err(i),
+            Some(index) => Err(index),
             None => Ok(bounds),
         }
     }
@@ -363,8 +364,8 @@ impl Checker {
         let is_decode = self.traits[imp.trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
         let (part_ty, trait_ref) = *self.unresolved_codec(&imp)?.parts.get(part_index)?;
         let mut inner_reason = None;
-        self.arena.any(part_ty, &mut |x| {
-            if let Ty::Named(other_def, _) = x
+        self.arena.any(part_ty, &mut |sub_ty| {
+            if let Ty::Named(other_def, _) = sub_ty
                 && other_def != def_id
                 && inner_reason.is_none()
             {
@@ -387,11 +388,11 @@ impl Checker {
                 Some(format!("field `{}` of `{owner}` has type `{shown_part_ty}`", self.name(field_name)))
             }
             TypeDefKind::Enum { variants } => {
-                let mut i = part_index;
+                let mut remaining = part_index;
                 let variant = variants.iter().find(|variant| {
-                    let found = i < variant.fields.len();
+                    let found = remaining < variant.fields.len();
                     if !found {
-                        i -= variant.fields.len();
+                        remaining -= variant.fields.len();
                     }
                     found
                 })?;
@@ -443,61 +444,67 @@ impl Checker {
     /// Returns `None` if the target type cannot have a structural codec
     /// implementation.
     fn unresolved_codec(&mut self, imp: &ImplDef) -> Option<UnresolvedCodec> {
-        let tr = imp.trait_ref;
-        let is_decode = self.traits[tr.trait_id as usize].builtin == Some(Builtin::Decode);
+        let trait_ref = imp.trait_ref;
+        let is_decode = self.traits[trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
         let mut codec = UnresolvedCodec::default();
         let target = self.resolve(imp.target);
         match self.ty(target) {
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Duration | Ty::Unit | Ty::Range | Ty::Never => {}
-            Ty::List(x) | Ty::Set(x) => codec.parts.push((x, tr)),
-            Ty::Map(k, v) => codec.parts.extend([(k, tr), (v, tr)]),
-            Ty::Tuple(l) => codec.parts.extend(self.elems(l).into_iter().map(|t| (t, tr))),
-            Ty::Named(d, args) => {
+            Ty::List(elem) | Ty::Set(elem) => codec.parts.push((elem, trait_ref)),
+            Ty::Map(key, value) => codec.parts.extend([(key, trait_ref), (value, trait_ref)]),
+            Ty::Tuple(elems) => codec.parts.extend(self.elems(elems).into_iter().map(|part_ty| (part_ty, trait_ref))),
+            Ty::Named(def_id, args) => {
                 let args = self.elems(args);
-                let def = self.types[d as usize].clone();
-                if self.codec_form(d, if is_decode { Builtin::Decode } else { Builtin::Encode }) == Some(false) {
+                let def = self.types[def_id as usize].clone();
+                if self.codec_form(def_id, if is_decode { Builtin::Decode } else { Builtin::Encode }) == Some(false) {
                     return Some(codec);
                 }
-                let instantiate_ty =
-                    |c: &mut Checker, t: TypeId, gens: &[ParamId]| c.arena.instantiate(t, gens, &args[..gens.len().min(args.len())]);
-                let instantiate_dicts = |c: &mut Checker, ds: &[(TypeId, TraitRef)], gens: &[ParamId]| -> Vec<(TypeId, TraitRef)> {
-                    ds.iter()
-                        .map(|&(t, dtr)| {
-                            let t = instantiate_ty(c, t, gens);
-                            (t, dtr.subst_params(&mut c.arena, &|q| gens.iter().position(|&g| g == q).map(|i| args[i])))
-                        })
-                        .collect()
+                let instantiate_ty = |checker: &mut Checker, ty: TypeId, generics: &[ParamId]| {
+                    checker.arena.instantiate(ty, generics, &args[..generics.len().min(args.len())])
                 };
+                let instantiate_dicts =
+                    |checker: &mut Checker, dicts: &[(TypeId, TraitRef)], generics: &[ParamId]| -> Vec<(TypeId, TraitRef)> {
+                        dicts
+                            .iter()
+                            .map(|&(bound_ty, bound_trait)| {
+                                let bound_ty = instantiate_ty(checker, bound_ty, generics);
+                                let bound_trait = bound_trait.subst_params(&mut checker.arena, &|param| {
+                                    generics.iter().position(|&generic| generic == param).map(|idx| args[idx])
+                                });
+                                (bound_ty, bound_trait)
+                            })
+                            .collect()
+                    };
                 match &def.kind {
-                    TypeDefKind::Struct { fields } => match self.init_method(Ctor::Def(d)).filter(|_| is_decode) {
+                    TypeDefKind::Struct { fields } => match self.init_method(Ctor::Def(def_id)).filter(|_| is_decode) {
                         Some(init) => {
                             let init_fn = self.fns[init as usize].clone();
                             if init_fn.generics.len() != def.generics.len() {
                                 return None;
                             }
-                            for p in &init_fn.params {
-                                let t = instantiate_ty(self, p.ty, &init_fn.generics);
-                                codec.parts.push((t, tr));
-                                codec.fills.push(match &p.default {
-                                    Some(DefaultArg::Helper(h)) => {
-                                        let helper_dicts = self.fns[*h as usize].dicts.clone();
-                                        CodecFill::Helper(*h, instantiate_dicts(self, &helper_dicts, &init_fn.generics))
+                            for param in &init_fn.params {
+                                let part_ty = instantiate_ty(self, param.ty, &init_fn.generics);
+                                codec.parts.push((part_ty, trait_ref));
+                                codec.fills.push(match &param.default {
+                                    Some(DefaultArg::Helper(helper)) => {
+                                        let helper_dicts = self.fns[*helper as usize].dicts.clone();
+                                        CodecFill::Helper(*helper, instantiate_dicts(self, &helper_dicts, &init_fn.generics))
                                     }
-                                    Some(DefaultArg::Inline(e)) => closed_const(e).map_or(CodecFill::Required, CodecFill::Const),
+                                    Some(DefaultArg::Inline(expr)) => closed_const(expr).map_or(CodecFill::Required, CodecFill::Const),
                                     None => CodecFill::Required,
                                 });
                             }
                             codec.init = Some((init, instantiate_dicts(self, &init_fn.dicts, &init_fn.generics)));
                         }
                         None => {
-                            for f in fields {
-                                let t = instantiate_ty(self, f.ty, &def.generics);
-                                codec.parts.push((t, tr));
+                            for field in fields {
+                                let part_ty = instantiate_ty(self, field.ty, &def.generics);
+                                codec.parts.push((part_ty, trait_ref));
                                 if is_decode {
-                                    codec.fills.push(match f.default {
-                                        Some(h) => {
-                                            let helper_dicts = self.fns[h as usize].dicts.clone();
-                                            CodecFill::Helper(h, instantiate_dicts(self, &helper_dicts, &def.generics))
+                                    codec.fills.push(match field.default {
+                                        Some(helper) => {
+                                            let helper_dicts = self.fns[helper as usize].dicts.clone();
+                                            CodecFill::Helper(helper, instantiate_dicts(self, &helper_dicts, &def.generics))
                                         }
                                         None => CodecFill::Required,
                                     });
@@ -506,10 +513,10 @@ impl Checker {
                         }
                     },
                     TypeDefKind::Enum { variants } => {
-                        for v in variants {
-                            for &t in &v.fields {
-                                let t = instantiate_ty(self, t, &def.generics);
-                                codec.parts.push((t, tr));
+                        for variant in variants {
+                            for &field_ty in &variant.fields {
+                                let part_ty = instantiate_ty(self, field_ty, &def.generics);
+                                codec.parts.push((part_ty, trait_ref));
                             }
                         }
                     }

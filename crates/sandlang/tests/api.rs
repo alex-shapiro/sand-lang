@@ -149,20 +149,20 @@ fn json_decode_defaults_appear_in_stack_traces() {
 
 #[test]
 fn json_decode_of_deep_options_runs_on_a_small_stack() {
-    let (ok, too_deep) = (format!("int{}", "?".repeat(30)), format!("int{}", "?".repeat(9000)));
+    let (shallow_type, deep_type) = (format!("int{}", "?".repeat(30)), format!("int{}", "?".repeat(9000)));
     let src = format!(
-        "import json\nlet a: {ok} = json.decode(\"1\").unwrap()\nprint(json.encode(a)?)\nlet b: Result<[{ok}]> = json.decode(\"[{{}}]\")\n\
+        "import json\nlet a: {shallow_type} = json.decode(\"1\").unwrap()\nprint(json.encode(a)?)\nlet b: Result<[{shallow_type}]> = json.decode(\"[{{}}]\")\n\
          print(b.unwrap_err().message)\n"
     );
     let run = move || run_src(Config::new(), &src);
-    let (r, out, err) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
-    assert!(r.is_ok(), "{r:?} {err}");
+    let (result, out, err) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    assert!(result.is_ok(), "{result:?} {err}");
     assert_eq!(out, "1\n$[0]: expected int\n");
-    let src = format!("import json\nlet a: Result<{too_deep}> = json.decode(\"1\")\n");
+    let src = format!("import json\nlet a: Result<{deep_type}> = json.decode(\"1\")\n");
     let run = move || run_src(Config::new(), &src);
-    let (r, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
-    let Err(Error::Compile(ds)) = r else { panic!("{r:?}") };
-    assert!(ds[0].message.starts_with("overflow while checking that int??"), "{}", ds[0].message);
+    let (result, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    let Err(Error::Compile(diags)) = result else { panic!("{result:?}") };
+    assert!(diags[0].message.starts_with("overflow while checking that int??"), "{}", diags[0].message);
 }
 
 #[test]
@@ -1932,7 +1932,7 @@ print(none.product())
     m.function("List.go", |vm: &mut Vm, num: Num<0>, _: VmVal<Vec<Param<0, traits::Num>>>| num.one(vm));
     m.source("pub trait Go { fn go(self) -> int }\nimpl<T: Num> Go for [T] { native fn go(self) -> T }");
     let errors = host_module_errors([m]);
-    assert!(errors.iter().any(|e| e == "the Rust function of a native impl method cannot take trait dictionaries"), "{errors:?}");
+    assert!(errors.iter().any(|err| err == "the Rust function of a native impl method cannot take trait dictionaries"), "{errors:?}");
 }
 
 #[test]
@@ -2159,8 +2159,8 @@ fn generic_natives_take_type_parameters() {
         ("uses type parameter 1, which its declaration does not have", |m| {
             m.function("second", |_: &mut Vm, _: VmVal<Vec<Param<1>>>| -> Result<Option<Param<1>>, Fail> { Ok(None) });
         }),
-        ("is declared `fn([T]) -> T?`, but its Rust function is `fn(<Encode dictionary of T>, [T]) -> T?`", |m| {
-            m.function(
+        ("is declared `fn([T]) -> T?`, but its Rust function is `fn(<Encode dictionary of T>, [T]) -> T?`", |module| {
+            module.function(
                 "second",
                 |_: &mut Vm, _: TraitDict<0, traits::Encode>, _: VmVal<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) },
             );
