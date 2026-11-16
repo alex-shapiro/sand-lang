@@ -12,7 +12,7 @@
 //! [`NativeContext::step`] can run the pass again after a collection.
 
 use super::bytecode::{CodecShape, Fill, PartTemplate, Program, ShapeKind};
-use super::meter::SLOW_BYTES_PER_UNIT;
+use super::meter::{SLOW_BYTES_PER_UNIT, Scratch};
 use super::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
 use super::{Fail, Vm, WaitKind};
 use crate::native::codec::{CodecResult, DecodeSource, EncodeSink, InputKind, PayloadForm};
@@ -28,6 +28,10 @@ use std::sync::Arc;
 
 /// Bytes that a walker reserves for each value that it builds.
 const NODE_BYTES: usize = 64;
+
+/// The number of values that the decode walker reads between two checks of
+/// the memory limit.
+const CHECKED_VALUES: u32 = 32;
 
 /// The maximum nesting depth of a value that a walker encodes or decodes.
 /// The limit also stops a cyclic value.
@@ -74,9 +78,10 @@ impl Walk {
     }
 
     /// Returns the dictionary of part `part` of shape `s`, from `whole`.
-    fn part_dict(&mut self, vm: &mut Vm, s: u32, part: u32, whole: VmValue) -> Result<VmValue, Fail> {
-        let prog = vm.prog.clone();
-        let Some(t) = shape(vm, s)?.parts.get(part as usize) else { return Err(Fail::internal("a codec shape has too few parts")) };
+    fn part_dict(&mut self, vm: &mut Vm, prog: &Program, s: u32, part: u32, whole: VmValue) -> Result<VmValue, Fail> {
+        let Some(t) = prog.codec_shapes[s as usize].parts.get(part as usize) else {
+            return Err(Fail::internal("a codec shape has too few parts"));
+        };
         match t {
             PartTemplate::Const(k) => Ok(vm.consts[*k as usize]),
             PartTemplate::Bound(i) => dict_slot(vm, whole, *i),
@@ -85,7 +90,7 @@ impl Walk {
                 if let Some(&d) = self.cache.get(&key) {
                     return Ok(d);
                 }
-                let d = eval_template(vm, &prog.codec_shapes[s as usize].parts[part as usize], whole)?;
+                let d = eval_template(vm, t, whole)?;
                 self.cache.insert(key, d);
                 self.cached.push(d);
                 Ok(d)
@@ -282,6 +287,8 @@ enum EncodeKind {
 /// Walks a value and writes it to an [`EncodeSink`].
 pub(crate) struct EncodeWalk {
     walk: Walk,
+    /// Checks the growth of the sink against the memory limit.
+    scratch: Scratch,
     frames: Vec<EncodeFrame>,
     /// The number of open containers other than `Some`.
     depth: usize,
@@ -294,17 +301,19 @@ pub(crate) struct EncodeWalk {
 
 impl EncodeWalk {
     pub(crate) fn new(value: VmValue, dict: VmValue) -> EncodeWalk {
-        EncodeWalk { walk: Walk::new(vec![value, dict]), frames: Vec::new(), depth: 0, pending: Some((value, dict)), callback: None }
+        let walk = Walk::new(vec![value, dict]);
+        EncodeWalk { walk, scratch: Scratch::new(), frames: Vec::new(), depth: 0, pending: Some((value, dict)), callback: None }
     }
 
     /// Walks until the end or the next callback.
     pub(crate) fn run(&mut self, vm: &mut Vm, shared: &EncodeCell) -> CodecResult<Step> {
+        let prog = vm.prog.clone();
         let mut state = shared.lock();
         loop {
-            vm.check_memory(NODE_BYTES + state.sink.allocated())?;
+            self.scratch.check(&vm.heap, NODE_BYTES + state.sink.allocated())?;
             let (value, dict) = match self.pending {
                 Some(part) => part,
-                None => match self.next_part(vm, &mut state.sink)? {
+                None => match self.next_part(vm, &prog, &mut state.sink)? {
                     Some(part) => part,
                     None => return Ok(Step::Done),
                 },
@@ -322,7 +331,7 @@ impl EncodeWalk {
                 }
                 Method::Structural(s) => {
                     self.pending = None;
-                    self.visit(vm, &mut state.sink, s, value, dict)?;
+                    self.visit(vm, &prog, &mut state.sink, s, value, dict)?;
                 }
             }
         }
@@ -369,8 +378,7 @@ impl EncodeWalk {
         Ok(())
     }
 
-    fn visit(&mut self, vm: &mut Vm, sink: &mut dyn EncodeSink, s: u32, value: VmValue, dict: VmValue) -> CodecResult {
-        let prog = vm.prog.clone();
+    fn visit(&mut self, vm: &mut Vm, prog: &Program, sink: &mut dyn EncodeSink, s: u32, value: VmValue, dict: VmValue) -> CodecResult {
         let shape = &prog.codec_shapes[s as usize];
         let wrong = || -> CodecResult { Err(Fail::internal("encode: a value does not match its shape").into()) };
         match (&shape.kind, value) {
@@ -444,7 +452,7 @@ impl EncodeWalk {
 
     /// Returns the next part of the innermost open container, and ends the
     /// containers that have no more parts.
-    fn next_part(&mut self, vm: &mut Vm, sink: &mut dyn EncodeSink) -> CodecResult<Option<(VmValue, VmValue)>> {
+    fn next_part(&mut self, vm: &mut Vm, prog: &Program, sink: &mut dyn EncodeSink) -> CodecResult<Option<(VmValue, VmValue)>> {
         loop {
             let Some(frame) = self.frames.last() else { return Ok(None) };
             let (container, dict, shape) = (self.walk.values[frame.at], self.walk.values[frame.at + 1], frame.shape);
@@ -456,7 +464,7 @@ impl EncodeWalk {
             };
             match child {
                 Some((value, part, next)) => {
-                    let dict = self.walk.part_dict(vm, shape, part, dict)?;
+                    let dict = self.walk.part_dict(vm, prog, shape, part, dict)?;
                     self.frames.last_mut().expect("an open frame").next = next;
                     return Ok(Some((value, dict)));
                 }
@@ -572,6 +580,8 @@ enum SlotsEnd {
 /// Builds a value from a [`DecodeSource`].
 pub(crate) struct DecodeWalk {
     walk: Walk,
+    /// The values read since the last check of the memory limit.
+    unchecked: u32,
     frames: Vec<DecodeFrame>,
     /// The number of open containers other than `Some`.
     depth: usize,
@@ -584,14 +594,18 @@ pub(crate) struct DecodeWalk {
 
 impl DecodeWalk {
     pub(crate) fn new(dict: VmValue) -> DecodeWalk {
-        DecodeWalk { walk: Walk::new(vec![dict]), frames: Vec::new(), depth: 0, pending: Some(dict), callback: None }
+        DecodeWalk { walk: Walk::new(vec![dict]), unchecked: 0, frames: Vec::new(), depth: 0, pending: Some(dict), callback: None }
     }
 
     /// Walks until the end or the next callback.
     pub(crate) fn run(&mut self, vm: &mut Vm, shared: &DecodeCell) -> CodecResult<Step> {
+        let prog = vm.prog.clone();
         let mut state = shared.lock();
         loop {
-            vm.check_memory(NODE_BYTES + state.source.allocated())?;
+            if self.unchecked == 0 || vm.heap.fail_next_check.get() {
+                vm.check_memory(CHECKED_VALUES as usize * NODE_BYTES + state.source.allocated())?;
+            }
+            self.unchecked = (self.unchecked + 1) % CHECKED_VALUES;
             vm.charge(1 + (state.source.work() / SLOW_BYTES_PER_UNIT) as u64)?;
             if let Some(dict) = self.pending.take() {
                 match method(vm, dict)? {
@@ -609,14 +623,14 @@ impl DecodeWalk {
                         (state.active, state.read) = (token, false);
                         return Ok(Step::Call(Callback { callee, args: vec![dict, decoder], purpose: Purpose::Method }));
                     }
-                    Method::Structural(s) => self.visit(vm, &mut state.source, s, dict)?,
+                    Method::Structural(s) => self.visit(vm, &prog, &mut state.source, s, dict)?,
                 }
                 continue;
             }
             if self.frames.is_empty() {
                 return Ok(Step::Done);
             }
-            if let Some(callback) = self.advance(vm, &mut state.source)? {
+            if let Some(callback) = self.advance(vm, &prog, &mut state.source)? {
                 return Ok(Step::Call(callback));
             }
         }
@@ -705,8 +719,7 @@ impl DecodeWalk {
 
     /// Reads the part of shape `s` with dictionary `dict`. Places a scalar,
     /// or opens a frame for a container.
-    fn visit(&mut self, vm: &mut Vm, source: &mut dyn DecodeSource, s: u32, dict: VmValue) -> CodecResult {
-        let prog = vm.prog.clone();
+    fn visit(&mut self, vm: &mut Vm, prog: &Program, source: &mut dyn DecodeSource, s: u32, dict: VmValue) -> CodecResult {
         let shape = &prog.codec_shapes[s as usize];
         let value = match &shape.kind {
             ShapeKind::Never => return parse_error(source, "cannot decode a value of type never"),
@@ -760,7 +773,7 @@ impl DecodeWalk {
                 false => VmValue::Tag(prog.ids.none),
                 true => {
                     self.push_frame(dict, s, DecodeKind::Some, 0)?;
-                    self.pending = Some(self.walk.part_dict(vm, s, 0, dict)?);
+                    self.pending = Some(self.walk.part_dict(vm, prog, s, 0, dict)?);
                     return Ok(());
                 }
             },
@@ -811,12 +824,11 @@ impl DecodeWalk {
     /// Continues the innermost frame: requests its next part, fills a
     /// missing slot, or ends the frame. Returns a callback for a computed
     /// default or for `init`.
-    fn advance(&mut self, vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<Option<Callback>> {
+    fn advance(&mut self, vm: &mut Vm, prog: &Program, source: &mut dyn DecodeSource) -> CodecResult<Option<Callback>> {
         let frame = self.frames.last_mut().expect("an open frame");
         let (at, s) = (frame.at, frame.shape);
         let dict = self.walk.values[at];
         let children = self.walk.values.len() - at - 1;
-        let prog = vm.prog.clone();
         let shape = &prog.codec_shapes[s as usize];
         if !frame.ended {
             let part = match &mut frame.kind {
@@ -832,7 +844,7 @@ impl DecodeWalk {
                     };
                     match form {
                         PayloadForm::Named => match source.next_field()? {
-                            Some(name) => match names.get(&prog).and_then(|ns| field_index(ns, &name, *next)) {
+                            Some(name) => match names.get(prog).and_then(|ns| field_index(ns, &name, *next)) {
                                 Some(i) if seen[i] => {
                                     let name = crate::stdlib::truncate(&name, 64).to_string();
                                     return parse_error(source, format!("duplicate field `{name}`"));
@@ -862,7 +874,7 @@ impl DecodeWalk {
             };
             match part {
                 Some(part) => {
-                    self.pending = Some(self.walk.part_dict(vm, s, part, dict)?);
+                    self.pending = Some(self.walk.part_dict(vm, prog, s, part, dict)?);
                     return Ok(None);
                 }
                 None => frame.ended = true,
@@ -875,10 +887,10 @@ impl DecodeWalk {
                 SlotsEnd::Variant { base, .. } => *base,
                 _ => 0,
             };
-            let name = || names.get(&prog).map_or_else(|| missing.to_string(), |ns| ns[missing].clone());
+            let name = || names.get(prog).map_or_else(|| missing.to_string(), |ns| ns[missing].clone());
             let value = match shape.fills.get(missing).cloned().unwrap_or(Fill::Required) {
                 Fill::Required => {
-                    let d = self.walk.part_dict(vm, s, base + missing as u32, dict)?;
+                    let d = self.walk.part_dict(vm, prog, s, base + missing as u32, dict)?;
                     match method(vm, d)? {
                         Method::Structural(p) if matches!(shape_kind(vm, p)?, ShapeKind::Option) => VmValue::Tag(vm.prog.ids.none),
                         _ if matches!(names, Names::Positional) => {
