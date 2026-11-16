@@ -1077,6 +1077,17 @@ impl Checker {
 
     /// Hoists non-constant dictionary expressions into entry-block local
     /// bindings, deduplicating identical dictionaries.
+    /// Returns `true` if dictionary `e` reads a local that a lambda owns, such
+    /// as a dictionary parameter of a local generic function.
+    pub(crate) fn reads_lambda_local(&self, e: &HExpr) -> bool {
+        match &e.kind {
+            HKind::Dict { args, .. } => args.iter().any(|a| self.reads_lambda_local(a)),
+            HKind::Field { obj, .. } => self.reads_lambda_local(obj),
+            HKind::Local(l) => self.fs.locals[*l as usize].owner != 0,
+            _ => false,
+        }
+    }
+
     pub(crate) fn hoist_dict(&mut self, e: &mut HExpr, hoisted: &mut Vec<(LocalId, HExpr)>) {
         if let HKind::Dict { args, .. } = &mut e.kind {
             for a in args.iter_mut() {

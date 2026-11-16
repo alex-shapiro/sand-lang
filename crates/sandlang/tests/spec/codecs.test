@@ -336,3 +336,39 @@ print("after")
 Err(Error(message: "a `decode` method returned before its read ended", kind: "invalid"))
 spawned: {w}
 after
+
+=== a local generic function builds dictionaries from its own bounds
+import json
+trait Size {
+    fn size(self) -> int
+}
+impl Size for int {
+    fn size(self) -> int { 1 }
+}
+impl<T: Size> Size for [T] {
+    fn size(self) -> int { self.map(x => x.size()).sum() }
+}
+fn main() -> Result<()> {
+    fn enc2<T: Encode>(x: T) -> Result<str> { json.encode([x, x]) }
+    fn opt<T: Encode>(x: T) -> Result<str> {
+        let o: T? = Some(x)
+        json.encode(o)
+    }
+    fn both<T: Size>(x: T) -> int { [x, x].size() }
+    fn looped<T: Encode>(x: T) -> Result<str> {
+        var out = ""
+        for _ in 0..2 { out += json.encode([x])? }
+        Ok(out)
+    }
+    print(enc2(5)?)
+    print(opt("a")?)
+    print(both(3))
+    print(looped(true)?)
+    Ok(())
+}
+main().unwrap()
+--- stdout
+[5,5]
+"a"
+2
+[true][true]
