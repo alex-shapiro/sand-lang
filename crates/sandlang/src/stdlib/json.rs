@@ -143,14 +143,24 @@ struct Builder<'a, 's, 'h> {
     st: &'s mut Staging<'h>,
     meter: &'a Meter,
     pending: usize,
-    keys: HashTable<(u64, Cow<'a, str>, VmValue)>,
-    entries: Vec<Entry<'a>>,
+    /// Shared key strings with their hashes and text.
+    keys: HashTable<(u64, KeyText, VmValue)>,
+    entries: Vec<Entry>,
+    /// Text of the keys in `keys` and `entries`.
+    key_text: String,
 }
 
-struct Entry<'a> {
+/// Byte range of a key in [`Builder::key_text`].
+#[derive(Clone, Copy)]
+struct KeyText {
+    start: u32,
+    len: u32,
+}
+
+struct Entry {
     hash: u64,
     /// Key text for equality checks before staged strings are committed to the heap.
-    text: Option<Cow<'a, str>>,
+    text: Option<KeyText>,
     key: VmValue,
     value: VmValue,
 }
@@ -162,7 +172,11 @@ struct MapBuilder {
 
 impl<'a, 's, 'h> Builder<'a, 's, 'h> {
     fn new(st: &'s mut Staging<'h>, meter: &'a Meter) -> Self {
-        Builder { st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new() }
+        Builder { st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new(), key_text: String::new() }
+    }
+
+    fn text(&self, key: KeyText) -> &str {
+        &self.key_text[key.start as usize..(key.start + key.len) as usize]
     }
 
     #[inline]
@@ -193,29 +207,34 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
         Ok(str_hash(text))
     }
 
-    #[allow(clippy::ptr_arg)]
-    fn key(&mut self, key: &Cow<'a, str>, hash: u64) -> VmValue {
-        if let Some(&(_, _, v)) = self.keys.find(hash, |e| e.1 == *key) {
-            return v;
+    /// Returns the key string for `key` and the range of its text.
+    ///
+    /// Shares the string and the text of a short key across the whole value.
+    fn key(&mut self, key: &str, hash: u64) -> (VmValue, KeyText) {
+        let key_text = &self.key_text;
+        if let Some(&(_, text, v)) = self.keys.find(hash, |e| &key_text[e.1.start as usize..(e.1.start + e.1.len) as usize] == key) {
+            return (v, text);
         }
-        let v = self.st.new_str(&**key);
+        let text = KeyText { start: self.key_text.len() as u32, len: key.len() as u32 };
+        self.key_text.push_str(key);
+        let v = self.st.new_str(key);
         if key.len() <= MAX_SHARED_KEY_LEN && self.keys.len() < MAX_SHARED_KEYS {
             self.pending += 2 * NODE_BYTES + key.len();
-            self.keys.insert_unique(hash, (hash, key.clone(), v), |e| e.0);
+            self.keys.insert_unique(hash, (hash, text, v), |e| e.0);
         }
-        v
+        (v, text)
     }
 
     fn start_map(&self) -> MapBuilder {
         MapBuilder { base: self.entries.len(), index: None }
     }
 
-    fn put(&mut self, m: &mut MapBuilder, hash: u64, text: Option<Cow<'a, str>>, key: VmValue, value: VmValue) -> Result<(), Fail> {
+    fn put(&mut self, m: &mut MapBuilder, hash: u64, text: Option<KeyText>, key: VmValue, value: VmValue) -> Result<(), Fail> {
         let segment = &self.entries[m.base..];
         let same = |e: &Entry| {
             e.hash == hash
-                && match (&e.text, &text) {
-                    (Some(x), Some(y)) => x == y,
+                && match (e.text, text) {
+                    (Some(x), Some(y)) => self.text(x) == self.text(y),
                     _ => e.key == key,
                 }
         };
@@ -430,7 +449,7 @@ impl Builder<'_, '_, '_> {
                     }
                     Some(WriteFrame::Obj(members, map, key, hash)) => {
                         if let Some(value) = value.take() {
-                            let key = self.key(&Cow::Owned(std::mem::take(key)), *hash);
+                            let (key, _) = self.key(key, *hash);
                             self.append(map, *hash, key, value)?;
                         }
                         if let Some((next_key, member)) = members.next() {
@@ -520,8 +539,8 @@ fn encode_json(vm: &mut Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecR
 fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValue> {
     enum DecodeJsonFrame {
         Arr(Vec<VmValue>),
-        /// Map builder, pending key text, and key hash for the next entry.
-        Obj(MapBuilder, String, u64),
+        /// Map builder, and the hash, string, and text of the pending key.
+        Obj(MapBuilder, u64, VmValue, KeyText),
     }
     let ids = JsonIds::new(&vm.prog)?;
     let meter = &vm.meter;
@@ -553,7 +572,7 @@ fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValu
                 }
                 InputKind::Map => {
                     source.begin_map()?;
-                    stack.push(DecodeJsonFrame::Obj(builder.start_map(), String::new(), 0));
+                    stack.push(DecodeJsonFrame::Obj(builder.start_map(), 0, VmValue::Unit, KeyText { start: 0, len: 0 }));
                     None
                 }
                 InputKind::Duration
@@ -578,17 +597,15 @@ fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValu
                         }
                         source.next()?
                     }
-                    Some(DecodeJsonFrame::Obj(map, key, hash)) => {
+                    Some(DecodeJsonFrame::Obj(map, hash, key, text)) => {
                         if let Some(entry_val) = value.take() {
-                            let text = Cow::Owned(std::mem::take(key));
-                            let key_val = builder.key(&text, *hash);
-                            builder.put(map, *hash, Some(text), key_val, entry_val)?;
+                            builder.put(map, *hash, Some(*text), *key, entry_val)?;
                         }
                         match source.next()? {
                             true => {
-                                let text = source.str()?;
-                                *hash = builder.hash(&text)?;
-                                *key = text.into_owned();
+                                let key_text = source.str()?;
+                                *hash = builder.hash(&key_text)?;
+                                (*key, *text) = builder.key(&key_text, *hash);
                                 true
                             }
                             false => false,

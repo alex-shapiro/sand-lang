@@ -418,10 +418,7 @@ impl Encoder {
         write: impl FnOnce(&mut Vm, &mut dyn EncodeSink) -> CodecResult<T>,
     ) -> Result<T, HostError> {
         let (shared, token) = encoder.get(&vm.heap).map(|encoder_ref| (encoder_ref.shared.upgrade(), encoder_ref.token))?;
-        let shared = claim(shared, token, ENCODER_MISUSE)?;
-        let result = write(vm, &mut shared.lock().io);
-        release(&shared, &result);
-        result.map_err(HostError::into_ctl_error)
+        with_turn(vm, shared, token, ENCODER_MISUSE, |vm, sink| write(vm, sink))
     }
 }
 
@@ -437,11 +434,96 @@ impl Decoder {
         read: impl FnOnce(&mut Vm, &mut dyn DecodeSource) -> CodecResult<T>,
     ) -> Result<T, HostError> {
         let (shared, token) = decoder.get(&vm.heap).map(|decoder_ref| (decoder_ref.shared.upgrade(), decoder_ref.token))?;
-        let shared = claim(shared, token, DECODER_MISUSE)?;
-        let result = read(vm, &mut shared.lock().io);
-        release(&shared, &result);
-        result.map_err(HostError::into_ctl_error)
+        with_turn(vm, shared, token, DECODER_MISUSE, |vm, source| read(vm, source))
     }
+}
+
+/// Runs `f` on the sink or source of `shared` as the single operation of
+/// `token`, under one lock.
+///
+/// Records a recoverable failure in `Turn`, so that the outer walk fails even
+/// if the custom method ignores the returned `Result`.
+fn with_turn<IO: ?Sized, T>(
+    vm: &mut Vm,
+    shared: Option<Arc<Mutex<Shared<IO>>>>,
+    token: u64,
+    [inactive, second]: [&str; 2],
+    f: impl FnOnce(&mut Vm, &mut IO) -> CodecResult<T>,
+) -> Result<T, HostError> {
+    let Some(shared) = shared else { return Err(HostError::new("invalid", inactive)) };
+    let mut shared_guard = shared.lock();
+    shared_guard.turn.claim(token, inactive, second)?;
+    let result = f(vm, &mut shared_guard.io);
+    shared_guard.turn.in_flight -= 1;
+    if let Err(err) = &result {
+        shared_guard.turn.record_error(err);
+    }
+    result.map_err(HostError::into_ctl_error)
+}
+
+/// Returns `true` if `callee` is a native function.
+fn is_native(vm: &Vm, callee: VmValue) -> bool {
+    matches!(callee, VmValue::Obj(_)) && matches!(vm.heap.get(callee), Obj::NativeFn(_))
+}
+
+/// Checks the result of the custom `encode` method call that holds `token`.
+fn end_encode_method(vm: &Vm, shared: &SharedEncode, token: u64, saved: SavedTurn, result: VmValue) -> CodecResult {
+    let unused = shared.lock().turn.end(token, saved, "an `encode` method returned before its write ended")?;
+    if let Some(err_val) = err_payload(vm, result) {
+        return Err(host_error_from_sand(vm, err_val)?);
+    }
+    if unused {
+        return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
+    }
+    Ok(())
+}
+
+/// Checks the result of the custom `decode` method call that holds `token`.
+/// Returns the decoded value.
+fn end_decode_method(vm: &Vm, shared: &SharedDecode, token: u64, saved: SavedTurn, result: VmValue) -> CodecResult<VmValue> {
+    let mut shared_guard = shared.lock();
+    let unread = shared_guard.turn.end(token, saved, "a `decode` method returned before its read ended")?;
+    if let Some(err_val) = err_payload(vm, result) {
+        return Err(with_source_path(host_error_from_sand(vm, err_val)?, &shared_guard.io));
+    }
+    if unread {
+        shared_guard.io.skip()?;
+    }
+    Ok(vm.heap.payload_if(&result, vm.prog.ids.ok))
+}
+
+/// Encodes `value` with the custom native method of root dictionary `dict`.
+///
+/// Returns `false` without a call if `dict` has no native custom method.
+/// Charges a fuel unit for the root part, as the walkers do.
+fn encode_by_native(vm: &mut Vm, shared: &SharedEncode, value: VmValue, dict: VmValue) -> CodecResult<bool> {
+    let CodecDispatch::Custom(callee) = codec_dispatch(vm, dict)? else { return Ok(false) };
+    if !is_native(vm, callee) {
+        return Ok(false);
+    }
+    vm.charge(1)?;
+    let (token, saved) = shared.lock().turn.begin();
+    let encoder = (Encoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm)?;
+    let result =
+        call_native(vm, callee, &[dict, value, encoder])?.ok_or_else(|| Fail::internal("encode: a native method is not native"))?;
+    end_encode_method(vm, shared, token, saved, result)?;
+    Ok(true)
+}
+
+/// Decodes a value with the custom native method of root dictionary `dict`.
+///
+/// Returns `None` without a call if `dict` has no native custom method.
+/// Charges a fuel unit for the root part, as the walkers do.
+fn decode_by_native(vm: &mut Vm, shared: &SharedDecode, dict: VmValue) -> CodecResult<Option<VmValue>> {
+    let CodecDispatch::Custom(callee) = codec_dispatch(vm, dict)? else { return Ok(None) };
+    if !is_native(vm, callee) {
+        return Ok(None);
+    }
+    vm.charge(1)?;
+    let (token, saved) = shared.lock().turn.begin();
+    let decoder = (Decoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm)?;
+    let result = call_native(vm, callee, &[dict, decoder])?.ok_or_else(|| Fail::internal("decode: a native method is not native"))?;
+    end_decode_method(vm, shared, token, saved, result).map(Some)
 }
 
 /// Open container frame on the [`EncodeWalker`] stack.
@@ -705,14 +787,7 @@ impl Walker for EncodeWalker {
     /// Validates completion of a custom `encode` callback.
     fn apply(&mut self, vm: &mut Vm, shared: &SharedEncode, _: CallbackKind, result: VmValue) -> CodecResult {
         let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("encode: no callback").into()) };
-        let unused = shared.lock().turn.end(token, saved, "an `encode` method returned before its write ended")?;
-        if let Some(err_val) = err_payload(vm, result) {
-            return Err(host_error_from_sand(vm, err_val)?);
-        }
-        if unused {
-            return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
-        }
-        Ok(())
+        end_encode_method(vm, shared, token, saved, result)
     }
 
     fn output(&self) -> Result<(), Fail> {
@@ -1201,15 +1276,7 @@ impl Walker for DecodeWalker {
         let value = match kind {
             CallbackKind::Method => {
                 let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("decode: no callback").into()) };
-                let mut shared_guard = shared.lock();
-                let unread = shared_guard.turn.end(token, saved, "a `decode` method returned before its read ended")?;
-                if let Some(err_val) = err_payload(vm, result) {
-                    return Err(with_source_path(host_error_from_sand(vm, err_val)?, &shared_guard.io));
-                }
-                if unread {
-                    shared_guard.io.skip()?;
-                }
-                vm.heap.payload_if(&result, vm.prog.ids.ok)
+                end_decode_method(vm, shared, token, saved, result)?
             }
             CallbackKind::Default => result,
             CallbackKind::Init => {
@@ -1434,6 +1501,9 @@ where
         return Ok(Later::ready(finish(vm, &mut shared.lock().io).map_err(E::from_future_walk)));
     }
     let erased_io: SharedEncode = shared.clone();
+    if encode_by_native(vm, &erased_io, value, dict).map_err(E::from_walk)? {
+        return Ok(Later::ready(finish(vm, &mut shared.lock().io).map_err(E::from_future_walk)));
+    }
     drive_walk(vm, shared, erased_io, EncodeWalker::new(value, dict), |vm, (), sink| finish(vm, sink))
 }
 
@@ -1460,6 +1530,12 @@ where
         return Ok(Later::ready(finish(vm, value, source).map_err(E::from_future_walk)));
     }
     let erased_io: SharedDecode = shared.clone();
+    if let Some(value) = decode_by_native(vm, &erased_io, dict).map_err(E::from_walk)? {
+        let mut shared_guard = shared.lock();
+        let source = &mut shared_guard.io;
+        vm.charge((source.take_consumed_bytes() / SLOW_BYTES_PER_UNIT) as u64).map_err(|err| E::from_walk(err.into()))?;
+        return Ok(Later::ready(finish(vm, value, source).map_err(E::from_future_walk)));
+    }
     drive_walk(vm, shared, erased_io, DecodeWalker::new(dict), finish)
 }
 
