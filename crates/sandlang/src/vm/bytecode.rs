@@ -1343,8 +1343,11 @@ pub enum ShapeKind {
     /// The parts are the fields of struct `def`.
     Struct(u32),
     /// The parts are the payload values of the variants of enum `def`, in
-    /// order.
-    Enum(u32),
+    /// order. `first` is the id of its first variant.
+    Enum {
+        def: u32,
+        first: u32,
+    },
     /// The parts are the parameters of `init` of struct `def`.
     Init(u32),
     /// A native value type `def`, encoded as its text.

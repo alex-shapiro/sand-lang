@@ -2782,7 +2782,10 @@ impl<'a> Compiler<'a> {
                     (Some(NativeCodecs { decode: Some(NativeCodec::Manual(f)), .. }), _) if decode => ShapeKind::ManualDecode(f),
                     _ if d == cp.wk.option => ShapeKind::Option,
                     (_, TypeDefKind::Opaque(Opaque::Value(info))) => ShapeKind::Native(d, info.parse),
-                    (_, TypeDefKind::Enum { .. }) => ShapeKind::Enum(d),
+                    (_, TypeDefKind::Enum { .. }) => {
+                        let first = self.prog.variants.iter().position(|v| v.def == d).unwrap_or(0) as u32;
+                        ShapeKind::Enum { def: d, first }
+                    }
                     (_, _) if codec.init.is_some() => ShapeKind::Init(d),
                     _ => ShapeKind::Struct(d),
                 }

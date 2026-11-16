@@ -119,7 +119,7 @@ impl Walk {
 
     /// Returns the dictionary of part `part` of shape `s`, from `whole`.
     fn part_dict(&mut self, vm: &mut Vm, prog: &Program, s: u32, part: u32, whole: VmValue) -> Result<VmValue, Fail> {
-        let Some(t) = prog.codec_shapes[s as usize].parts.get(part as usize) else {
+        let Some(t) = shape(prog, s)?.parts.get(part as usize) else {
             return Err(Fail::internal("a codec shape has too few parts"));
         };
         match t {
@@ -203,8 +203,10 @@ fn method(vm: &Vm, dict: VmValue) -> Result<Method, Fail> {
     }
 }
 
-fn shape(vm: &Vm, s: u32) -> Result<&CodecShape, Fail> {
-    vm.prog.codec_shapes.get(s as usize).ok_or_else(|| Fail::internal("unknown codec shape"))
+/// Returns shape `s` of `prog`. A host can pass any value as a dictionary, so
+/// the index needs a check.
+fn shape(prog: &Program, s: u32) -> Result<&CodecShape, Fail> {
+    prog.codec_shapes.get(s as usize).ok_or_else(|| Fail::internal("unknown codec shape"))
 }
 
 /// Fails a walk with kind `"limit"` for a value nested more than
@@ -438,7 +440,7 @@ impl EncodeWalk {
     }
 
     fn visit(&mut self, vm: &mut Vm, prog: &Program, sink: &mut dyn EncodeSink, s: u32, value: VmValue, dict: VmValue) -> CodecResult {
-        let shape = &prog.codec_shapes[s as usize];
+        let shape = shape(prog, s)?;
         let wrong = || -> CodecResult { Err(Fail::internal("encode: a value does not match its shape").into()) };
         match (&shape.kind, value) {
             (ShapeKind::Unit, _) => sink.unit()?,
@@ -496,7 +498,7 @@ impl EncodeWalk {
                 sink.begin_some()?;
                 self.push_frame(value, dict, s, EncodeKind::Some, 0)?;
             }
-            (ShapeKind::Enum(_), _) => {
+            (ShapeKind::Enum { .. }, _) => {
                 let id = vm.heap.variant_id(value);
                 let Some(desc) = prog.variant_desc(id) else { return wrong() };
                 let variant = &prog.variants[id as usize];
@@ -642,6 +644,28 @@ fn field(vm: &Vm, container: VmValue, i: usize) -> Result<Option<VmValue>, Fail>
     })
 }
 
+/// Builds a set of `elements`.
+fn build_set(vm: &mut Vm, elements: &[VmValue]) -> Result<VmValue, Fail> {
+    vm.check_memory(NODE_BYTES + elements.len() * NODE_BYTES)?;
+    let elements = elements.to_vec();
+    let set = vm.heap.alloc(Obj::Set(Box::<SetObj>::default()));
+    for x in elements {
+        vm.set_add(set, x)?;
+    }
+    Ok(set)
+}
+
+/// Builds a map of `children`, which alternate between keys and values.
+fn build_map(vm: &mut Vm, children: &[VmValue]) -> Result<VmValue, Fail> {
+    vm.check_memory(NODE_BYTES + children.len() * NODE_BYTES)?;
+    let children = children.to_vec();
+    let map = vm.heap.alloc(Obj::Map(Box::<MapObj>::default()));
+    for &[k, v] in children.as_chunks::<2>().0 {
+        vm.map_insert(map, k, v)?;
+    }
+    Ok(map)
+}
+
 fn payload(vm: &Vm, v: VmValue, i: usize) -> Option<VmValue> {
     match vm.heap.variant(v)? {
         VariantRef::Heap(_, fields) => fields.get(i).copied(),
@@ -765,7 +789,7 @@ impl DecodeWalk {
     /// Reads the part of shape `s` with dictionary `dict`. Places a scalar,
     /// or opens a frame for a container.
     fn visit(&mut self, vm: &mut Vm, prog: &Program, source: &mut dyn DecodeSource, s: u32, dict: VmValue) -> CodecResult {
-        let shape = &prog.codec_shapes[s as usize];
+        let shape = shape(prog, s)?;
         let value = match &shape.kind {
             ShapeKind::Never => return parse_error(source, "cannot decode a value of type never"),
             ShapeKind::Unit => {
@@ -832,11 +856,11 @@ impl DecodeWalk {
                 let kind = DecodeKind::Slots { names, form: PayloadForm::Named, seen: vec![false; n], next: 0, end };
                 return self.push_frame(dict, s, kind, n);
             }
-            ShapeKind::Enum(def) => {
-                let t = &prog.types[*def as usize];
+            ShapeKind::Enum { def, first } => {
+                let (def, first) = (*def, *first as usize);
+                let t = &prog.types[def as usize];
                 let name = source.begin_variant(&t.desc().type_name)?;
-                let first = prog.variants.iter().position(|v| v.def == *def).unwrap_or(0);
-                let found = prog.variants[first..].iter().take_while(|v| v.def == *def).position(|v| v.name == *name);
+                let found = prog.variants[first..].iter().take_while(|v| v.def == def).position(|v| v.name == *name);
                 let Some(i) = found else {
                     let name = crate::stdlib::truncate(&name, 64).to_string();
                     return parse_error(source, format!("unknown variant `{name}` of {}", t.name));
@@ -869,12 +893,12 @@ impl DecodeWalk {
     /// Continues the innermost frame: requests its next part, fills a
     /// missing slot, or ends the frame. Returns a callback for a computed
     /// default or for `init`.
-    fn advance(&mut self, vm: &mut Vm, prog: &Program, source: &mut dyn DecodeSource) -> CodecResult<Option<Callback>> {
+    fn advance(&mut self, vm: &mut Vm, prog: &Program, source: &mut dyn DecodeSource) -> CodecResult<Option<Step>> {
         let frame = self.frames.last_mut().expect("an open frame");
         let (at, s) = (frame.at, frame.shape);
         let dict = self.walk.values[at];
         let children = self.walk.values.len() - at - 1;
-        let shape = &prog.codec_shapes[s as usize];
+        let shape = shape(prog, s)?;
         if !frame.ended {
             let part = match &mut frame.kind {
                 DecodeKind::Seq => source.next()?.then_some(0),
@@ -956,7 +980,7 @@ impl DecodeWalk {
                         args.extend_from_slice(&self.walk.values[at + 1..at + 1 + missing]);
                     }
                     (seen[missing], *next) = (true, missing);
-                    return Ok(Some(Callback { callee: vm.consts[f as usize], args, purpose: Purpose::Fill }));
+                    return Ok(Some(Step::Call(Callback { callee: vm.consts[f as usize], args, purpose: Purpose::Fill })));
                 }
             };
             let frame = self.frames.last_mut().expect("an open frame");
@@ -968,29 +992,22 @@ impl DecodeWalk {
         }
         let children = &self.walk.values[at + 1..];
         let value = match &self.frames.last().expect("an open frame").kind {
-            DecodeKind::Seq if matches!(shape.kind, ShapeKind::Set) => {
-                vm.check_memory(NODE_BYTES + children.len() * NODE_BYTES)?;
-                let children = children.to_vec();
-                let set = vm.heap.alloc(Obj::Set(Box::<SetObj>::default()));
-                for x in children {
-                    vm.set_add(set, x)?;
-                }
-                set
-            }
+            // The frame and the source stay as they are until the set or the
+            // map is built, so a build that reaches the memory limit can run
+            // again after a collection.
+            DecodeKind::Seq if matches!(shape.kind, ShapeKind::Set) => match build_set(vm, children) {
+                Ok(set) => set,
+                Err(e) => return self.walk.checked(Err(e)).transpose(),
+            },
             DecodeKind::Seq => vm.heap.new_list(children.to_vec()),
             DecodeKind::Tuple if children.len() != shape.parts.len() => {
                 return parse_error(source, format!("expected {} elements, found {}", shape.parts.len(), children.len()));
             }
             DecodeKind::Tuple => vm.heap.new_tuple(children),
-            DecodeKind::Map => {
-                vm.check_memory(NODE_BYTES + children.len() * NODE_BYTES)?;
-                let children = children.to_vec();
-                let map = vm.heap.alloc(Obj::Map(Box::<MapObj>::default()));
-                for &[k, v] in children.as_chunks::<2>().0 {
-                    vm.map_insert(map, k, v)?;
-                }
-                map
-            }
+            DecodeKind::Map => match build_map(vm, children) {
+                Ok(map) => map,
+                Err(e) => return self.walk.checked(Err(e)).transpose(),
+            },
             DecodeKind::Some => vm.some(children[0]),
             DecodeKind::Slots { end: SlotsEnd::Struct(def), .. } => vm.heap.alloc(Obj::Struct(*def, children.into())),
             DecodeKind::Slots { end: SlotsEnd::Variant { id, .. }, .. } => vm.heap.new_variant(*id, children),
@@ -999,7 +1016,7 @@ impl DecodeWalk {
                 let mut args = init.dicts.iter().map(|t| eval_template(vm, t, dict)).collect::<Result<Vec<_>, _>>()?;
                 args.extend_from_slice(children);
                 source.end()?;
-                return Ok(Some(Callback { callee: vm.consts[init.func as usize], args, purpose: Purpose::Init }));
+                return Ok(Some(Step::Call(Callback { callee: vm.consts[init.func as usize], args, purpose: Purpose::Init })));
             }
         };
         source.end()?;
@@ -1049,8 +1066,8 @@ impl Walker for DecodeWalk {
             if self.frames.is_empty() {
                 return Ok(Step::Done);
             }
-            if let Some(callback) = self.advance(vm, &prog, &mut state.io)? {
-                return Ok(Step::Call(callback));
+            if let Some(step) = self.advance(vm, &prog, &mut state.io)? {
+                return Ok(step);
             }
         }
     }
@@ -1097,7 +1114,7 @@ impl Walker for DecodeWalk {
 }
 
 fn shape_kind(vm: &Vm, s: u32) -> Result<&ShapeKind, Fail> {
-    Ok(&shape(vm, s)?.kind)
+    Ok(&shape(&vm.prog, s)?.kind)
 }
 
 /// Returns the shape of `dict` if it is the dictionary of a structural
