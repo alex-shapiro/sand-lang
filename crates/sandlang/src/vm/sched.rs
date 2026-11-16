@@ -382,6 +382,11 @@ impl Vm {
                 Fail::internal(format!("a callback has {} parameters, but its caller passes {} arguments", arity.unwrap_or(0), args.len()));
             return Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
         }
+        if self.heap.stress {
+            // A collection may run before the arguments reach the stack, so
+            // GC stress runs one here to test that the caller roots them.
+            self.collect_all_garbage(Some(fiber));
+        }
         let base = fiber.live_top(&self.prog);
         let need = base + 1 + MAX_CALLBACK_ARGS;
         let grow = |vm: &mut Vm, fiber: &mut Fiber| -> Result<(), Fail> {

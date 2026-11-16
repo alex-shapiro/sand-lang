@@ -183,13 +183,17 @@ impl NativeContext {
     }
 
     /// Calls the Sand function `callee` with `args` as [`NativeContext::call`]
-    /// does, and keeps `kept` rooted during the call. Returns the callback's
-    /// return value, which is valid until the next wait. Unlike
-    /// [`NativeContext::call`], it does not add to the root table.
+    /// does, and keeps `kept`, `callee`, and `args` rooted during the call.
+    /// Returns the callback's return value, which is valid until the next
+    /// wait. Unlike [`NativeContext::call`], it does not add to the root
+    /// table.
     pub(crate) async fn call_keeping(&mut self, callee: VmValue, args: &[VmValue], kept: [&mut Vec<VmValue>; 2]) -> VmValue {
         assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
         let roots = self.state.lock().roots.len();
-        self.wait_keeping(VmRequest::Call { callee, args: args.to_vec() }, kept).await;
+        let mut call = Vec::with_capacity(args.len() + 1);
+        call.push(callee);
+        call.extend_from_slice(args);
+        self.wait_keeping(VmRequest::Call { callee, args: args.to_vec() }, kept, call).await;
         let mut state = self.state.lock();
         let rooted = state.callback_result.take().expect("the scheduler stores the callback result before polling again");
         let result = state.roots[rooted.0 as usize];
@@ -199,13 +203,14 @@ impl NativeContext {
 
     /// Collects garbage and keeps `kept` rooted during the collection.
     pub(crate) async fn collect_keeping(&mut self, kept: [&mut Vec<VmValue>; 2]) {
-        self.wait_keeping(VmRequest::Collect, kept).await;
+        self.wait_keeping(VmRequest::Collect, kept, Vec::new()).await;
     }
 
-    /// Submits `request` and keeps `kept` rooted until the scheduler answers.
-    async fn wait_keeping(&mut self, request: VmRequest, kept: [&mut Vec<VmValue>; 2]) {
+    /// Submits `request` and keeps `kept` and `values` rooted until the
+    /// scheduler answers.
+    async fn wait_keeping(&mut self, request: VmRequest, kept: [&mut Vec<VmValue>; 2], values: Vec<VmValue>) {
         let [a, b] = kept;
-        self.state.lock().kept = vec![std::mem::take(a), std::mem::take(b)];
+        self.state.lock().kept = vec![std::mem::take(a), std::mem::take(b), values];
         self.wait_for_request(request).await;
         let mut lists = std::mem::take(&mut self.state.lock().kept).into_iter();
         (*a, *b) = (lists.next().unwrap_or_default(), lists.next().unwrap_or_default());
