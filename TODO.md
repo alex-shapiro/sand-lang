@@ -406,6 +406,12 @@ Visible defects that rarely block users.
 
 ### Embedding
 
+- [ ] ⚪ Derive `ToValue` only for native types whose codec is derived. For a
+      type with a manual codec, `x.to_value()` gives a different `Value` than
+      `NativeContext::to_value`, so `from_value` of the first form fails.
+- [ ] ⚪ Run the last step of `json.to_json` (the parse of complete text) under
+      collect and retry. After a callback, a memory failure there stops the
+      run, although the step can run again.
 - [ ] ⚪ Use one map key rule for JSON encode and decode. `JsonSink` denies
       `bytes` and `Option` keys, but `JsonSource` accepts them, so
       `[int?: int]` decodes `{"1": 1}` and cannot encode it.
@@ -482,6 +488,9 @@ Visible defects that rarely block users.
 
 ### Diagnostics
 
+- [ ] ⚪ Give a separate misuse message for an outer `Encoder` or `Decoder`
+      whose call is still in progress, and say that a `Decode` bound replaces
+      `reflect` when the parser meets `<reflect T>`.
 - [ ] ⚪ Give the errors of an encode the path of the part, as decode errors
       have. A NaN float, a map key without a text form, and the error of a
       custom `encode` method show no location.
@@ -492,6 +501,11 @@ Visible defects that rarely block users.
 
 ### Performance
 
+- [ ] ⚪ Share the codec walkers' loop structure: both `run` loops repeat the
+      memory check, the fuel charge, the method dispatch, and the handle
+      setup. Also compute the payload base of each variant at compile time,
+      split `DecodeWalk::advance` into its three jobs, and match on `&Fill`
+      instead of cloning it for each missing field.
 - [ ] ❓ Find why plain recursion keeps garbage alive. A function that builds
       a 5,000-string list, returns only its length, and then recurses keeps
       about 0.3 MB for each level: 80 levels need 32M, and 250 levels need
