@@ -527,7 +527,10 @@ impl ValueSink {
     }
 
     fn push(&mut self, value: Value) -> CodecResult {
-        self.grow(VALUE_BYTES)?;
+        // An open container counted the slot of `value` when it opened.
+        if self.open.is_empty() {
+            self.grow(VALUE_BYTES)?;
+        }
         self.place(value);
         Ok(())
     }

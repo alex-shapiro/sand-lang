@@ -1053,9 +1053,10 @@ enum LevelKind {
 /// Reads JSON text for the decode walker.
 pub(crate) struct JsonSource {
     text: Box<str>,
-    /// The memory of `text` and of decoded `bytes`, which the memory limit
-    /// counts.
-    reservation: Reservation,
+    /// The memory of `text`, which the memory limit counts.
+    _reservation: Reservation,
+    /// The memory of `scratch` and of the decoded `bytes`, at their largest.
+    scratch_reservation: Reservation,
     pos: usize,
     /// The position at the last call of [`DecodeSource::work`].
     charged: usize,
@@ -1096,7 +1097,8 @@ impl JsonSource {
     fn owned(text: Box<str>, reservation: Reservation) -> JsonSource {
         JsonSource {
             text,
-            reservation,
+            scratch_reservation: reservation.sibling(),
+            _reservation: reservation,
             pos: 0,
             charged: 0,
             levels: Vec::new(),
@@ -1250,6 +1252,9 @@ impl JsonSource {
                     if escaped && keep {
                         let run = &self.text[start..self.pos];
                         self.scratch.push_str(run);
+                        if self.scratch_reservation.ensure(self.scratch.capacity()).is_err() {
+                            return crate::native::codec::memory_limit();
+                        }
                     }
                     self.pos += 1;
                     return Ok(if escaped { Scanned::Scratch } else { Scanned::Span(first, self.pos - 1) });
@@ -1512,15 +1517,19 @@ impl DecodeSource for JsonSource {
     }
 
     fn bytes(&mut self) -> CodecResult<Cow<'_, [u8]>> {
-        let mut extra = self.reservation.sibling();
+        let mut largest = self.scratch_reservation.sibling();
         let decoded = {
             let text = self.text_value("base64 str")?;
-            if extra.grow(text.len() / 4 * 3 + 3).is_err() {
+            if largest.ensure(text.len() / 4 * 3 + 3).is_err() {
                 return crate::native::codec::memory_limit();
             }
             base64::decode(&text, false)
         };
-        self.reservation.absorb(extra);
+        let need = self.scratch.capacity() + largest.bytes();
+        drop(largest);
+        if self.scratch_reservation.ensure(need).is_err() {
+            return crate::native::codec::memory_limit();
+        }
         decoded.map(Cow::Owned).map_err(|_| self.fail("invalid base64"))
     }
 
