@@ -307,9 +307,9 @@ Structs are reference types; variable assignment shares a struct value without c
 
 Struct fields are separated by newlines or commas. A field is immutable unless
 declared `var`. If a field defines a default and the type construction omits
-that field, it is is evaluated with its default expression. A field default can
-use traits without methods from the struct's type parameter bounds (`s: Set<T> = Set([])`
-with `T: Hash`), but cannot use traits that declare methods (§4.9).
+that field, it is evaluated with its default expression. A field default can
+use the traits that the struct requires of its type parameters, such as
+`n: T = T.zero()` with `T: Num`.
 
 Fields and methods are private unless marked `pub` (§3.3).
 
@@ -628,9 +628,10 @@ enum to store values of different concrete types in a single collection.
 `break`, `continue`, `fail(...)`) may appear where any type is expected.
 Inside other types it is ordinary: `[never]` and `fn() -> never` are distinct
 types, so `let xs: [never] = [1]` and passing `() => 5` where a
-`fn() -> never` is expected are type errors. `never` implements only traits that
-do not declare methods (§4.9), such as `Eq` and `Hash`, because a trait method
-such as `T.zero()` can be called without a value of type `T`.
+`fn() -> never` is expected are type errors. `never` implements the traits that
+do not declare methods (§4.9), such as `Eq` and `Hash`, and `Encode` and
+`Decode` (§5.7). It implements no other trait with methods, because a trait
+method such as `T.zero()` can be called without a value of type `T`.
 
 ### 5.2 Composite types
 
@@ -2383,7 +2384,8 @@ native function passes an `Encode` or `Decode` dictionary to
 
 If a `native fn` declaration requires `Encode` of its `N`-th type parameter,
 the Rust function can accept an `Encoded<N>` argument in place of the value.
-The engine encodes the value as a `Value` before the call.
+The engine encodes the value as a `Value` before the call. If the encode
+fails, for example in a custom `encode` method, the run stops with its error.
 
 The engine automatically generates Sand declarations for registered types and
 functions that are not declared in `NativeModule::source`. Registered types use

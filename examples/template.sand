@@ -289,7 +289,10 @@ fn display(v: Json) -> str {
         Int(i) => i.to_str()
         Float(f) => if f == f.round() and f.abs() < 1e15 { f.to_int().to_str() } else { f.to_str() }
         Str(s) => s
-        other => json.encode(other).unwrap_or("")
+        other => match json.encode(other) {
+            Ok(text) => text
+            Err(e) => "<\(e.message)>"
+        }
     }
 }
 

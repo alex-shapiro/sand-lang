@@ -261,20 +261,6 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
 - [ ] 🔴 [070](triage/070-generic-plus/summary.md) _Language._ Replace the hardcoded `+` operand check in `crates/sandlang/src/check/unify.rs`
       with a prelude `Add` trait so that generic functions can concatenate
       `str`, `bytes`, and lists in addition to adding numbers.
-- [ ] 🔴 [063](triage/063-decode-with-init/summary.md) _Language._ Support `Decode` for structs that declare `init` by calling `init` with
-      the JSON object members as named arguments:
-
-      - Propagate `Err` results from deferred `Decoded::Pending` thunks in
-        `crates/sandlang/src/stdlib/json.rs` so that a fallible `init` fails `json.decode`.
-      - Pass trait dictionaries to `Decoded::Pending` thunks so that a generic
-        `init` can call trait methods on its type parameters.
-      - Execute `init` before inserting decoded structs into a `Set`, as
-        `json.decode` does for computed field defaults.
-      - Verify that `init` is visible at the `json.decode` call site.
-
-- [ ] 🔴 [068](triage/068-generic-field-defaults/summary.md) _Language._ Allow struct field defaults to call methods from traits required by the
-      struct type parameters by passing trait dictionaries to default-value
-      helpers and `json.decode` field initializers.
 - [ ] 🔴 [062](triage/062-error-kind-enum/summary.md) _Language._ Evaluate replacing string error kinds with an enum.
 - [ ] 🔴 [072](triage/072-explicit-type-args/summary.md) _Diagnostics._ Accept explicit type arguments in calls, or make the parser error suggest
       `let config: Config = json.decode(text)` instead of `comparison operators cannot be chained`.
@@ -493,6 +479,12 @@ Visible defects that rarely block users.
 
 ### Diagnostics
 
+- [ ] ⚪ Give the errors of an encode the path of the part, as decode errors
+      have. A NaN float, a map key without a text form, and the error of a
+      custom `encode` method show no location.
+- [ ] ⚪ Show every bound of a prelude impl in `help`. `help(Decode)` shows
+      `Set<T> where T: Decode` without `Hash`, because the help printer drops
+      bounds that have no dictionary.
 - [ ] ⚪ Deduplicate missing trait diagnostics within a single expression.
 
 ### Performance
@@ -509,13 +501,6 @@ Visible defects that rarely block users.
       dispatch; if not, keep only `Arc`.
 - [ ] ⚪ Profile `HostFn` dispatch and argument slice construction on `fannkuch` and
       `results` in `bench/programs` to reduce typed native call overhead.
-- [ ] ⚪ Reduce `json.decode` dispatch overhead in the Sand wrapper around
-      `decode_raw`.
-- [ ] ⚪ Close the gap between the codec walkers and the value-driven JSON code
-      that they replaced. On `crates/sandlang/benches/codec.rs`, `encode` takes
-      794 ns per item (469 ns before) and `to_json` takes 2490 ns (756 ns
-      before). Each value costs a dictionary read, a shape lookup, and a `dyn`
-      sink call.
 - [ ] ❓ Align the VM dispatch loop or build benchmarks with
       `-C llvm-args=-align-loops=64` so that unrelated code changes do not
       shift loop alignment. On Apple silicon, code placement changes alter
