@@ -281,3 +281,58 @@ print(json.encode(chain(513)))
 --- stdout
 499
 Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))
+
+=== a custom encode method fails if a task that it spawns has not finished its write
+import json
+struct Slow { n: int }
+impl Encode for Slow {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        task.sleep(10ms)
+        encoder.encode(self.n)
+    }
+}
+struct Wrap { a: int, inner: Slow }
+struct Outer { a: int }
+impl Encode for Outer {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        let e = encoder
+        let t = spawn e.encode(Wrap(a: self.a, inner: Slow(n: 9)))
+        task.yield_now()
+        Ok(())
+    }
+}
+let r = json.encode([Outer(a: 1), Outer(a: 2)])
+print(r)
+task.sleep(50ms)
+print("after")
+--- stdout
+Err(Error(message: "an `encode` method returned before its write ended", kind: "invalid"))
+after
+
+=== a custom decode method fails if a task that it spawns has not finished its read
+import json
+struct Slow { n: int }
+impl Decode for Slow {
+    fn decode(decoder: Decoder) -> Result<Slow> {
+        task.sleep(10ms)
+        Ok(Slow(n: decoder.decode()?))
+    }
+}
+struct Wrap { a: int, inner: Slow }
+struct Outer { a: int }
+impl Decode for Outer {
+    fn decode(decoder: Decoder) -> Result<Outer> {
+        let d = decoder
+        let t = spawn { let w: Result<Wrap> = d.decode(); print("spawned: {w}") }
+        task.yield_now()
+        Ok(Outer(a: 7))
+    }
+}
+let r: Result<[Outer]> = json.decode("[{\"a\": 1, \"inner\": 5}, {\"a\": 2, \"inner\": 6}]")
+print(r)
+task.sleep(50ms)
+print("after")
+--- stdout
+Err(Error(message: "a `decode` method returned before its read ended", kind: "invalid"))
+spawned: {w}
+after

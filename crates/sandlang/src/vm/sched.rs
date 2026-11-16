@@ -546,6 +546,10 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
             Some(VmRequest::Collect) => {
                 collected = true;
                 vm.collect_all_garbage(Some(fiber));
+                // A native that asks for collections in a loop still stops at the time limits.
+                if let Err(fail) = vm.meter.check() {
+                    return Err(vm.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
+                }
             }
             Some(VmRequest::Prompt(capability)) => return Ok(Some(FiberStop::Prompt(capability))),
         }

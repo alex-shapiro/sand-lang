@@ -264,6 +264,9 @@ pub(crate) struct Turn {
     /// Whether the active handle has taken its value.
     used: bool,
     next_token: u64,
+    /// The nested writes or reads that have begun and not ended. A task that
+    /// the custom method spawns can keep one going after the method returns.
+    open: u32,
     /// The error of a failed nested write or read, which fails the walk.
     failed: Option<(String, String)>,
 }
@@ -273,6 +276,7 @@ pub(crate) struct Turn {
 struct SavedTurn {
     active: u64,
     used: bool,
+    open: u32,
 }
 
 impl Turn {
@@ -281,7 +285,7 @@ impl Turn {
     fn begin(&mut self) -> (u64, SavedTurn) {
         let token = self.next_token;
         self.next_token += 1;
-        let saved = SavedTurn { active: self.active, used: self.used };
+        let saved = SavedTurn { active: self.active, used: self.used, open: self.open };
         (self.active, self.used) = (token, false);
         (token, saved)
     }
@@ -297,19 +301,25 @@ impl Turn {
             return Err(self.misuse(second));
         }
         self.used = true;
+        self.open += 1;
         Ok(())
     }
 
     /// Ends the turn of `token` and resumes `saved`. Returns `true` if the
     /// handle took no value. Fails with the error of a failed nested write
-    /// or read.
-    fn end(&mut self, token: u64, saved: SavedTurn) -> CodecResult<bool> {
+    /// or read, or with `unfinished` if the custom method returned before
+    /// its nested write or read ended.
+    fn end(&mut self, token: u64, saved: SavedTurn, unfinished: &str) -> CodecResult<bool> {
         let unused = self.active == token && !self.used;
+        let open = self.open > saved.open;
         (self.active, self.used) = (saved.active, saved.used);
-        match self.failed.take() {
-            Some((kind, message)) => Err(HostError::new(kind, message)),
-            None => Ok(unused),
+        if let Some((kind, message)) = self.failed.take() {
+            return Err(HostError::new(kind, message));
         }
+        if open {
+            return Err(HostError::new("invalid", unfinished));
+        }
+        Ok(unused)
     }
 
     /// Records the error of a nested write or read, so that the walk fails
@@ -336,7 +346,7 @@ pub(crate) struct Shared<IO: ?Sized> {
 
 impl<IO> Shared<IO> {
     pub(crate) fn new(io: IO) -> Arc<Mutex<Shared<IO>>> {
-        let turn = Turn { active: 0, used: false, next_token: 1, failed: None };
+        let turn = Turn { active: 0, used: false, next_token: 1, open: 0, failed: None };
         Arc::new(Mutex::new(Shared { turn, io }))
     }
 }
@@ -593,7 +603,7 @@ impl Walker for EncodeWalk {
     /// Checks the result of the callback of a custom method.
     fn apply(&mut self, vm: &mut Vm, shared: &EncodeCell, _: Purpose, result: VmValue) -> CodecResult {
         let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("encode: no callback").into()) };
-        let unused = shared.lock().turn.end(token, saved)?;
+        let unused = shared.lock().turn.end(token, saved, "an `encode` method returned before its write ended")?;
         if let Some(e) = err_payload(vm, result) {
             return Err(sand_error(vm, e)?);
         }
@@ -1058,7 +1068,7 @@ impl Walker for DecodeWalk {
             Purpose::Method => {
                 let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("decode: no callback").into()) };
                 let mut state = shared.lock();
-                let unread = state.turn.end(token, saved)?;
+                let unread = state.turn.end(token, saved, "a `decode` method returned before its read ended")?;
                 if let Some(e) = err_payload(vm, result) {
                     return Err(at_path(sand_error(vm, e)?, &state.io));
                 }
@@ -1346,9 +1356,12 @@ fn nested<W: Walker, T: IntoVmValue + 'static>(
     shared.lock().turn.claim(token, inactive, second)?;
     Ok(Later::new(WaitKind::Io, |mut cx| async move {
         let r = run_async(&mut cx, &shared, walk).await;
+        let mut state = shared.lock();
+        state.turn.open -= 1;
         if let Err(e) = &r {
-            shared.lock().turn.record(e);
+            state.turn.record(e);
         }
+        drop(state);
         r.map(output)
     }))
 }
