@@ -607,6 +607,9 @@ pub struct Vm {
     caller_site: (u32, u32),
     /// Extra GC roots (e.g. values held by the test runner).
     pub pinned: Vec<VmValue>,
+    /// State of native modules, keyed by a Rust type that each module owns. See
+    /// [`Vm::native_state`].
+    native_state: value::FxHashMap<std::any::TypeId, Box<dyn std::any::Any + Send>>,
     /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
     spare_ctl: Option<Box<CtlKind>>,
     /// The map handle and slot of the last lookup of a key other than an
@@ -712,6 +715,7 @@ impl Vm {
             collected: false,
             caller_site: (0, 0),
             pinned: Vec::new(),
+            native_state: value::FxHashMap::default(),
             spare_ctl: None,
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
             ascii_strs: Vec::new(),
@@ -1038,6 +1042,16 @@ impl Vm {
     #[inline]
     pub fn charge(&self, units: u64) -> Result<(), Fail> {
         self.meter.charge(units)
+    }
+
+    /// Returns the state that a native module keeps in this VM as a value of
+    /// Rust type `T`.
+    ///
+    /// Creates the state with `T::default()` on first use. A module that keeps
+    /// `T` private has state that no other module can read.
+    pub fn native_state<T: std::any::Any + Default + Send>(&mut self) -> &mut T {
+        let state = self.native_state.entry(std::any::TypeId::of::<T>()).or_insert_with(|| Box::new(T::default()));
+        state.downcast_mut().expect("each key is the type of its value")
     }
 
     /// Runs `callee` with `args` if `callee` is a native function. Returns

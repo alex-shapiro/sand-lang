@@ -389,3 +389,16 @@ print(json.encode([InputKind.Int, InputKind.Map])?)
 {"a":1,"b":"x"}
 Pair(a: 1, b: "x")
 ["Int","Map"]
+
+=== a unit variant inside Some closes every enclosing container
+import json
+enum Mode { Read, Write }
+struct S { pair: (int, Mode?), nested: Mode??, list: [Mode?] }
+let s = S(pair: (0, Some(Mode.Read)), nested: Some(Some(Mode.Write)), list: [Some(Mode.Read), None])
+let text = json.encode(s)?
+print(text)
+let back: S = json.decode(text)?
+print(back == s)
+--- stdout
+{"pair":[0,"Read"],"nested":"Write","list":["Read",null]}
+true

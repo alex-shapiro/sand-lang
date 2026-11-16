@@ -14,6 +14,8 @@
 //! Only an initial synchronous pass before any suspension can return a
 //! retryable limit error to the VM.
 
+mod plan;
+
 use crate::engine::LimitKind;
 use crate::native::codec::{CodecResult, DecodeSource, EncodeSink, InputKind, PayloadForm};
 use crate::native::context::NativeContext;
@@ -1426,6 +1428,11 @@ where
     E: WalkError,
     Result<T, E::FutureError>: NativeReturn<Fail>,
 {
+    if let Some(plan) = plan::plan_of(vm, dict).map_err(|err| E::from_walk(err.into()))? {
+        let prog = vm.prog.clone();
+        plan::PlanWalk::new(&plan, &prog).encode_root(vm, &mut shared.lock().io, value).map_err(E::from_walk)?;
+        return Ok(Later::ready(finish(vm, &mut shared.lock().io).map_err(E::from_future_walk)));
+    }
     let erased_io: SharedEncode = shared.clone();
     drive_walk(vm, shared, erased_io, EncodeWalker::new(value, dict), |vm, (), sink| finish(vm, sink))
 }
@@ -1444,6 +1451,14 @@ where
     E: WalkError,
     Result<T, E::FutureError>: NativeReturn<Fail>,
 {
+    if let Some(plan) = plan::plan_of(vm, dict).map_err(|err| E::from_walk(err.into()))? {
+        let prog = vm.prog.clone();
+        let mut shared_guard = shared.lock();
+        let source = &mut shared_guard.io;
+        let value = plan::PlanWalk::new(&plan, &prog).decode_root(vm, source).map_err(E::from_walk)?;
+        vm.charge((source.take_consumed_bytes() / SLOW_BYTES_PER_UNIT) as u64).map_err(|err| E::from_walk(err.into()))?;
+        return Ok(Later::ready(finish(vm, value, source).map_err(E::from_future_walk)));
+    }
     let erased_io: SharedDecode = shared.clone();
     drive_walk(vm, shared, erased_io, DecodeWalker::new(dict), finish)
 }

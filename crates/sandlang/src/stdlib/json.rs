@@ -902,6 +902,10 @@ struct JsonTextWriter {
 /// Maximum byte length of any encoded non-string JSON scalar.
 const MAX_SCALAR_BYTES: usize = 32;
 
+/// Smallest capacity of the output text. A smaller first buffer reallocates
+/// several times for a small value.
+const MIN_TEXT_CAPACITY: usize = 128;
+
 impl JsonTextWriter {
     fn new(indent: usize, memory: &Arc<IoMemory>) -> JsonTextWriter {
         JsonTextWriter { out: String::new(), reservation: Reservation::new(memory), indent, open_containers: Vec::new(), after_key: false }
@@ -932,7 +936,7 @@ impl JsonTextWriter {
     fn grow(&mut self, need: usize) -> CodecResult {
         let capacity = self.out.capacity();
         for target in [capacity.saturating_mul(2), capacity + capacity / 2, capacity + capacity / 4, capacity + capacity / 8] {
-            let target = target.max(need);
+            let target = target.max(need).max(MIN_TEXT_CAPACITY);
             if self.reservation.ensure(target.saturating_add(capacity)).is_ok() {
                 self.out.reserve_exact(target - self.out.len());
                 return Ok(());
