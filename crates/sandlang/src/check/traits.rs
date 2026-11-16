@@ -899,7 +899,7 @@ impl Checker {
         }
         let name = self.fns[f as usize].runtime_name(&self.types, &self.syms);
         let body = mk(self.call_kind(f, inst.fresh, args), inst.ret, span);
-        let lam = HLambda { id, name, params, body, self_local: None };
+        let lam = HLambda { id, name, params, dicts: vec![], body, self_local: None };
         let fty = self.fn_ty(&inst.params, inst.ret);
         mk(HKind::Lambda(Box::new(lam)), fty, span)
     }

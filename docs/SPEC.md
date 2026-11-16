@@ -279,7 +279,7 @@ with kind `"limit"`.
 
 A function may be declared inside a block; such a function may capture enclosing variables and
 and may call itself recursively. Local functions declared consecutively in the same block
-may call each other. Their type parameters can only require traits that do not declare methods.
+may call each other.
 
 ### 4.2 Structs
 

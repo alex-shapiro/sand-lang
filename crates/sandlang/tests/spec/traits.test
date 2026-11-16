@@ -1115,7 +1115,6 @@ fn outer() {
 3: `where` clauses in trait methods may only constrain the method's own type parameters
 8: default values are declared by the trait, not the impl
 9: impl methods cannot require traits of the impl's type parameters
-12: local functions cannot require traits with methods
 
 === pub is not allowed on trait and impl methods
 trait Describe {
@@ -1455,7 +1454,7 @@ fn main() {
 --- error
 20: float does not implement `Hash` (required for [float] to implement `Marker`)
 
-=== a local function that requires a trait with methods is reported once
+=== a local function checks the traits that it requires at each call
 trait Describe {
     fn describe(self) -> str
 }
@@ -1469,9 +1468,41 @@ fn outer() {
     print(show("s"))
 }
 --- error
-8: local functions cannot require traits with methods
-9: local functions cannot require traits with methods
 11: str does not implement `Describe`
+
+=== a local function takes the dictionaries of the traits that it requires
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "int \(self)" }
+}
+impl Describe for str {
+    fn describe(self) -> str { "str \(self)" }
+}
+fn outer<T: Describe>(t: T) {
+    fn show<U: Describe>(x: U, n: int) -> str {
+        if n == 0 { x.describe() } else { show(x, n - 1) + "!" }
+    }
+    fn both<A: Describe, B: Describe>(a: A, b: B) -> str { show(a, 1) + " " + show(b, 0) }
+    fn with_outer<U: Describe>(u: U) -> str { u.describe() + ", " + t.describe() }
+    fn twice<N: Num>(x: N) -> N { x + x }
+    print(show(3, 2))
+    print(both("a", 4))
+    let f = show
+    print(f(5, 0))
+    print([1, 2].map(x => show(x, 0)))
+    print(with_outer(1))
+    print(twice(2.5))
+}
+outer("t")
+--- stdout
+int 3!!
+str a! int 4
+int 5
+["int 1", "int 2"]
+int 1, str t
+5.0
 
 === the traits of a type's parameters may take types declared later
 trait Into<T> {
