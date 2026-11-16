@@ -653,28 +653,6 @@ fn field(vm: &Vm, container: VmValue, i: usize) -> Result<Option<VmValue>, Fail>
     })
 }
 
-/// Builds a set of `elements`.
-fn build_set(vm: &mut Vm, elements: &[VmValue]) -> Result<VmValue, Fail> {
-    vm.check_memory(NODE_BYTES + elements.len() * NODE_BYTES)?;
-    let elements = elements.to_vec();
-    let set = vm.heap.alloc(Obj::Set(Box::<SetObj>::default()));
-    for x in elements {
-        vm.set_add(set, x)?;
-    }
-    Ok(set)
-}
-
-/// Builds a map of `children`, which alternate between keys and values.
-fn build_map(vm: &mut Vm, children: &[VmValue]) -> Result<VmValue, Fail> {
-    vm.check_memory(NODE_BYTES + children.len() * NODE_BYTES)?;
-    let children = children.to_vec();
-    let map = vm.heap.alloc(Obj::Map(Box::<MapObj>::default()));
-    for &[k, v] in children.as_chunks::<2>().0 {
-        vm.map_insert(map, k, v)?;
-    }
-    Ok(map)
-}
-
 fn payload(vm: &Vm, v: VmValue, i: usize) -> Option<VmValue> {
     match vm.heap.variant(v)? {
         VariantRef::Heap(_, fields) => fields.get(i).copied(),
@@ -694,11 +672,15 @@ struct DecodeFrame {
 }
 
 enum DecodeKind {
-    /// A list or a set.
+    /// A list or a set, which the walker builds in the heap: each element
+    /// goes into the container in slot 1 as the walker reads it.
     Seq,
     Tuple,
-    /// A map, whose children alternate between keys and values.
-    Map,
+    /// A map, which the walker builds in the heap: the map is in slot 1, and
+    /// a key waits in slot 2 for its value if `key` is set.
+    Map {
+        key: bool,
+    },
     Some,
     /// The fields of a struct, the parameters of `init`, or the payload of
     /// a variant, in slots. `seen` marks the slots that hold values. `next`
@@ -771,11 +753,40 @@ impl DecodeWalk {
 
     /// Places decoded value `v` in the slot of the innermost frame that it
     /// fills, or after the children of that frame.
-    fn place(&mut self, v: VmValue) {
-        match self.frames.last() {
-            Some(DecodeFrame { at, kind: DecodeKind::Slots { next, .. }, .. }) => self.walk.values[at + 1 + next] = v,
-            _ => self.walk.values.push(v),
+    fn place(&mut self, vm: &mut Vm, v: VmValue) -> CodecResult {
+        let Some(frame) = self.frames.last_mut() else {
+            self.walk.values.push(v);
+            return Ok(());
+        };
+        let at = frame.at;
+        match &mut frame.kind {
+            DecodeKind::Slots { next, .. } => self.walk.values[at + 1 + *next] = v,
+            DecodeKind::Seq => {
+                let container = self.walk.values[at + 1];
+                match vm.heap.get(container) {
+                    Obj::List(_) => vm.heap.list_push(container, v).map_err(Fail::limit)?,
+                    _ => _ = vm.set_add(container, v)?,
+                }
+            }
+            DecodeKind::Map { key: key @ false } => {
+                *key = true;
+                self.walk.values[at + 2] = v;
+            }
+            DecodeKind::Map { key } => {
+                *key = false;
+                let k = self.walk.values[at + 2];
+                vm.map_insert(self.walk.values[at + 1], k, v)?;
+            }
+            DecodeKind::Tuple | DecodeKind::Some => self.walk.values.push(v),
         }
+        Ok(())
+    }
+
+    /// Sets slot `i` of the innermost frame.
+    fn set_slot(&mut self, i: usize, v: VmValue) -> CodecResult {
+        let at = self.frames.last().expect("an open frame").at;
+        self.walk.values[at + i] = v;
+        Ok(())
     }
 
     fn push_frame(&mut self, dict: VmValue, shape: u32, kind: DecodeKind, slots: usize) -> CodecResult {
@@ -836,7 +847,12 @@ impl DecodeWalk {
             ShapeKind::ManualDecode(f) => f(vm, source)?,
             ShapeKind::List | ShapeKind::Set => {
                 source.begin_list()?;
-                return self.push_frame(dict, s, DecodeKind::Seq, 0);
+                let container = match shape.kind {
+                    ShapeKind::Set => vm.heap.alloc(Obj::Set(Box::<SetObj>::default())),
+                    _ => vm.heap.new_list(Vec::new()),
+                };
+                self.push_frame(dict, s, DecodeKind::Seq, 1)?;
+                return self.set_slot(1, container);
             }
             ShapeKind::Tuple => {
                 source.begin_tuple(shape.parts.len())?;
@@ -844,7 +860,9 @@ impl DecodeWalk {
             }
             ShapeKind::Map => {
                 source.begin_map()?;
-                return self.push_frame(dict, s, DecodeKind::Map, 0);
+                let map = vm.heap.alloc(Obj::Map(Box::<MapObj>::default()));
+                self.push_frame(dict, s, DecodeKind::Map { key: false }, 2)?;
+                return self.set_slot(1, map);
             }
             ShapeKind::Option => match source.option()? {
                 false => VmValue::Tag(prog.ids.none),
@@ -883,7 +901,7 @@ impl DecodeWalk {
                 source.begin_payload(form)?;
                 if form == PayloadForm::Unit {
                     source.end()?;
-                    self.place(VmValue::Tag(id));
+                    self.place(vm, VmValue::Tag(id))?;
                     return Ok(());
                 }
                 let slots = Slots::Variant { id, base, named: form == PayloadForm::Named };
@@ -892,8 +910,7 @@ impl DecodeWalk {
             }
             ShapeKind::ManualEncode(_) => return Err(Fail::internal("decode: an encode shape").into()),
         };
-        self.place(value);
-        Ok(())
+        self.place(vm, value)
     }
 
     /// Continues the innermost frame: requests its next part, fills a
@@ -909,8 +926,8 @@ impl DecodeWalk {
             let part = match &mut frame.kind {
                 DecodeKind::Seq => source.next()?.then_some(0),
                 DecodeKind::Tuple => (children < shape.parts.len() && source.next()?).then_some(children as u32),
-                DecodeKind::Map if children % 2 == 1 => Some(1),
-                DecodeKind::Map => source.next()?.then_some(0),
+                DecodeKind::Map { key: true } => Some(1),
+                DecodeKind::Map { key: false } => source.next()?.then_some(0),
                 DecodeKind::Some => (children == 0).then_some(0),
                 DecodeKind::Slots { slots, seen, next } => {
                     let base = slots.base();
@@ -987,22 +1004,11 @@ impl DecodeWalk {
         }
         let children = &self.walk.values[at + 1..];
         let value = match &self.frames.last().expect("an open frame").kind {
-            // The frame and the source stay as they are until the set or the
-            // map is built, so a build that reaches the memory limit can run
-            // again after a collection.
-            DecodeKind::Seq if matches!(shape.kind, ShapeKind::Set) => match build_set(vm, children) {
-                Ok(set) => set,
-                Err(e) => return self.walk.checked(Err(e)).transpose(),
-            },
-            DecodeKind::Seq => vm.heap.new_list(children.to_vec()),
+            DecodeKind::Seq | DecodeKind::Map { .. } => children[0],
             DecodeKind::Tuple if children.len() != shape.parts.len() => {
                 return parse_error(source, format!("expected {} elements, found {}", shape.parts.len(), children.len()));
             }
             DecodeKind::Tuple => vm.heap.new_tuple(children),
-            DecodeKind::Map => match build_map(vm, children) {
-                Ok(map) => map,
-                Err(e) => return self.walk.checked(Err(e)).transpose(),
-            },
             DecodeKind::Some => vm.some(children[0]),
             DecodeKind::Slots { slots: Slots::Struct(def, _), .. } => vm.heap.alloc(Obj::Struct(*def, children.into())),
             DecodeKind::Slots { slots: Slots::Variant { id, .. }, .. } => vm.heap.new_variant(*id, children),
@@ -1016,7 +1022,7 @@ impl DecodeWalk {
         };
         source.end()?;
         self.pop_frame();
-        self.place(value);
+        self.place(vm, value)?;
         Ok(None)
     }
 
@@ -1091,8 +1097,7 @@ impl Walker for DecodeWalk {
         if purpose == Purpose::Init {
             self.pop_frame();
         }
-        self.place(value);
-        Ok(())
+        self.place(vm, value)
     }
 
     fn output(&self) -> Result<VmValue, Fail> {
