@@ -755,7 +755,13 @@ impl DecodeWalk {
             DecodeKind::Seq => {
                 let container = self.walk.values[at + 1];
                 match vm.heap.get(container) {
-                    Obj::List(_) => vm.heap.list_push(container, v).map_err(Fail::limit)?,
+                    Obj::List(items) => {
+                        // A growing list holds its old buffer and its new one at once.
+                        if items.len() == items.capacity() {
+                            vm.check_memory(items.capacity() * size_of::<VmValue>())?;
+                        }
+                        vm.heap.list_push(container, v).map_err(Fail::limit)?
+                    }
                     _ => _ = vm.set_add(container, v)?,
                 }
             }

@@ -50,6 +50,17 @@ const PROGRAMS: &[(&str, &str)] = &[
          let keep = []\nwhile true {\n    let r: Result<[P]> = json.decode(text)\n    keep.push(r)\n}",
     ),
     (
+        "one large decoded list",
+        "import json\nlet text = \"[\" + \"1,\".repeat(12000000) + \"1]\"\nlet r: Result<[int]> = json.decode(text)\nprint(r.is_ok())",
+    ),
+    (
+        "decoded custom decodes that make garbage",
+        "import json\nstruct Id { v: int }\nimpl Decode for Id {\n    fn decode(decoder: Decoder) -> Result<Id> {\n        \
+         let junk = [\"x\".repeat(1000)]\n        let v: int = decoder.decode()?\n        Ok(Id(v: v + junk.len()))\n    }\n}\n\
+         let text = \"[\" + \"1,\".repeat(200000) + \"1]\"\nlet keep = []\nwhile true {\n    let r: Result<[Id]> = json.decode(text)\n    keep.push(r)\n}",
+    ),
+    ("encoded bytes", "import json\nlet b = \"a\".repeat(4000000).bytes()\nlet keep = []\nwhile true { keep.push(json.encode(b)) }"),
+    (
         "decoded constant defaults",
         "import json\nstruct P { a: int = 1, b: int = 2 }\nlet text = \"[\" + \"{},\".repeat(100000) + \"{}]\"\n\
          let keep = []\nwhile true {\n    let r: Result<[P]> = json.decode(text)\n    keep.push(r)\n}",
