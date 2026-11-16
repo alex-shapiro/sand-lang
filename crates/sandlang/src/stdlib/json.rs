@@ -760,7 +760,7 @@ impl EncodeSink for JsonSink {
         if self.slot()? {
             return invalid_key();
         }
-        self.out.str(&base64::encode(b, false))
+        self.out.base64(b)
     }
 
     fn range(&mut self, start: i64, end: i64, inclusive: bool) -> CodecResult {
@@ -893,16 +893,20 @@ impl TextOut {
         self.grow(need)
     }
 
+    /// Grows `out` to hold `need` bytes, by the largest step that fits. The
+    /// reservation counts the old buffer too, because the two buffers exist
+    /// together while the text moves.
     #[cold]
     fn grow(&mut self, need: usize) -> CodecResult {
-        let generous = need.max(2 * self.out.capacity());
-        let target = match self.reservation.ensure(generous) {
-            Ok(()) => generous,
-            Err(_) if self.reservation.ensure(need).is_ok() => need,
-            Err(_) => return crate::native::codec::memory_limit(),
-        };
-        self.out.reserve_exact(target - self.out.len());
-        Ok(())
+        let cap = self.out.capacity();
+        for target in [cap.saturating_mul(2), cap + cap / 2, cap + cap / 4, cap + cap / 8] {
+            let target = target.max(need);
+            if self.reservation.ensure(target.saturating_add(cap)).is_ok() {
+                self.out.reserve_exact(target - self.out.len());
+                return Ok(());
+            }
+        }
+        crate::native::codec::memory_limit()
     }
 
     /// Writes the separator before the next member of the innermost
@@ -978,6 +982,15 @@ impl TextOut {
         Ok(())
     }
 
+    /// Writes `b` as a Base64 string, which needs no escapes.
+    fn base64(&mut self, b: &[u8]) -> CodecResult {
+        self.separate(b.len().div_ceil(3) * 4 + 2)?;
+        self.out.push('"');
+        base64::encode_into(&mut self.out, b, false);
+        self.out.push('"');
+        Ok(())
+    }
+
     fn key(&mut self, k: &str) -> CodecResult {
         self.separate(quoted_len(k) + 2)?;
         write_str(&mut self.out, k);
@@ -1040,12 +1053,16 @@ enum LevelKind {
 /// Reads JSON text for the decode walker.
 pub(crate) struct JsonSource {
     text: Box<str>,
-    /// The memory of `text`, which the memory limit counts.
-    _reservation: Reservation,
+    /// The memory of `text` and of decoded `bytes`, which the memory limit
+    /// counts.
+    reservation: Reservation,
     pos: usize,
     /// The position at the last call of [`DecodeSource::work`].
     charged: usize,
     levels: Vec<Level>,
+    /// The `Some` levels in `levels`, which open no JSON bracket and so do
+    /// not count toward the nesting limit.
+    somes: usize,
     /// The map key that the walker reads next, as a byte range or as owned
     /// text.
     key: Option<Segment>,
@@ -1079,10 +1096,11 @@ impl JsonSource {
     fn owned(text: Box<str>, reservation: Reservation) -> JsonSource {
         JsonSource {
             text,
-            _reservation: reservation,
+            reservation,
             pos: 0,
             charged: 0,
             levels: Vec::new(),
+            somes: 0,
             key: None,
             scratch: String::new(),
             variant: String::new(),
@@ -1349,7 +1367,9 @@ impl JsonSource {
     }
 
     fn open(&mut self, kind: LevelKind) -> CodecResult {
-        if self.levels.len() >= MAX_NESTING_DEPTH {
+        if kind == LevelKind::Some {
+            self.somes += 1;
+        } else if self.levels.len() - self.somes >= MAX_NESTING_DEPTH {
             return Err(self.err_at(self.pos, "nesting too deep"));
         }
         self.levels.push(Level { kind, segment: Segment::None, count: 0, closed: false });
@@ -1492,10 +1512,15 @@ impl DecodeSource for JsonSource {
     }
 
     fn bytes(&mut self) -> CodecResult<Cow<'_, [u8]>> {
+        let mut extra = self.reservation.sibling();
         let decoded = {
             let text = self.text_value("base64 str")?;
+            if extra.grow(text.len() / 4 * 3 + 3).is_err() {
+                return crate::native::codec::memory_limit();
+            }
             base64::decode(&text, false)
         };
+        self.reservation.absorb(extra);
         decoded.map(Cow::Owned).map_err(|_| self.fail("invalid base64"))
     }
 
@@ -1712,6 +1737,9 @@ impl DecodeSource for JsonSource {
 
     fn end(&mut self) -> CodecResult {
         let Some(level) = self.levels.pop() else { return Ok(()) };
+        if level.kind == LevelKind::Some {
+            self.somes -= 1;
+        }
         if let LevelKind::Array(Some(n)) = level.kind {
             self.ws();
             if level.count != n || (!level.closed && !self.eat(b']')) {

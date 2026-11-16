@@ -263,3 +263,21 @@ print(deep)
 true
 Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))
 Err(Error(message: "nesting too deep at line 1, column 521", kind: "parse"))
+
+=== an option chain round-trips through JSON to the nesting limit, because Some opens no bracket
+import json
+struct D { n: int, next: D? }
+fn chain(k: int) -> D {
+    var d = D(n: 0, next: None)
+    for i in 1..k {
+        d = D(n: i, next: Some(d))
+    }
+    d
+}
+let text = json.encode(chain(500))?
+let back: D = json.decode(text)?
+print(back.n)
+print(json.encode(chain(513)))
+--- stdout
+499
+Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))

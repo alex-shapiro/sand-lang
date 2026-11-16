@@ -1694,6 +1694,9 @@ impl Vm {
             }
             self.heap.stats.record(start.elapsed(), true);
         }
+        // Reservations check against the published size, so a reservation
+        // right after a collection must see the freed memory.
+        self.heap.io_memory.publish_heap(self.heap.used());
     }
 
     pub fn trace_of(&self, fiber: &Fiber, ip: Option<u32>) -> Vec<TraceFrame> {

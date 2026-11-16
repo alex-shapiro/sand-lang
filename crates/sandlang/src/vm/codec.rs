@@ -575,10 +575,9 @@ impl Walker for EncodeWalk {
             match method(vm, dict)? {
                 Method::Custom(callee) => {
                     let token = state.turn.next_token;
-                    let encoder = match (Encoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm) {
-                        Ok(e) => e,
-                        Err(e) => return self.walk.checked(Err(e)).expect("an error"),
-                    };
+                    // The check before the part covers the handle, which must not fail after
+                    // `next_part` has moved past the part.
+                    let encoder = vm.unchecked(|vm| (Encoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm))?;
                     self.callback = Some(state.turn.begin());
                     self.pending = None;
                     return Ok(Step::Call(Callback { callee, args: vec![dict, value, encoder], purpose: Purpose::Method }));
@@ -800,11 +799,13 @@ impl DecodeWalk {
             ShapeKind::Str => {
                 let text = source.str()?;
                 vm.meter.charge_bytes(text.len())?;
+                vm.check_memory(text.len())?;
                 vm.heap.new_str(&*text)
             }
             ShapeKind::Bytes => {
                 let bytes = source.bytes()?;
                 vm.meter.charge_bytes(bytes.len())?;
+                vm.check_memory(bytes.len())?;
                 vm.heap.new_bytes(&*bytes)
             }
             ShapeKind::Range => {
@@ -1033,13 +1034,8 @@ impl Walker for DecodeWalk {
                 match method(vm, dict)? {
                     Method::Custom(callee) => {
                         let token = state.turn.next_token;
-                        let decoder = match (Decoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm) {
-                            Ok(d) => d,
-                            Err(e) => {
-                                self.pending = Some(dict);
-                                return self.walk.checked(Err(e)).expect("an error");
-                            }
-                        };
+                        // The check before the part covers the handle.
+                        let decoder = vm.unchecked(|vm| (Decoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm))?;
                         self.callback = Some(state.turn.begin());
                         return Ok(Step::Call(Callback { callee, args: vec![dict, decoder], purpose: Purpose::Method }));
                     }
