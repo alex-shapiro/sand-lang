@@ -474,7 +474,9 @@ fn source_size_limit_covers_imports() {
     rt().block_on(engine.run_file(&main)).unwrap();
 }
 
-/// Runs `main` alongside the helper modules in `files` and returns standard output.
+/// Runs `main` alongside the helper modules in `files`.
+///
+/// Returns the captured standard output.
 fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
     let dir = TempDir::new("codec");
     for (name, body) in files {
@@ -491,8 +493,7 @@ fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
 #[cfg(feature = "os")]
 #[test]
 fn decode_dictionaries_of_doubling_structs_are_built_quickly() {
-    // Each doubling struct has a single `Decode` implementation shared across
-    // field positions and call sites.
+    // The compiler emits a single `Decode` dictionary entry per doubling struct.
     let mut src = String::from("import json\nstruct S0 { x: int }\n");
     for i in 1..40 {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
@@ -511,7 +512,6 @@ print(s.a.b.x * 10 + s.b.a.x)
 #[cfg(feature = "os")]
 #[test]
 fn decode_of_shared_types_with_back_references() {
-    // Exercises mutually recursive structs and direct enum recursion.
     let src = r#"import json
 struct S0 { x: int, up: Root? }
 struct S1 { a: S0, b: S0 }
@@ -532,7 +532,6 @@ print(t)
 #[cfg(feature = "os")]
 #[test]
 fn decode_of_types_with_the_same_name() {
-    // Two structs named `Config` in different modules are distinct types.
     let files = [("a.sand", "pub struct Config { pub p: int, pub q: int, pub r: int }\n")];
     let src = r#"import json
 import "./a.sand"
@@ -547,16 +546,16 @@ print(bad.is_err())
 
 #[test]
 fn polymorphically_recursive_types_are_compiled_quickly() {
-    // `P<T>` nests `P<[T]>` to unbounded type depth. The decode walker
+    // Type `P<T>` references `P<[T]>` to unbounded type depth. The decode walker
     // constructs nested dictionaries on demand at run time. The compiler
     // therefore does constant work per call site.
     let mut src = String::from("import json\nstruct P<T> { v: T, next: P<[T]>? }\n");
     for i in 0..300 {
         src += &format!("struct Q{i} {{ x: int }}\nlet r{i}: Result<P<Q{i}>> = json.decode(\"1\")\n");
     }
-    let (r, took) = check(Config::new(), &src);
-    assert!(r.is_ok(), "{r:?}");
-    assert!(took < FAST, "took {took:?}");
+    let (result, elapsed) = check(Config::new(), &src);
+    assert!(result.is_ok(), "{result:?}");
+    assert!(elapsed < FAST, "took {elapsed:?}");
 }
 
 /// Compiles the sources `source(n)` and `source(4 * n)` and asserts that the larger

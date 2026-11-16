@@ -305,10 +305,10 @@ pub struct Port {
 
 Structs are reference types; variable assignment shares a struct value without copying it.
 
-Newlines or commas separate struct fields. Each field is immutable unless
-declared `var`. If a struct construction omits a field that declares a default,
-the engine evaluates that default expression. A field default can use traits
-from the struct's type parameter bounds, such as `n: T = T.zero()` under
+Struct fields are separated by newlines or commas. Each field is immutable
+unless declared `var`. If a struct construction omits a field that declares a
+default, the engine evaluates that default expression. A field default can use
+traits from the struct's type parameter bounds, such as `n: T = T.zero()` under
 `T: Num`.
 
 Fields and methods are private unless marked `pub` (§3.3).
@@ -627,11 +627,12 @@ enum to store values of different concrete types in a single collection.
 
 `never` is a subtype of every type. Diverging expressions such as `return`,
 `break`, `continue`, and `fail(...)` have type `never` and fit any expected
-type. Inside composite types, `never` does not coerce. `[never]` and
-`fn() -> never` are distinct from `[int]` and `fn() -> int`. `never` implements
-`Encode` and `Decode` (§5.7) and every trait without methods (§4.9), such as
-`Eq` and `Hash`. Other traits with methods exclude `never` because static trait
-methods such as `T.zero()` can run without a value of type `T`.
+type. Inside composite types, the type checker does not coerce `never`.
+`[never]` and `fn() -> never` are distinct from `[int]` and `fn() -> int`.
+`never` implements `Encode` and `Decode` (§5.7) and every trait without methods
+(§4.9), such as `Eq` and `Hash`. Other traits with methods exclude `never`
+because callers can invoke static trait methods such as `T.zero()` without a
+value of type `T`.
 
 ### 5.2 Composite types
 
@@ -700,12 +701,14 @@ The prelude declares six built-in traits:
   - tuples, `Option`, `Result`, enums, and immutable structs whose components
     implement `Hash`
 - **`Encode`.** Implemented by built-in data types, `never`, native types that
-  opt in (§16.2), and tuples, structs, and enums whose components implement
-  `Encode`. If a struct declares `init` (§4.2), the compiler derives `Encode`
-  only if `init`'s parameters match the struct's fields.
+  opt in (§16.3), custom `impl` targets (§5.7), and tuples, structs, and enums
+  whose components implement `Encode`. If a struct declares `init` (§4.2), the
+  compiler derives `Encode` only if `init`'s parameters match the struct's
+  fields.
 - **`Decode`.** Implemented by built-in data types, `never`, native types that
-  opt in (§16.2), and tuples, structs, and enums whose components implement
-  `Decode`. `Set` elements and map keys also require `Hash`.
+  opt in (§16.3), custom `impl` targets (§5.7), and tuples, structs, and enums
+  whose decoded components implement `Decode` (§5.7). `Set` elements and map
+  keys also require `Hash`.
 - **`Num`.** Requires `Ord + Encode`. Implemented by `int` and `float`.
 
 The compiler derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode` from a type's
@@ -750,29 +753,30 @@ value, or writes after returning.
 
 A `decode` method reads at most a single value from its `Decoder`. If `decode`
 returns without reading, the decoder skips the input value. Before reading,
-`decoder.kind()` inspects the `InputKind` of the unread input value:
+`decoder.kind()` returns the `InputKind` of the unread input value:
 
 - Scalars: `Null`, `Bool`, `Int`, `Float`, `Duration`, `Str`, `Bytes`
 - Composites: `List`, `Map`, `Tuple`, `Struct`, `Range`, `Variant`
 - Opaque values: `Native`
 
-JSON text produces only `Null`, `Bool`, `Int`, `Float`, `Str`, `List`, and
-`Map`. Every JSON object key has kind `Str`.
+In JSON text, `decoder.kind()` returns only `Null`, `Bool`, `Int`, `Float`,
+`Str`, `List`, or `Map`. Every JSON object key has kind `Str`.
 
 For a struct that declares `init` (§4.2), derived `Decode` decodes each
-parameter of `init` and calls `init`. An omitted `Option` parameter defaults to
-`None`. Any other omitted parameter with a default evaluates that default. The
-input may supply any `init` parameter, even if that parameter declares a
-default. If `init` returns `Err(e)` for a non-`Error` value `e`, decoding fails
-with kind `"invalid"` and the display text of `e`. If `init`'s parameter names
+parameter of `init` and calls `init`. The decoder sets an omitted `Option`
+parameter to `None`. For any other omitted parameter with a default, the decoder
+evaluates that default. The input can supply any `init` parameter, even if that
+parameter declares a default. If `init` returns `Err(e)` for an `Error` value
+`e`, the decoder returns `e`. For any other error value `e`, the decoder returns
+an `"invalid"` error with the display text of `e`. If `init`'s parameter names
 or types differ from the struct's fields, the compiler omits derived `Encode`.
 
 For structs without `init`, derived `Decode` evaluates declared defaults for
 omitted fields. The decoder rejects a duplicate struct field or `init`
-parameter with kind `"parse"`. In a map, a duplicate key overwrites the earlier
-entry. Encoding or decoding a value nested more than 512 levels deep fails with
-kind `"limit"`. The JSON parser rejects input nested more than 512 levels deep
-with kind `"parse"`.
+parameter with kind `"parse"`. In a map, the decoder overwrites the earlier
+entry on a duplicate key. The encoder and decoder return a `"limit"` error if a
+value is nested more than 512 levels deep. The JSON parser rejects input nested
+more than 512 levels deep with kind `"parse"`.
 
 ## 6. Expressions
 
@@ -1997,21 +2001,22 @@ to compile`. `None` means unlimited.
   host interrupts the engine. The standard library is compiled once per
   process. `HostModules::new` compiles host modules (§16.3). Neither
   compilation counts toward a program's budget.
-- **Local limits.** The compiler reports construct-level limit errors at the
-  offending syntax:
-  - Expressions, types, patterns, and blocks nest at most 256 levels deep.
-    Deeper nesting fails with `nesting too deep`.
-  - Strings inside string interpolations nest at most 32 levels deep. Deeper
-    nesting fails with `strings nested too deeply inside string interpolations`.
-  - A single type contains at most 10,000 components. Larger types fail with
+- **Local limits.** The compiler enforces per-construct limits and reports
+  errors at the offending syntax:
+  - The compiler rejects expressions, types, patterns, and blocks nested more
+    than 256 levels deep with `nesting too deep`.
+  - The compiler rejects strings nested more than 32 levels deep inside string
+    interpolations with `strings nested too deeply inside string interpolations`.
+  - The compiler rejects a single type with more than 10,000 components with
     `type too large`.
-  - Each `match` exhaustiveness check runs within a fixed work budget. Exceeding
-    that budget fails with `pattern too complex to check for exhaustiveness`.
-  - Deferred code copies (§7.1) in a single function emit at most about a
-    million instructions. Exceeding that limit fails with
+  - The compiler bounds each `match` exhaustiveness check to a fixed work
+    budget. On overflow, it reports `pattern too complex to check for
+    exhaustiveness`.
+  - The compiler emits at most about 1,000,000 instructions for copies of
+    deferred code (§7.1) in a single function. On overflow, it reports
     `too much deferred code`.
-  - Resolving a single trait bound recurses at most 512 levels deep. Deeper
-    recursion fails with `overflow while checking that ...`.
+  - The type checker recurses at most 512 levels deep to resolve a trait bound.
+    On overflow, it reports `overflow while checking that ...`.
 - **Diagnostics.** At most 50 syntax errors per module, and 50 type errors,
   are reported.
 - **Memory.** Compilation is not counted against `max_memory`; it uses
@@ -2294,7 +2299,7 @@ optional type attributes:
 
 Each field of a `SandStruct` and each payload of a `SandEnum` variant must
 implement `IntoVmValue` and owned `FromVmValue`. It must also implement
-`ToValue`, unless the type uses `#[sand(no_value)]`. Unit variants map
+`ToValue` unless the type uses `#[sand(no_value)]`. Unit variants map
 to variants without a payload. Tuple and struct variants map to variants with
 positional and named payloads. On a struct variant field, `#[sand(name = "<name>")]` overrides
 the payload field name. Generic type parameters on a `SandEnum` or `SandStruct`
@@ -2597,13 +2602,13 @@ implementation (§5.7). It converts a `Value` into a Sand value with its `Decode
 implementation. Synchronous native functions accept `Encoded<N>` arguments.
 Async native functions call `NativeContext::to_value` and
 `NativeContext::from_value`. Both conversions execute custom Sand methods,
-`init` constructors, and computed field defaults. `to_value` encodes `Some` as a
-`Value::Variant`, unlike `json.encode`. `from_value` requires exact `Value`
-variants for each Sand type. For example, `bytes` accepts only `Value::Bytes`.
+`init` constructors, and computed field defaults. Unlike `json.encode`, `Value` encoding represents `Some` as a
+`Value::Variant`. `from_value` requires the exact `Value` variant for each
+Sand type. For example, it accepts only `Value::Bytes` for `bytes`.
 
 Each conversion charges fuel and memory against the run limits. If nesting
-exceeds 512 levels, including on cyclic values, conversion fails with kind
-`"limit"`. Each `Some` wrapper adds a nesting level. If a conversion before a
+exceeds 512 levels, such as on a cyclic value, the conversion returns a
+`"limit"` error. Each `Some` wrapper adds a nesting level. If a conversion before a
 side effect hits `max_memory`, the engine collects garbage and restarts the
 native function (§16.3).
 

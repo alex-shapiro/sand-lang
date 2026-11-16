@@ -410,25 +410,25 @@ Visible defects that rarely block users.
       the source or written to the sink. In a request loop with a custom
       `Decode` implementation and heap garbage, the run passes at 40 MB and
       52 MB. That same loop stops at 44 MB and 48 MB. Each source and sink could
-      save a position before each part so the walker can restore its frames.
-      `JsonSource` and `JsonTextWriter` can rewind cheaply. `ValueSource` would
-      need indexed reads. Rewinding would also let `Encoder.encode` and
-      `Decoder.decode` run their first pass synchronously.
+      save a position before each part. The walker could then restore its
+      frames. `JsonSource` and `JsonTextWriter` can reset their positions
+      cheaply. `ValueSource` would need indexed reads. With saved positions,
+      `Encoder.encode` and `Decoder.decode` could also run their first pass
+      synchronously.
 - [ ] ❓ Decide whether generic native types can derive `Encode` and `Decode`
-      with `#[sand(encode, decode)]`. Manual Rust codecs cannot run callbacks
-      for an erased type parameter `T`. The macro therefore rejects both manual
-      and derived codecs on generic native types. Generic types such as
-      `Labeled<T>` lost their derived codecs from `main`. Derived codecs run in
-      the VM walker without generated Rust code.
+      with `#[sand(encode, decode)]`. Today, the derive macros reject both
+      manual and derived codecs on generic native types. Manual Rust codecs
+      cannot run callbacks for an erased type parameter `T`. Derived codecs run
+      in the VM walker without generated Rust code.
 - [ ] ❓ Align `Decoder.kind()` and `ValueSource::unit` on host `Option.None`.
       `Decoder.kind()` reports `Null` for `Option.None`. `ValueSource::unit`
       rejects `Option.None`. Either report `Variant` from `kind()`, or accept
       `Option.None` in `ValueSource::unit` to match JSON `null`.
-- [ ] ⚪ Check set and map table growth before decoding the next entry. After a
-      callback, table growth past `max_memory` stops the run instead of
-      triggering garbage collection. Also check list growth only after
-      confirming that another element follows. Today, the decode walker reserves
-      space for another element before checking for the end of a full list.
+- [ ] ⚪ Check set and map table growth before decoding the next entry. If table
+      growth exceeds `max_memory` after a callback, the engine stops the run
+      instead of collecting garbage. Also check list capacity only after the
+      source confirms another element. Today, the decode walker reserves space
+      for another element before checking for the end of a full list.
 - [ ] ❓ Decide whether `JsonSource` should reject out-of-range numbers like
       `serde_json`. `json.parse("[1e999]")` returns `Float(inf)`. `json.encode`
       then rejects that infinite float.
@@ -454,8 +454,9 @@ Visible defects that rarely block users.
       single complete value. The encode walker passes its sink without tracking
       root writes or open containers. If a host implementation writes two values
       or omits `end()`, `json.encode` returns invalid JSON. A typed sink
-      interface like `serde::ser::SerializeStruct` would enforce that rule and
-      remove separate field and key counters from `JsonSink` and `ValueSink`.
+      interface such as `serde::ser::SerializeStruct` would enforce that rule.
+      It would also remove separate field and key counters from `JsonSink` and
+      `ValueSink`.
 - [ ] ⚪ Borrow the input text during synchronous `json.parse`. `JsonSource::new`
       copies the full input string because `json.decode` cannot borrow the VM
       heap across Sand callbacks.
@@ -463,9 +464,9 @@ Visible defects that rarely block users.
       `retry_stress` fails only the first check. It misses memory checks that
       run after a side effect. After a callback, a codec walk stops on a
       mid-part memory limit check. The stress test must expect that stop.
-- [ ] ⚪ Reject `Value::Set` while decoding a Sand list. `DecodeSource` uses
-      `begin_list` for both lists and sets. `NativeContext::from_value`
-      therefore accepts `Value::Set` for a list type.
+- [ ] ⚪ Reject `Value::Set` if the target type is a Sand list. Today,
+      `NativeContext::from_value` accepts `Value::Set` for a list type because
+      `DecodeSource` shares `begin_list` between lists and sets.
 - [ ] ⚪ Require at compile time that a native function that takes `&mut Vm`
       makes its scheduler requests before its side effects. The engine runs the
       call again after a prompt or a garbage collection, so it executes any
@@ -524,8 +525,8 @@ Visible defects that rarely block users.
 - [ ] ⚪ Report a distinct error if a nested callback reuses an outer `Encoder`
       or `Decoder` whose call is still running.
 - [ ] ⚪ Suggest a `Decode` bound if the parser sees `<reflect T>`.
-- [ ] ⚪ Include the field or element path in encode errors, matching decode
-      errors. Encode errors for non-finite floats, non-text map keys, and custom
+- [ ] ⚪ Include the field or element path in encode errors, as decode errors
+      do. Encode errors for non-finite floats, non-text map keys, and custom
       `encode` methods omit the failing path.
 - [ ] ⚪ Print every bound of a prelude implementation in `help`. `help(Decode)`
       prints `Set<T> where T: Decode` and omits `T: Hash` because the help
@@ -536,12 +537,12 @@ Visible defects that rarely block users.
 
 - [ ] ❓ Decide whether to add fast paths to the codec walkers. Each walker
       reads a trait dictionary at every value. In
-      `crates/sandlang/benches/codec.rs`, encoding takes 916 ns per item versus
-      469 ns on `main`. Decoding takes 1900 ns versus 1028 ns. `json.to_json`
-      takes 2614 ns versus 756 ns. A custom implementation adds about 500 ns per
-      value. `bench/run.py` omits the `json` module. Fast paths could skip
-      constant part dictionary reads or format JSON text without dynamic sink
-      calls. Those fast paths must stay aligned with the walker.
+      `crates/sandlang/benches/codec.rs`, `json.encode` takes 916 ns per item
+      versus 469 ns on `main`. `json.decode` takes 1900 ns versus 1028 ns.
+      `json.to_json` takes 2614 ns versus 756 ns. A custom implementation adds
+      about 500 ns per value. `bench/run.py` omits the `json` module. Fast paths
+      could skip constant part dictionary reads or format JSON text without
+      dynamic sink calls. Those fast paths must stay aligned with the walker.
 - [ ] ⚪ Deduplicate and simplify the codec walkers:
       - Share the common memory check, fuel charge, method dispatch, and handle
         setup across both `run` loops.
@@ -549,9 +550,9 @@ Visible defects that rarely block users.
       - Split `DecodeWalker::advance` into separate phases for reading parts,
         filling missing slots, and finishing containers.
       - Match on `&DecodeFill` instead of cloning it for each missing field.
-- [ ] ❓ Find why plain recursion retains unreachable heap values. A function
-      that builds a 5,000-string list, takes its length, and recurses retains
-      about 0.3 MB per frame on both `main` and this branch. Eighty levels
+- [ ] ❓ Find why plain recursion retains unreachable heap values. If a
+      recursive function builds a 5,000-string list and takes its length, each
+      frame retains about 0.3 MB on both `main` and this branch. Eighty levels
       require 32 MB. Two hundred fifty levels require 128 MB. The collector
       likely traces each frame's full register window. That window still holds
       stale handles from returned callees.
@@ -577,9 +578,9 @@ Visible defects that rarely block users.
 ### Language
 
 - [ ] ❓ Decide whether the JSON encoder should write a single-payload tuple
-      variant as `{"Banned":"spam"}` instead of `{"Banned":["spam"]}`, matching
-      `serde` newtype variants. Hosts often exchange JSON with `serde_json`.
-      Changing the derived format later will break scripts that rely on the
+      variant as `{"Banned":"spam"}` instead of `{"Banned":["spam"]}` to match
+      `serde` newtype variants. Hosts often exchange JSON with `serde_json`. A
+      later change to the derived format would break scripts that expect the
       array wrapper. `JsonSink` also writes `Some(None)` as `null`. `JsonSource`
       then decodes `null` as `None`.
 - [ ] ⚪ Support non-constant default expressions on trait method parameters.

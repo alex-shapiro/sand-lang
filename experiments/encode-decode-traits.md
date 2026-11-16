@@ -19,7 +19,7 @@ The design has six goals:
 
 The compiler resolves `Encode` and `Decode` from static types. Callers pass trait dictionaries to generic functions. We delete the `reflect` keyword. Callers pass `Decode` dictionaries with the target type structure instead. A host function that decodes into a type parameter requires `Decode` instead of `reflect`.
 
-Runtime lookup from heap value tags fails for generic types and for `Decode`. The VM omits type arguments from runtime values. An empty `[Email]` list has the same heap representation as an empty `[int]` list. An inline `None` of type `Email?` has the same bits as an inline `None` of type `int?`. If the VM recorded type arguments on every value, every generic call would pass hidden descriptors. The VM would also allocate heap objects for inline values such as `None`. Runtime value tags also cannot select a `Decode` implementation. Decoding reads raw input before any Sand value exists.
+Runtime lookup from heap value tags fails for generic types and for `Decode`. The VM omits type arguments from runtime values. An empty `[Email]` list has the same heap representation as an empty `[int]` list. An inline `None` of type `Email?` has the same bits as an inline `None` of type `int?`. If the VM recorded type arguments on every value, every generic call would pass hidden descriptors. The VM would also allocate heap objects for inline values such as `None`. Runtime value tags also cannot select a `Decode` implementation. The decode walker reads raw input before any Sand value exists.
 
 With trait dictionaries, callers pass a hidden argument only to generic functions with an `Encode` or `Decode` bound.
 
@@ -30,7 +30,7 @@ Each trait declares a native Rust default method that walks structural values. T
 We rejected three alternatives:
 
 - **Generated Sand methods.** In benchmarks, generated Sand `encode` and `decode` methods took 2.3 to 7 times as long as native walkers.
-- **Dual native and Sand codecs.** Maintaining both generated Sand codecs and a native walker duplicates output formatting, error paths, and memory-limit retries. In an earlier prototype, over a quarter of the new code existed only to keep the two paths aligned.
+- **Dual native and Sand codecs.** Separate generated Sand codecs and native walkers duplicate output formatting, error paths, and memory-limit retries. In an earlier prototype, over a quarter of the new code existed only to keep the two paths aligned.
 - **Two-pass walks with placeholders.** A placeholder pass builds an intermediate value tree on every JSON call. It allocates extra memory. An untyped first pass also cannot distinguish Base64 bytes from plain strings without format rules in the walker.
 
 In-place callbacks can run before a later field fails to decode. The decode walker runs custom `decode` methods, `init` constructors, and computed defaults as it reaches each part. Previously, `json.decode` ran computed field defaults only after it parsed the entire input.
@@ -65,7 +65,7 @@ If `Decode` required `Encode`, users could not implement `Decode` alone for requ
 
 ### Automatic derivation with overrides
 
-The checker derives `Encode` and `Decode` automatically for built-in data types, `never`, and every Sand struct or enum whose parts satisfy the required bounds. The checker excludes functions, tasks, and channels. Those types represent active runtime state, not data.
+Built-in data types and `never` implement `Encode` and `Decode`. The checker also derives both traits for every Sand struct or enum whose parts satisfy the required bounds. The checker excludes functions, tasks, and channels. Those types represent active runtime state, not data.
 
 A custom `impl Encode` or `impl Decode` block replaces the derived implementation for its type constructor under standard trait coherence rules. For example, `impl Encode for Wrapper<int>` replaces the derived `impl<T: Encode> Encode for Wrapper<T>`. `Wrapper<str>` then does not implement `Encode`.
 
@@ -74,7 +74,7 @@ We rejected four alternatives:
 - **Explicit `derive` annotations.** Automatic derivation matches `Eq`, `Ord`, and `Hash` in Sand.
 - **Field attributes.** Custom `impl` blocks already express field renames and omissions. We can add field attributes later if needed.
 - **Rejecting concrete type arguments on custom `impl` blocks.** A ban on `impl Encode for Wrapper<int>` would add a codec-only exception to trait coherence. It would also block codecs for specific type instantiations.
-- **Excluding `never`.** Implementing `Encode` and `Decode` for `never` lets scripts use empty generic types such as `[never]` and `Result<int, never>`. Other traits with methods exclude `never`. The encode walker never visits a `never` value. The decode walker returns a parse error for `never`.
+- **Excluding `never`.** With `Encode` and `Decode` on `never`, scripts can use empty generic types such as `[never]` and `Result<int, never>`. Other traits with methods exclude `never`. The encode walker never visits a `never` value. The decode walker returns a parse error for `never`.
 
 ### Single-value streaming through `Encoder` and `Decoder`
 
@@ -101,7 +101,7 @@ A `Decoder` reads at most a single value during its callback. Before reading, a 
 
 We rejected four alternatives:
 
-- **Intermediate `Json` or `Value` trees.** Converting through `Json` or `Value` allocates intermediate trees. It also ties both traits to a single data model. Direct streaming preserves format-specific types such as raw `bytes` in `Value`.
+- **Intermediate `Json` or `Value` trees.** Conversion through `Json` or `Value` allocates intermediate trees. It also ties both traits to a single data model. Direct writes and reads preserve format-specific types such as raw `bytes` in `Value`.
 - **Infallible `encode`.** With `Result<()>`, custom `encode` methods and format sinks can return errors for invalid values.
 - **Rewindable `Decoder` retries.** If a read fails partway through a value, input rewinding cannot undo side effects from nested callbacks.
 - **Omitting `decoder.kind()`.** Without `decoder.kind()` or retries, a Sand `decode` method could request only a fixed type. It could not decode untagged unions across formats.
@@ -124,10 +124,10 @@ If `init`'s parameter names or types differ from the struct's fields, the compil
 We rejected six alternatives:
 
 - **Omitting derived `Decode` for structs with `init`.** Without derived `Decode`, every validated struct would need a manual `Decode` implementation.
-- **Omitting derived `Decode` if `init` requires trait dictionaries.** Propagating `init`'s bounds lets the compiler derive `Decode` for generic validated structs.
+- **Omitting derived `Decode` if `init` requires trait dictionaries.** Because the derived implementation includes `init`'s bounds, generic validated structs keep derived `Decode`.
 - **Writing fields directly without calling `init`.** Direct field writes would bypass `init`'s validation.
-- **Requiring `pub` on `init`.** Requiring `pub` on `init` would penalize constructor validation. Field-based decoding already populates private fields.
-- **Deriving `Encode` even if `init` parameters differ from the fields.** The derived decoder would reject the output of derived `Encode`. Derived `Encode` writes struct fields, whereas derived `Decode` reads `init` parameters.
+- **Requiring `pub` on `init`.** A `pub` requirement on `init` would penalize constructor validation. Field-based decoding already populates private fields.
+- **Deriving `Encode` even if `init` parameters differ from the fields.** The derived decoder would reject the output of derived `Encode`. Derived `Encode` writes struct fields. Derived `Decode` reads `init` parameters.
 - **Rejecting the struct definition if `init` parameters differ from the fields.** A definition-site error would reject asymmetric structs that never use `Encode` or `Decode`. Derivation runs automatically on every struct.
 
 ### Rejecting duplicate struct fields
@@ -176,7 +176,7 @@ We rejected four alternatives:
 
 We rejected two alternatives:
 
-- **Keeping `str` as the return type of `json.encode`.** `Result<str>` lets scripts recover from non-finite floats. It also guarantees valid RFC 8259 JSON. Stopping the run would prevent recovery. Emitting `null` would silently corrupt numeric data.
+- **Keeping `str` as the return type of `json.encode`.** `Result<str>` lets scripts recover from non-finite floats. It also guarantees valid RFC 8259 JSON. If `json.encode` stopped the run, scripts could not recover. If `json.encode` emitted `null`, it would silently corrupt numeric data.
 - **Returning `Result<Json>` from `json.to_json`.** `Result<Json>` would force `Result` handling onto every use of the `json!` macro.
 
 ### `json.Json` as an ordinary native type

@@ -1,15 +1,16 @@
 //! Structural implementations of `Encode` and `Decode`.
 //!
-//! Each codec trait method defaults to a native walker over the parts of a
-//! value. An implementation that uses this default method is structural. Its
-//! runtime dictionary stores a shape index so the walker can construct each
-//! part's dictionary from the outer dictionary. See [`CodecImpl`].
+//! The prelude declares a native default method on each codec trait to walk the
+//! parts of a value. An implementation that keeps this default method is
+//! structural. The compiler stores a shape index in each structural dictionary.
+//! The walker reads that shape to build each part's dictionary from the outer
+//! dictionary. See [`CodecImpl`].
 //!
 //! The prelude declares structural implementations for built-in types. The
 //! checker generates structural implementations on demand for `never` and for
-//! each tuple arity. For structs, enums, and native value types without an
-//! explicit `impl` block, the checker derives a structural implementation if
-//! every part implements the trait.
+//! each tuple arity. The checker also derives a structural implementation for
+//! each struct, enum, or native value type if every part implements the trait.
+//! An explicit `impl` block overrides derivation.
 
 use super::traits::{ImplDef, impl_key};
 use super::*;
@@ -21,9 +22,7 @@ use super::*;
 /// After resolution, `T` is a dictionary [`HExpr`].
 #[derive(Clone, Debug)]
 pub struct CodecImpl<T = HExpr> {
-    /// Dictionary for each part in walk order.
-    ///
-    /// A bound dictionary is projected as an `HKind::Field` of `Local(0)`.
+    /// Dictionary entry for each part in walk order.
     pub parts: Vec<T>,
     /// Fallback values for omitted struct fields or `init` parameters during
     /// `Decode`.
@@ -43,13 +42,10 @@ impl<T> Default for CodecImpl<T> {
 /// `Decode`.
 #[derive(Clone, Debug)]
 pub enum CodecFill<T> {
-    /// Omitting the value is an error unless its type is `Option`.
+    /// The input must supply a value unless the target type is `Option`.
     Required,
     Const(ConstVal),
     /// Default helper function and its required dictionaries.
-    ///
-    /// Code generation replaces this with a constant default if the field
-    /// default folds to a constant.
     Helper(FnId, Vec<T>),
 }
 
@@ -85,7 +81,7 @@ impl<T> CodecImpl<T> {
 type UnresolvedCodec = CodecImpl<(TypeId, TraitRef)>;
 
 /// Collects trait bounds required on a structural codec implementation's type
-/// parameters. See [`Checker::derive_codec_impls`].
+/// parameters. See [`Checker::infer_codec_bounds`].
 #[derive(Clone)]
 pub(crate) struct CodecBoundCollector {
     pub type_params: Vec<ParamId>,
@@ -98,17 +94,17 @@ impl Checker {
         matches!(self.traits[trait_id as usize].builtin, Some(Builtin::Encode | Builtin::Decode))
     }
 
-    /// Returns `true` if implementation `id` uses its codec trait's native
-    /// default method.
-    pub fn is_structural_impl(&self, id: ImplId) -> bool {
-        is_structural_codec_impl(&self.traits, &self.impls[id as usize])
+    /// Returns `true` if implementation `impl_id` implements `Encode` or
+    /// `Decode` with the trait's native default method.
+    pub fn is_structural_codec_impl(&self, impl_id: ImplId) -> bool {
+        is_structural_codec_impl(&self.traits, &self.impls[impl_id as usize])
     }
 
-    /// Derives structural codec implementations for type definitions starting
-    /// at `first_type`.
+    /// Derives structural codec implementations for type definitions from
+    /// `first_type` onward.
     ///
-    /// Also resolves part dictionaries for every structural implementation
-    /// starting at `first_impl`.
+    /// Also resolves part dictionaries for every structural implementation from
+    /// `first_impl` onward.
     pub(crate) fn derive_codec_impls(&mut self, first_type: usize, first_impl: usize) {
         for builtin in [Builtin::Encode, Builtin::Decode] {
             let Some(trait_ref) = self.builtin_trait(builtin) else { continue };
@@ -118,15 +114,15 @@ impl Checker {
             let mut candidates = Vec::new();
             for def_idx in first_type..self.types.len() {
                 let def_id = def_idx as TypeDefId;
-                let declared = self.impls_by.get(&(trait_ref.trait_id, Ctor::Def(def_id), 0)).is_some_and(|ids| !ids.is_empty());
-                if declared {
+                let has_declared_impl = self.impls_by.get(&(trait_ref.trait_id, Ctor::Def(def_id), 0)).is_some_and(|ids| !ids.is_empty());
+                if has_declared_impl {
                     continue;
                 }
                 match self.codec_form(def_id, builtin) {
-                    Some(derived) => {
-                        let id = self.add_codec_impl(trait_ref, def_id);
-                        if derived {
-                            candidates.push(id);
+                    Some(is_derived) => {
+                        let impl_id = self.add_codec_impl(trait_ref, def_id);
+                        if is_derived {
+                            candidates.push(impl_id);
                         }
                     }
                     None if matches!(self.types[def_id as usize].kind, TypeDefKind::Struct { .. }) => {
@@ -137,12 +133,15 @@ impl Checker {
                     None => {}
                 }
             }
-            self.find_codec_bounds(&candidates);
+            self.propagate_codec_bounds(&candidates);
         }
-        for id in first_impl..self.impls.len() {
-            let id = id as ImplId;
-            if !self.impls[id as usize].replaced && self.is_structural_impl(id) && self.impls[id as usize].codec.is_none() {
-                self.resolve_codec_parts(id);
+        for impl_idx in first_impl..self.impls.len() {
+            let impl_id = impl_idx as ImplId;
+            if !self.impls[impl_id as usize].replaced
+                && self.is_structural_codec_impl(impl_id)
+                && self.impls[impl_id as usize].codec.is_none()
+            {
+                self.resolve_codec_impl(impl_id);
             }
         }
     }
@@ -152,13 +151,13 @@ impl Checker {
     ///
     /// - `Some(true)` if the checker derives it from the type's parts.
     /// - `Some(false)` if a manual Rust codec function implements it.
-    /// - `None` if the type cannot implement `builtin` without an explicit
-    ///   `impl` block.
+    /// - `None` if `def_id` requires an explicit `impl` block to implement
+    ///   `builtin`.
     fn codec_form(&mut self, def_id: TypeDefId, builtin: Builtin) -> Option<bool> {
-        if let Some(codecs) = self.types[def_id as usize].codecs {
+        if let Some(native_codecs) = self.types[def_id as usize].native_codecs {
             let manual = match builtin {
-                Builtin::Encode => matches!(codecs.encode?, NativeCodec::Manual(_)),
-                _ => matches!(codecs.decode?, NativeCodec::Manual(_)),
+                Builtin::Encode => matches!(native_codecs.encode?, NativeCodec::Manual(_)),
+                _ => matches!(native_codecs.decode?, NativeCodec::Manual(_)),
             };
             return Some(!manual);
         }
@@ -169,17 +168,17 @@ impl Checker {
         }
     }
 
-    /// Returns `true` if struct `def_id` lacks an `init` method or if its
-    /// `init` parameters match its fields by name and type in any order.
+    /// Returns `true` if struct `def_id` does not declare `init`, or if its
+    /// `init` parameters match its fields by name and type.
     fn init_matches_fields(&mut self, def_id: TypeDefId) -> bool {
         let Some(init) = self.init_method(Ctor::Def(def_id)) else { return true };
-        let (fi, def) = (self.fns[init as usize].clone(), self.types[def_id as usize].clone());
+        let (init_fn, def) = (self.fns[init as usize].clone(), self.types[def_id as usize].clone());
         let fields = def.fields();
-        let own: Vec<TypeId> = def.generics.iter().map(|&p| self.arena.param(p)).collect();
-        fi.generics.len() == def.generics.len()
-            && fi.params.len() == fields.len()
-            && fi.params.iter().all(|p| {
-                let ty = self.arena.instantiate(p.ty, &fi.generics, &own);
+        let type_params: Vec<TypeId> = def.generics.iter().map(|&p| self.arena.param(p)).collect();
+        init_fn.generics.len() == def.generics.len()
+            && init_fn.params.len() == fields.len()
+            && init_fn.params.iter().all(|p| {
+                let ty = self.arena.instantiate(p.ty, &init_fn.generics, &type_params);
                 fields.iter().any(|f| p.name == f.name && ty == f.ty)
             })
     }
@@ -242,8 +241,8 @@ impl Checker {
         let target = self.arena.tuple(&elems);
         let evidence = elems.iter().map(|&t| (t, trait_ref)).collect();
         let module = self.prelude.unwrap_or(self.cur_mod);
-        let id = self.push_codec_impl(trait_ref, target, generics, evidence, module, Span::default());
-        self.resolve_codec_parts(id);
+        let impl_id = self.push_codec_impl(trait_ref, target, generics, evidence, module, Span::default());
+        self.resolve_codec_impl(impl_id);
     }
 
     /// Returns the structural implementation of codec trait `trait_ref` for
@@ -260,21 +259,20 @@ impl Checker {
         id
     }
 
-    /// Infers type parameter bounds for each structural codec implementation in
-    /// `ids` using greatest fixed-point iteration.
+    /// Propagates type parameter bounds across the structural codec
+    /// implementations in `impl_ids` to a greatest fixed point.
     ///
-    /// Mutually recursive types implement the trait unless a part fails the
-    /// bound check. Removes any implementation whose parts fail to implement
-    /// the trait.
-    fn find_codec_bounds(&mut self, ids: &[ImplId]) {
-        // Candidate indices to recheck if a type definition's codec implementation changes.
-        let mut dependents: HashMap<TypeDefId, Vec<usize>> = HashMap::new();
-        for (i, &id) in ids.iter().enumerate() {
-            let imp = self.impls[id as usize].clone();
+    /// Removes any implementation with a part that fails its trait bound. Keeps
+    /// implementations for mutually recursive types if every part satisfies its
+    /// bound.
+    fn propagate_codec_bounds(&mut self, impl_ids: &[ImplId]) {
+        let mut dependent_candidates: HashMap<TypeDefId, Vec<usize>> = HashMap::new();
+        for (i, &impl_id) in impl_ids.iter().enumerate() {
+            let imp = self.impls[impl_id as usize].clone();
             for &(t, _) in self.unresolved_codec(&imp).unwrap_or_default().dicts() {
                 self.arena.any(t, &mut |x| {
                     if let Ty::Named(d, _) = x {
-                        let users = dependents.entry(d).or_default();
+                        let users = dependent_candidates.entry(d).or_default();
                         if users.last() != Some(&i) {
                             users.push(i);
                         }
@@ -283,130 +281,130 @@ impl Checker {
                 });
             }
         }
-        let mut todo: Vec<usize> = (0..ids.len()).rev().collect();
-        let mut queued = vec![true; ids.len()];
+        let mut todo: Vec<usize> = (0..impl_ids.len()).rev().collect();
+        let mut queued = vec![true; impl_ids.len()];
         while let Some(i) = todo.pop() {
             queued[i] = false;
             if !self.budget.check() {
                 return;
             }
-            let id = ids[i];
-            if self.impls[id as usize].replaced {
+            let impl_id = impl_ids[i];
+            if self.impls[impl_id as usize].replaced {
                 continue;
             }
-            let changed = match self.infer_codec_bounds(id) {
+            let changed = match self.infer_codec_bounds(impl_id) {
                 Ok(bounds) => {
                     let mut changed = false;
                     for bound in bounds {
-                        if !self.impls[id as usize].evidence.contains(&bound) {
-                            self.impls[id as usize].evidence.push(bound);
+                        if !self.impls[impl_id as usize].evidence.contains(&bound) {
+                            self.impls[impl_id as usize].evidence.push(bound);
                             changed = true;
                         }
                     }
                     changed
                 }
-                Err(part) => {
-                    let reason = self.refuting_part(id, part);
-                    let imp = &self.impls[id as usize];
+                Err(part_index) => {
+                    let reason = self.codec_failure_reason(impl_id, part_index);
+                    let imp = &self.impls[impl_id as usize];
                     if let (Ty::Named(d, _), Some(reason)) = (self.arena.get(imp.target), reason) {
                         self.codec_failure_reasons.insert((imp.trait_ref.trait_id, d), reason.into());
                     }
-                    self.remove_codec_impl(id);
+                    self.remove_codec_impl(impl_id);
                     true
                 }
             };
-            if changed && let Ty::Named(d, _) = self.arena.get(self.impls[id as usize].target) {
-                for &u in dependents.get(&d).map(Vec::as_slice).unwrap_or_default() {
-                    if !std::mem::replace(&mut queued[u], true) {
-                        todo.push(u);
+            if changed && let Ty::Named(d, _) = self.arena.get(self.impls[impl_id as usize].target) {
+                for &candidate_idx in dependent_candidates.get(&d).map(Vec::as_slice).unwrap_or_default() {
+                    if !std::mem::replace(&mut queued[candidate_idx], true) {
+                        todo.push(candidate_idx);
                     }
                 }
             }
         }
     }
 
-    fn remove_codec_impl(&mut self, id: ImplId) {
-        let imp = &self.impls[id as usize];
-        let (t, key) = (imp.trait_ref.trait_id, impl_key(&self.arena, imp.target).unwrap_or((Ctor::Unit, 0)));
-        super::traits::remove_impl(&mut self.impls_by, &(t, key.0, key.1), id);
-        super::traits::remove_impl(&mut self.impls_by_ctor, &key, id);
-        self.impls[id as usize].replaced = true;
+    fn remove_codec_impl(&mut self, impl_id: ImplId) {
+        let imp = &self.impls[impl_id as usize];
+        let (trait_id, key) = (imp.trait_ref.trait_id, impl_key(&self.arena, imp.target).unwrap_or((Ctor::Unit, 0)));
+        super::traits::remove_impl(&mut self.impls_by, &(trait_id, key.0, key.1), impl_id);
+        super::traits::remove_impl(&mut self.impls_by_ctor, &key, impl_id);
+        self.impls[impl_id as usize].replaced = true;
     }
 
-    /// Infers the type parameter bounds required by the parts and default
-    /// helpers of structural implementation `id`.
+    /// Infers the type parameter bounds required by `impl_id`.
     ///
-    /// Returns `Err(index)` with the first unsatisfied requirement index if a
-    /// concrete requirement fails.
-    fn infer_codec_bounds(&mut self, id: ImplId) -> Result<Vec<(TypeId, TraitRef)>, usize> {
-        let imp = self.impls[id as usize].clone();
-        let reqs: Vec<(TypeId, TraitRef)> = self.unresolved_codec(&imp).ok_or(usize::MAX)?.dicts().copied().collect();
+    /// Returns `Err(index)` with the first failing requirement index if a
+    /// concrete requirement is unsatisfied.
+    fn infer_codec_bounds(&mut self, impl_id: ImplId) -> Result<Vec<(TypeId, TraitRef)>, usize> {
+        let imp = self.impls[impl_id as usize].clone();
+        let requirements: Vec<(TypeId, TraitRef)> = self.unresolved_codec(&imp).ok_or(usize::MAX)?.dicts().copied().collect();
         let evidence = imp.evidence.iter().map(|&(t, tr)| (t, tr, dict_expr(HKind::Error))).collect();
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
-        let outer = self.codec_bound_collector.replace(CodecBoundCollector { type_params: imp.generics.clone(), bounds: Vec::new() });
-        let failed = reqs.into_iter().position(|(t, tr)| match self.resolve_evidence(t, tr, 0) {
+        let outer_collector =
+            self.codec_bound_collector.replace(CodecBoundCollector { type_params: imp.generics.clone(), bounds: Vec::new() });
+        let failed_index = requirements.into_iter().position(|(t, tr)| match self.resolve_evidence(t, tr, 0) {
             Ok(_) => false,
             Err(m) => !m.unknown,
         });
-        let bounds = std::mem::replace(&mut self.codec_bound_collector, outer).map(|c| c.bounds).unwrap_or_default();
+        let bounds = std::mem::replace(&mut self.codec_bound_collector, outer_collector).map(|c| c.bounds).unwrap_or_default();
         self.fs.evidence = saved;
-        match failed {
+        match failed_index {
             Some(i) => Err(i),
             None => Ok(bounds),
         }
     }
 
-    /// Formats diagnostic reason text if `part` is an unsatisfied part of
-    /// structural implementation `id`. See [`CodecImpl::dicts`].
-    fn refuting_part(&mut self, id: ImplId, part: usize) -> Option<String> {
-        let imp = self.impls[id as usize].clone();
-        let Ty::Named(d, _) = self.ty(imp.target) else { return None };
+    /// Formats the diagnostic reason why part `part_index` prevents `impl_id`
+    /// from implementing its codec trait.
+    fn codec_failure_reason(&mut self, impl_id: ImplId, part_index: usize) -> Option<String> {
+        let imp = self.impls[impl_id as usize].clone();
+        let Ty::Named(def_id, _) = self.ty(imp.target) else { return None };
         let owner = self.show(imp.target);
-        let decode = self.traits[imp.trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
-        let (t, tr) = *self.unresolved_codec(&imp)?.parts.get(part)?;
-        let mut inner = None;
-        self.arena.any(t, &mut |x| {
-            if let Ty::Named(e, _) = x
-                && e != d
-                && inner.is_none()
+        let is_decode = self.traits[imp.trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
+        let (part_ty, trait_ref) = *self.unresolved_codec(&imp)?.parts.get(part_index)?;
+        let mut inner_reason = None;
+        self.arena.any(part_ty, &mut |x| {
+            if let Ty::Named(other_def, _) = x
+                && other_def != def_id
+                && inner_reason.is_none()
             {
-                inner = self.codec_failure_reasons.get(&(tr.trait_id, e)).cloned();
+                inner_reason = self.codec_failure_reasons.get(&(trait_ref.trait_id, other_def)).cloned();
             }
             false
         });
-        if let Some(reason) = inner {
+        if let Some(reason) = inner_reason {
             return Some(reason.to_string());
         }
-        let shown = self.show(t);
-        let def = self.types[d as usize].clone();
-        if let Some(init) = self.init_method(Ctor::Def(d)).filter(|_| decode) {
-            let p = self.fns[init as usize].params.get(part)?.name;
-            return Some(format!("parameter `{}` of `{owner}.init` has type `{shown}`", self.name(p)));
+        let shown_part_ty = self.show(part_ty);
+        let def = self.types[def_id as usize].clone();
+        if let Some(init) = self.init_method(Ctor::Def(def_id)).filter(|_| is_decode) {
+            let param_name = self.fns[init as usize].params.get(part_index)?.name;
+            return Some(format!("parameter `{}` of `{owner}.init` has type `{shown_part_ty}`", self.name(param_name)));
         }
         match &def.kind {
             TypeDefKind::Struct { fields } => {
-                let f = fields.get(part)?.name;
-                Some(format!("field `{}` of `{owner}` has type `{shown}`", self.name(f)))
+                let field_name = fields.get(part_index)?.name;
+                Some(format!("field `{}` of `{owner}` has type `{shown_part_ty}`", self.name(field_name)))
             }
             TypeDefKind::Enum { variants } => {
-                let mut i = part;
-                let v = variants.iter().find(|v| {
-                    let found = i < v.fields.len();
+                let mut i = part_index;
+                let variant = variants.iter().find(|variant| {
+                    let found = i < variant.fields.len();
                     if !found {
-                        i -= v.fields.len();
+                        i -= variant.fields.len();
                     }
                     found
                 })?;
-                Some(format!("the payload of variant `{}` of `{owner}` has type `{shown}`", self.name(v.name)))
+                Some(format!("the payload of variant `{}` of `{owner}` has type `{shown_part_ty}`", self.name(variant.name)))
             }
             TypeDefKind::Opaque(_) => None,
         }
     }
 
-    /// Resolves the dictionary expressions for every part and default helper of
-    /// structural implementation `id`.
-    fn resolve_codec_parts(&mut self, id: ImplId) {
-        let imp = self.impls[id as usize].clone();
+    /// Populates the resolved [`CodecImpl`] for structural implementation
+    /// `impl_id`.
+    fn resolve_codec_impl(&mut self, impl_id: ImplId) {
+        let imp = self.impls[impl_id as usize].clone();
         let Some(unresolved) = self.unresolved_codec(&imp) else {
             let msg = format!("the parts of {} cannot be encoded or decoded", self.show(imp.target));
             self.error(imp.span, msg);
@@ -414,8 +412,8 @@ impl Checker {
         };
         let mut evidence = Vec::new();
         let mut slot = crate::vm::bytecode::CODEC_SHAPE_SLOT as u32 + 1;
-        for &(t, tr) in &imp.evidence {
-            let e = match self.has_dict(&tr) {
+        for &(bound_ty, trait_ref) in &imp.evidence {
+            let dict = match self.has_dict(&trait_ref) {
                 true => {
                     slot += 1;
                     let obj = Box::new(dict_expr(HKind::Local(0)));
@@ -423,20 +421,20 @@ impl Checker {
                 }
                 false => dict_expr(HKind::Unit),
             };
-            evidence.push((t, tr, e));
+            evidence.push((bound_ty, trait_ref, dict));
         }
         let saved = std::mem::replace(&mut self.fs.evidence, evidence);
-        let codec = unresolved.map(&mut |(t, tr)| match self.resolve_evidence(t, tr, 0) {
-            Ok(e) => e,
-            Err(m) => {
+        let codec = unresolved.map(&mut |(bound_ty, trait_ref)| match self.resolve_evidence(bound_ty, trait_ref, 0) {
+            Ok(dict) => dict,
+            Err(unmet) => {
                 let shown = format!("`{}` for {}", self.show_trait(&imp.trait_ref), self.show(imp.target));
-                let msg = self.unmet_message(m, &format!(" (required by the default method of the impl of {shown})"));
+                let msg = self.unmet_message(unmet, &format!(" (required by the default method of the impl of {shown})"));
                 self.error(imp.span, msg);
                 dict_expr(HKind::Error)
             }
         });
         self.fs.evidence = saved;
-        self.impls[id as usize].codec = Some(Arc::new(codec));
+        self.impls[impl_id as usize].codec = Some(Arc::new(codec));
     }
 
     /// Collects the unresolved `(TypeId, TraitRef)` requirements for structural
@@ -446,7 +444,7 @@ impl Checker {
     /// implementation.
     fn unresolved_codec(&mut self, imp: &ImplDef) -> Option<UnresolvedCodec> {
         let tr = imp.trait_ref;
-        let decode = self.traits[tr.trait_id as usize].builtin == Some(Builtin::Decode);
+        let is_decode = self.traits[tr.trait_id as usize].builtin == Some(Builtin::Decode);
         let mut codec = UnresolvedCodec::default();
         let target = self.resolve(imp.target);
         match self.ty(target) {
@@ -457,49 +455,49 @@ impl Checker {
             Ty::Named(d, args) => {
                 let args = self.elems(args);
                 let def = self.types[d as usize].clone();
-                if self.codec_form(d, if decode { Builtin::Decode } else { Builtin::Encode }) == Some(false) {
+                if self.codec_form(d, if is_decode { Builtin::Decode } else { Builtin::Encode }) == Some(false) {
                     return Some(codec);
                 }
-                let inst = |c: &mut Checker, t: TypeId, gens: &[ParamId]| c.arena.instantiate(t, gens, &args[..gens.len().min(args.len())]);
-                // Instantiates the dictionary bounds of `init` or a default helper with `args`.
-                let dicts = |c: &mut Checker, ds: &[(TypeId, TraitRef)], gens: &[ParamId]| -> Vec<(TypeId, TraitRef)> {
+                let instantiate_ty =
+                    |c: &mut Checker, t: TypeId, gens: &[ParamId]| c.arena.instantiate(t, gens, &args[..gens.len().min(args.len())]);
+                let instantiate_dicts = |c: &mut Checker, ds: &[(TypeId, TraitRef)], gens: &[ParamId]| -> Vec<(TypeId, TraitRef)> {
                     ds.iter()
                         .map(|&(t, dtr)| {
-                            let t = inst(c, t, gens);
+                            let t = instantiate_ty(c, t, gens);
                             (t, dtr.subst_params(&mut c.arena, &|q| gens.iter().position(|&g| g == q).map(|i| args[i])))
                         })
                         .collect()
                 };
                 match &def.kind {
-                    TypeDefKind::Struct { fields } => match self.init_method(Ctor::Def(d)).filter(|_| decode) {
+                    TypeDefKind::Struct { fields } => match self.init_method(Ctor::Def(d)).filter(|_| is_decode) {
                         Some(init) => {
-                            let fi = self.fns[init as usize].clone();
-                            if fi.generics.len() != def.generics.len() {
+                            let init_fn = self.fns[init as usize].clone();
+                            if init_fn.generics.len() != def.generics.len() {
                                 return None;
                             }
-                            for p in &fi.params {
-                                let t = inst(self, p.ty, &fi.generics);
+                            for p in &init_fn.params {
+                                let t = instantiate_ty(self, p.ty, &init_fn.generics);
                                 codec.parts.push((t, tr));
                                 codec.fills.push(match &p.default {
                                     Some(DefaultArg::Helper(h)) => {
-                                        let helper = self.fns[*h as usize].dicts.clone();
-                                        CodecFill::Helper(*h, dicts(self, &helper, &fi.generics))
+                                        let helper_dicts = self.fns[*h as usize].dicts.clone();
+                                        CodecFill::Helper(*h, instantiate_dicts(self, &helper_dicts, &init_fn.generics))
                                     }
                                     Some(DefaultArg::Inline(e)) => closed_const(e).map_or(CodecFill::Required, CodecFill::Const),
                                     None => CodecFill::Required,
                                 });
                             }
-                            codec.init = Some((init, dicts(self, &fi.dicts, &fi.generics)));
+                            codec.init = Some((init, instantiate_dicts(self, &init_fn.dicts, &init_fn.generics)));
                         }
                         None => {
                             for f in fields {
-                                let t = inst(self, f.ty, &def.generics);
+                                let t = instantiate_ty(self, f.ty, &def.generics);
                                 codec.parts.push((t, tr));
-                                if decode {
+                                if is_decode {
                                     codec.fills.push(match f.default {
                                         Some(h) => {
-                                            let helper = self.fns[h as usize].dicts.clone();
-                                            CodecFill::Helper(h, dicts(self, &helper, &def.generics))
+                                            let helper_dicts = self.fns[h as usize].dicts.clone();
+                                            CodecFill::Helper(h, instantiate_dicts(self, &helper_dicts, &def.generics))
                                         }
                                         None => CodecFill::Required,
                                     });
@@ -510,7 +508,7 @@ impl Checker {
                     TypeDefKind::Enum { variants } => {
                         for v in variants {
                             for &t in &v.fields {
-                                let t = inst(self, t, &def.generics);
+                                let t = instantiate_ty(self, t, &def.generics);
                                 codec.parts.push((t, tr));
                             }
                         }
@@ -525,12 +523,12 @@ impl Checker {
     }
 }
 
-/// Returns `true` if `imp` implements `Encode` or `Decode` using the trait's
+/// Returns `true` if `imp` implements `Encode` or `Decode` with the trait's
 /// native default method.
 pub(crate) fn is_structural_codec_impl(traits: &PVec<TraitDef>, imp: &ImplDef) -> bool {
-    let td = &traits[imp.trait_ref.trait_id as usize];
-    matches!(td.builtin, Some(Builtin::Encode | Builtin::Decode))
-        && td.methods.first().and_then(|m| m.default) == imp.slots.first().copied()
+    let trait_def = &traits[imp.trait_ref.trait_id as usize];
+    matches!(trait_def.builtin, Some(Builtin::Encode | Builtin::Decode))
+        && trait_def.methods.first().and_then(|m| m.default) == imp.slots.first().copied()
 }
 
 fn dict_expr(kind: HKind) -> HExpr {

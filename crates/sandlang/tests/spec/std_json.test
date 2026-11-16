@@ -338,7 +338,7 @@ print(d)
 [Write: 2]
 [2024-02-29: 1]
 
-=== encoding and decoding reject unsupported map keys
+=== json.encode and json.decode reject unsupported map keys
 import json
 let empty: [(int, int): str] = json.decode("{}")?
 print(empty)
@@ -777,7 +777,7 @@ Ok([1, 2])
 Ok("a")
 Ok([true])
 
-=== taking a Decode-bounded function as a value requires a known type argument
+=== a Decode-bounded function value requires a known type argument
 fn size<T: Decode>(x: int) -> int { x }
 let f = size
 --- error

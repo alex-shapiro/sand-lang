@@ -12,8 +12,8 @@
 //! dictionary ([`TraitDef::has_dict`]).
 //!
 //! A type satisfies a trait bound through a type parameter bound, an `impl`
-//! block, or an implementation of `Eq`, `Ord`, `Hash`, or `Encode` derived from
-//! the type's components (`derive.rs`).
+//! block, or an implementation of `Eq`, `Ord`, or `Hash` derived from the
+//! type's components.
 //!
 //! Generic calls emit [`HKind::Evidence`] placeholders during expression
 //! checking. After type inference completes for the enclosing function, the
@@ -66,14 +66,14 @@ pub struct ImplDef {
     /// have runtime dictionaries are stored after supertrait dictionaries in
     /// the `impl` dictionary.
     pub evidence: Vec<(TypeId, TraitRef)>,
-    /// `true` if a later REPL input replaced this implementation or if
-    /// structural codec derivation rejected it.
+    /// Indicates whether a later REPL input replaced this implementation or
+    /// structural codec derivation removed it.
     pub replaced: bool,
-    /// Resolved part dictionaries for a structural codec implementation. See
-    /// [`Checker::is_structural_impl`].
+    /// Resolved codec metadata for a structural implementation. See
+    /// [`Checker::is_structural_codec_impl`].
     pub codec: Option<Arc<super::codec::CodecImpl>>,
-    /// `true` if the checker generated this implementation without an `impl`
-    /// block.
+    /// Indicates whether the checker generated this implementation without an
+    /// `impl` block.
     pub derived: bool,
 }
 
@@ -133,7 +133,7 @@ pub(crate) fn impl_key(arena: &TypeArena, t: TypeId) -> Option<(Ctor, u32)> {
     }
 }
 
-/// Maximum recursion depth for resolving nested trait bounds.
+/// Maximum recursion depth in [`Checker::resolve_evidence`].
 const MAX_EVIDENCE_DEPTH: u32 = 512;
 
 fn dict_expr(kind: HKind, span: Span) -> HExpr {
@@ -487,32 +487,33 @@ impl Checker {
         self.traits[id as usize].methods = methods;
     }
 
-    /// Declares native default method `m` for trait `id` using signature `sig`.
+    /// Declares native default method `method` for trait `trait_id` with
+    /// signature `sig_fn`.
     ///
     /// The registered Rust function must accept only the `Self` dictionary
     /// before its value parameters.
-    fn native_default_method(&mut self, id: TraitId, sig: FnId, m: &ast::FnDecl) -> Option<FnId> {
+    fn native_default_method(&mut self, trait_id: TraitId, sig_fn: FnId, method: &ast::FnDecl) -> Option<FnId> {
         if !self.allows_native() {
-            self.error(m.name.span, "native functions can only be declared by native modules");
+            self.error(method.name.span, "native functions can only be declared by native modules");
             return None;
         }
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
-        let key = format!("{module}.{}.{}", self.name(self.traits[id as usize].name), m.name.name);
+        let key = format!("{module}.{}.{}", self.name(self.traits[trait_id as usize].name), method.name.name);
         let Some(decl) = self.natives.get(&key).cloned() else {
-            self.error(m.name.span, format!("no native implementation registered for `{key}`"));
+            self.error(method.name.span, format!("no native implementation registered for `{key}`"));
             return None;
         };
-        let mut fi = self.fns[sig as usize].clone();
-        let accepted_dicts = self.check_native_signature(m, &key, &decl.sig, &fi.generics, &fi.params, fi.ret);
-        let self_index = self.traits[id as usize].generics.len() as u8;
-        let builtin = self.traits[id as usize].builtin;
-        if fi.dicts.len() != 1 || accepted_dicts.len() != 1 || Some(accepted_dicts[0]) != builtin.map(|b| (self_index, b)) {
-            self.error(m.name.span, format!("the Rust function of native `{key}` must take only the dictionary of `Self`"));
+        let mut fn_info = self.fns[sig_fn as usize].clone();
+        let accepted_dicts = self.check_native_signature(method, &key, &decl.sig, &fn_info.generics, &fn_info.params, fn_info.ret);
+        let self_index = self.traits[trait_id as usize].generics.len() as u8;
+        let builtin = self.traits[trait_id as usize].builtin;
+        if fn_info.dicts.len() != 1 || accepted_dicts.len() != 1 || Some(accepted_dicts[0]) != builtin.map(|b| (self_index, b)) {
+            self.error(method.name.span, format!("the Rust function of native `{key}` must take only the dictionary of `Self`"));
         }
-        fi.kind = FnKind::Native(decl.id);
-        fi.decl = None;
-        fi.trait_of = None;
-        Some(self.add_fn(fi))
+        fn_info.kind = FnKind::Native(decl.id);
+        fn_info.decl = None;
+        fn_info.trait_of = None;
+        Some(self.add_fn(fn_info))
     }
 
     // ------------------------------------------------------------------
@@ -938,8 +939,8 @@ impl Checker {
             params.push(l);
             args.push(HArg::Expr(mk(HKind::Local(l), t, span)));
         }
-        let k = args.len() - inst.params.len();
-        self.encode_native_args(f, &inst.params, &mut args[k..], span);
+        let first_value_arg = args.len() - inst.params.len();
+        self.encode_native_args(f, &inst.params, &mut args[first_value_arg..], span);
         let name = self.fns[f as usize].runtime_name(&self.types, &self.syms);
         let body = mk(self.call_kind(f, inst.fresh, args), inst.ret, span);
         let lam = HLambda { id, name, params, dicts: vec![], body, self_local: None };
@@ -1077,10 +1078,10 @@ impl Checker {
         out
     }
 
-    /// Returns `true` if dictionary expression `e` references a local owned by
-    /// a lambda.
-    pub(crate) fn reads_lambda_local(&self, e: &HExpr) -> bool {
-        match &e.kind {
+    /// Returns `true` if dictionary expression `expr` reads a local owned by a
+    /// lambda.
+    pub(crate) fn reads_lambda_local(&self, expr: &HExpr) -> bool {
+        match &expr.kind {
             HKind::Dict { args, .. } => args.iter().any(|a| self.reads_lambda_local(a)),
             HKind::Field { obj, .. } => self.reads_lambda_local(obj),
             HKind::Local(l) => self.fs.locals[*l as usize].owner != 0,
@@ -1088,8 +1089,11 @@ impl Checker {
         }
     }
 
-    /// Hoists non-constant dictionary expressions into entry-block locals and
-    /// deduplicates identical dictionaries.
+    /// Hoists non-constant dictionary expression `e` into a function-entry
+    /// local.
+    ///
+    /// Reuses the existing local if `hoisted` already contains an identical
+    /// dictionary.
     pub(crate) fn hoist_dict(&mut self, e: &mut HExpr, hoisted: &mut Vec<(LocalId, HExpr)>) {
         if let HKind::Dict { args, .. } = &mut e.kind {
             for a in args.iter_mut() {

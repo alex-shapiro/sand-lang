@@ -503,11 +503,12 @@ impl Symbols {
 
 macro_rules! builtins {
     ($($name:ident),*) => {
-        /// A prelude trait implemented by the VM (`Eq`, `Ord`, `Hash`, `Encode`,
-        /// `Decode`, or `Num`).
+        /// A prelude trait with VM support.
         ///
-        /// The prelude implements `Num` for `int` and `float`; the checker
-        /// automatically derives the remaining built-in traits from type structure.
+        /// The checker derives `Eq`, `Ord`, and `Hash` directly from type
+        /// structure. The prelude declares native default methods on `Encode`
+        /// and `Decode` for structural implementations. The prelude implements
+        /// `Num` for `int` and `float`.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Builtin {
             $($name),*
@@ -545,8 +546,8 @@ macro_rules! builtins {
 
             /// Marker for a single built-in trait.
             ///
-            /// [`TraitDict`](crate::native::ty::TraitDict) uses this trait to
-            /// select a dictionary parameter.
+            /// [`TraitDict`](crate::native::ty::TraitDict) accepts a `Single`
+            /// marker to select a runtime dictionary parameter.
             pub trait Single: Set {
                 const BUILTIN: Builtin;
             }
@@ -574,10 +575,10 @@ impl Builtin {
         Builtin::ALL.iter().copied().find(|b| b.name() == s)
     }
 
-    /// Returns `true` if the checker verifies `self` from the structure of a
-    /// type without a runtime dictionary.
+    /// Returns `true` if `self` is `Eq`, `Ord`, or `Hash`.
     ///
-    /// This applies to `Eq`, `Ord`, and `Hash`.
+    /// The checker derives these traits directly from type structure without
+    /// runtime dictionaries.
     pub fn is_derived(self) -> bool {
         matches!(self, Builtin::Eq | Builtin::Ord | Builtin::Hash)
     }
@@ -746,7 +747,7 @@ pub struct TypeDef {
     pub doc: Option<Arc<str>>,
     pub span: Span,
     /// Codec traits declared on a native type, or `None` for a Sand type.
-    pub codecs: Option<crate::native::codec::NativeCodecs>,
+    pub native_codecs: Option<crate::native::codec::NativeCodecs>,
 }
 
 impl TypeDef {

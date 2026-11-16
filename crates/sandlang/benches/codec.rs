@@ -3,11 +3,11 @@
 //! `cargo bench --bench codec` reports the fastest time per operation across
 //! `BENCH_RUNS` engine runs. The default is 3 runs. The harness runs each
 //! operation in a fresh `Engine`. Each run executes the operation `BENCH_REPS`
-//! times and keeps the fastest repetition. The default is 5 repetitions. The
+//! times. It keeps the fastest repetition. The default is 5 repetitions. The
 //! test document contains `BENCH_USERS` users. The default user count is 5000.
 //! Set `BENCH_OPS=encode,decode` to run a subset of operations.
 //!
-//! `cargo test --benches` runs each benchmark once and checks its output.
+//! `cargo test --benches` runs each benchmark once to check its output.
 
 use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
 use sandlang::native::NativeModule;
@@ -15,8 +15,9 @@ use sandlang::native::ty::Encoded;
 use sandlang::stdlib::json::Json;
 use sandlang::value::Value;
 
-/// Declares the benchmark document types and `make(n)`, which builds a document
-/// with `n` users.
+/// Benchmark document types and generator function.
+///
+/// `make(n)` builds a `Doc` with `n` users.
 const PRELUDE: &str = r#"import json
 import time
 import host
@@ -169,7 +170,9 @@ const OPERATIONS: &[Operation] = &[
     },
 ];
 
-/// Times the closure `operation` and prints `ns_per_item check`.
+/// Times the closure `operation`.
+///
+/// Prints `ns_per_item check`.
 const TIMING: &str = r#"
 var best = -1
 var check = 0
@@ -206,7 +209,7 @@ fn host_modules() -> HostModules {
     host.source("pub native fn copied_fields<T: Encode>(value: T) -> int");
     host.function("copied_fields", |value: Encoded<0>| -> i64 {
         match value.value() {
-            Value::Struct(value) => value.fields.len() as i64,
+            Value::Struct(struct_val) => struct_val.fields.len() as i64,
             _ => 0,
         }
     });

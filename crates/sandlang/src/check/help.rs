@@ -724,12 +724,12 @@ impl Checker {
         section(out, "Implements", &traits);
     }
 
-    /// Formats the `where` bounds of implementation `impl_id` that are not
-    /// already declared on its target type.
+    /// Formats the extra `where` bounds of implementation `impl_id` beyond the
+    /// bounds declared on its target type.
     fn impl_wheres(&self, impl_id: ImplId) -> Vec<String> {
         let imp = &self.impls[impl_id as usize];
         let hash = self.builtin_trait(Builtin::Hash);
-        let declared = |t: TypeId, tr: &TraitRef| match self.arena.get(imp.target) {
+        let is_declared = |t: TypeId, tr: &TraitRef| match self.arena.get(imp.target) {
             Ty::Named(d, args) => self.arena.list(args).iter().position(|&a| a == t).is_some_and(|k| {
                 let p = self.types[d as usize].generics[k];
                 self.params[p as usize].traits.contains(tr)
@@ -739,7 +739,7 @@ impl Checker {
         };
         imp.evidence
             .iter()
-            .filter(|(t, tr)| !declared(*t, tr))
+            .filter(|(t, tr)| !is_declared(*t, tr))
             .map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr)))
             .collect()
     }

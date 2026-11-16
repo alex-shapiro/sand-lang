@@ -788,8 +788,8 @@ fn dictionaries_of_polymorphic_recursion_share_their_parts() {
                   let m: Result<[A: int]> = json.decode(\"{\\\"k\\\": 1}\")\n        let p: Result<P<A>> = json.decode(\"{\\\"v\\\": 1}\")\n        \
                   print(m)\n        print(p)\n        return 0\n    }\n    let x: (A, A)? = None\n    grow(n - 1, x)\n}\nlet a: int? = None\nprint(grow(200, a))";
     let start = Instant::now();
-    let (r, out) = run(Config::new(), shared);
-    r.unwrap();
+    let (result, out) = run(Config::new(), shared);
+    result.unwrap();
     assert!(start.elapsed() < Duration::from_secs(10), "took {:?}", start.elapsed());
     assert_eq!(
         out,
@@ -803,8 +803,8 @@ fn shared_dictionary_parts_are_counted_once() {
     let src = "import json\nstruct P<A, B> { a: A, b: B }\nfn deep<A: Decode, B: Decode>(n: int, x: [A], y: [B]) -> int {\n    \
                if n == 0 {\n        let r: Result<[(A, B)]> = json.decode(\"[]\")\n        return if r.is_ok() { 0 } else { -1 }\n    }\n    \
                let w: [P<A, B>] = []\n    deep(n - 1, w, w) + 1\n}\nlet w: [int] = []\nprint(deep(200, w, w))";
-    let (r, out) = run(limits(|l| l.max_memory = Some(16 << 20)), src);
-    r.unwrap();
+    let (result, out) = run(limits(|l| l.max_memory = Some(16 << 20)), src);
+    result.unwrap();
     assert_eq!(out, "200\n");
 }
 
@@ -1272,8 +1272,8 @@ fn a_value_of_each_kind_leaves_the_vm_for_pinned_fuel() {
     let run_stressed = |gc_stress: bool, retry_stress: bool| {
         let config = Config::new().clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())));
         let config = config.host_modules(HostModules::new([fuel_probe()]).unwrap()).gc_stress(gc_stress).retry_stress(retry_stress);
-        let (r, out) = run(config, VALUE_OF_EACH_KIND);
-        assert!(r.is_ok(), "{r:?}");
+        let (result, out) = run(config, VALUE_OF_EACH_KIND);
+        assert!(result.is_ok(), "{result:?}");
         out
     };
     let plain = run_stressed(false, false);
@@ -1298,8 +1298,8 @@ fn to_value_takes_each_type_description_from_the_program() {
          host.copy({long}({long}: 2))\nhost.copy(Status.{long}({long}: 2))\n\
          print((long - short == short - start, payload - tag == short - start))"
     );
-    let (r, out) = run(Config::new().host_modules(HostModules::new([host, fuel_probe()]).unwrap()), &src);
-    assert!(r.is_ok(), "{r:?}");
+    let (result, out) = run(Config::new().host_modules(HostModules::new([host, fuel_probe()]).unwrap()), &src);
+    assert!(result.is_ok(), "{result:?}");
     assert_eq!(out, "(true, true)\n");
     let copies = copies.lock().unwrap();
     let (Value::Struct(first), Value::Struct(second)) = (&copies[1], &copies[4]) else { panic!("{copies:?}") };

@@ -15,7 +15,7 @@ enum Ty {
     UnitEnum,
     Rec,
     Keyed,
-    /// `struct Valid { a: int }` with an `init` constructor called during decoding.
+    /// `struct Valid { a: int }`. Declares an `init` constructor.
     Valid,
     Fn,
     Task,
@@ -27,7 +27,7 @@ enum Ty {
     Tuple(Vec<Ty>),
     Wrap(Box<Ty>),
     Tree(Box<Ty>),
-    /// `struct Bag<T> { s: Set<T> }` requiring `T: Hash`.
+    /// `struct Bag<T> { s: Set<T> }`. Requires `T: Hash`.
     Bag(Box<Ty>),
     Param,
 }
@@ -142,8 +142,10 @@ fn ty() -> impl Strategy<Value = Ty> {
     ty_with(0, 1)
 }
 
-/// Generates types with type parameter `T` weighted by `param` and invalid leaf
-/// or container types weighted by `bad`.
+/// Generates random types for `Decode` checks.
+///
+/// `param` weights occurrences of type parameter `T`. `bad` weights types
+/// without `Decode` or `Hash`.
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
@@ -221,12 +223,13 @@ proptest! {
                 prop_assert!(ds.iter().all(|d| trait_of(d).is_some()), "{ds:?}\n{src}");
                 // The checker stops at the first unsatisfied bound on an `impl` block.
                 // Either missing trait diagnostic can therefore suppress the other.
-                let (decode, hash) = (ds.iter().any(|d| trait_of(d) == Some(true)), ds.iter().any(|d| trait_of(d) == Some(false)));
+                let (missing_decode, missing_hash) =
+                    (ds.iter().any(|d| trait_of(d) == Some(true)), ds.iter().any(|d| trait_of(d) == Some(false)));
                 if t.well_formed() {
-                    prop_assert!(decode && !hash, "{:?}\n{}", ds, src);
+                    prop_assert!(missing_decode && !missing_hash, "{:?}\n{}", ds, src);
                 }
                 if t.decodable() {
-                    prop_assert!(hash && !decode, "{:?}\n{}", ds, src);
+                    prop_assert!(missing_hash && !missing_decode, "{:?}\n{}", ds, src);
                 }
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }

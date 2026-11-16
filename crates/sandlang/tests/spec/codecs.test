@@ -202,7 +202,7 @@ let e: Email = json.decode("{\"raw\": \"B\"}").unwrap()
 10: Wrapper<str> does not implement `Encode`
 11: Email does not implement `Encode` because the parameters of `Email.init` differ from its fields
 
-=== decoding evaluates init parameter defaults using earlier parameters
+=== json.decode evaluates init parameter defaults from earlier parameters
 import json
 struct Span {
     lo: int
@@ -282,7 +282,7 @@ print(json.encode(chain(513)))
 499
 Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))
 
-=== encoding fails if an encode method returns while a spawned write is still running
+=== json.encode fails if an encode method returns before a spawned write finishes
 import json
 struct Slow { n: int }
 impl Encode for Slow {
@@ -309,7 +309,7 @@ print("after")
 Err(Error(message: "an `encode` method returned before its write ended", kind: "invalid"))
 after
 
-=== decoding fails if a decode method returns while a spawned read is still running
+=== json.decode fails if a decode method returns before a spawned read finishes
 import json
 struct Slow { n: int }
 impl Decode for Slow {

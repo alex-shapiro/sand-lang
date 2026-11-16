@@ -64,8 +64,8 @@ struct Compiler<'a> {
     /// Index in `Program::codec_shapes` for each structural codec
     /// implementation.
     codec_shapes: PMap<ImplId, u32>,
-    /// Structural codec implementations with reserved shape indices awaiting
-    /// lowering.
+    /// Structural codec `(impl_id, shape_idx)` pairs queued for
+    /// [`Compiler::lower_codec_shapes`].
     pending_codec_shapes: Vec<(ImplId, u32)>,
     errors: Vec<Diag>,
     recv_native: Option<u32>,
@@ -752,9 +752,11 @@ enum Stub {
 }
 
 impl<'a> Compiler<'a> {
-    /// Interns constant `k` in `Program::consts` and returns its index.
+    /// Returns the `Program::consts` index of `k`.
     ///
-    /// Trait dictionary tuples use [`Compiler::dict_consts`] instead.
+    /// Deduplicates non-tuple constants in `self.consts`.
+    /// [`Compiler::const_dict`] deduplicates constant dictionary tuples in
+    /// [`Compiler::dict_consts`].
     fn const_idx(&mut self, k: Const) -> u32 {
         let next = self.prog.consts.len() as u32;
         let t = &mut self.consts;
@@ -2220,14 +2222,14 @@ impl<'a> Compiler<'a> {
                     return;
                 }
                 let mark = f.next_reg;
-                let heads = self.dict_header_consts(*impl_id);
-                let n = heads.len() + args.len();
+                let header_consts = self.dict_header_consts(*impl_id);
+                let n = header_consts.len() + args.len();
                 let start = self.alloc_n(f, n);
-                for (i, &k) in heads.iter().enumerate() {
+                for (i, &k) in header_consts.iter().enumerate() {
                     self.emit(f, Op::LoadConst { dst: start + i as Reg, k });
                 }
                 for (i, a) in args.iter().enumerate() {
-                    self.expr_to(f, a, start + (heads.len() + i) as Reg);
+                    self.expr_to(f, a, start + (header_consts.len() + i) as Reg);
                 }
                 self.emit(f, Op::NewTuple { dst, start, count: n as u16 });
                 f.next_reg = mark;
@@ -2716,32 +2718,33 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Returns the leading constant pool indices for the dictionary of
+    /// Returns the leading constant-pool indices for the dictionary of
     /// `impl_id`.
     ///
-    /// These constants store the trait method functions followed by the shape
-    /// index for a structural codec implementation.
+    /// Includes each method function constant, followed by the codec shape
+    /// index if `impl_id` is structural.
     fn dict_header_consts(&mut self, impl_id: ImplId) -> Vec<u32> {
         let slots = self.cp.impls[impl_id as usize].slots.clone();
-        let mut heads: Vec<u32> = slots.iter().map(|&fid| self.fn_const(fid)).collect();
-        if self.cp.is_structural_impl(impl_id) {
-            debug_assert_eq!(heads.len(), crate::vm::bytecode::CODEC_SHAPE_SLOT);
-            let shape = self.codec_shape_idx(impl_id);
-            heads.push(self.const_idx(Const::Int(i64::from(shape))));
+        let mut header_consts: Vec<u32> = slots.iter().map(|&fid| self.fn_const(fid)).collect();
+        if self.cp.is_structural_codec_impl(impl_id) {
+            debug_assert_eq!(header_consts.len(), crate::vm::bytecode::CODEC_SHAPE_SLOT);
+            let shape_idx = self.codec_shape_idx(impl_id);
+            header_consts.push(self.const_idx(Const::Int(i64::from(shape_idx))));
         }
-        heads
+        header_consts
     }
 
-    /// Allocates or looks up the `Program::codec_shapes` index for structural
-    /// implementation `impl_id`.
+    /// Returns the `Program::codec_shapes` index for structural implementation
+    /// `impl_id`.
     ///
-    /// [`Compiler::lower_codec_shapes`] populates the shape later to break
-    /// cycles across recursive types.
+    /// Reserves a placeholder slot on first access to break cycles across
+    /// recursive types. [`Compiler::lower_codec_shapes`] populates the slot
+    /// afterward.
     fn codec_shape_idx(&mut self, impl_id: ImplId) -> u32 {
-        if let Some(&s) = self.codec_shapes.get(&impl_id) {
-            return s;
+        if let Some(&shape_idx) = self.codec_shapes.get(&impl_id) {
+            return shape_idx;
         }
-        let s = self.prog.codec_shapes.len() as u32;
+        let shape_idx = self.prog.codec_shapes.len() as u32;
         self.prog.codec_shapes.push(CodecShape {
             kind: ShapeKind::Never,
             parts: Vec::new(),
@@ -2749,23 +2752,23 @@ impl<'a> Compiler<'a> {
             init: None,
             slot_index: None,
         });
-        self.codec_shapes.insert(impl_id, s);
-        self.pending_codec_shapes.push((impl_id, s));
-        s
+        self.codec_shapes.insert(impl_id, shape_idx);
+        self.pending_codec_shapes.push((impl_id, shape_idx));
+        shape_idx
     }
 
     /// Populates every pending shape queued by [`Compiler::codec_shape_idx`].
     fn lower_codec_shapes(&mut self) {
-        while let Some((impl_id, s)) = self.pending_codec_shapes.pop() {
+        while let Some((impl_id, shape_idx)) = self.pending_codec_shapes.pop() {
             let shape = self.lower_codec_shape(impl_id);
-            self.prog.codec_shapes[s as usize] = shape;
+            self.prog.codec_shapes[shape_idx as usize] = shape;
         }
     }
 
     fn lower_codec_shape(&mut self, impl_id: ImplId) -> CodecShape {
         let cp = self.cp;
         let imp = &cp.impls[impl_id as usize];
-        let decode = cp.traits[imp.trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
+        let is_decode = cp.traits[imp.trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
         let codec: &'a CodecImpl = match imp.codec.as_deref() {
             Some(c) => c,
             None => {
@@ -2773,7 +2776,7 @@ impl<'a> Compiler<'a> {
                 return CodecShape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None, slot_index: None };
             }
         };
-        let parts = codec.parts.iter().map(|e| self.part_template(e)).collect();
+        let parts = codec.parts.iter().map(|dict_expr| self.part_template(dict_expr)).collect();
         let kind = match cp.arena.get(imp.target) {
             Ty::Never => ShapeKind::Never,
             Ty::Unit => ShapeKind::Unit,
@@ -2788,18 +2791,18 @@ impl<'a> Compiler<'a> {
             Ty::Set(_) => ShapeKind::Set,
             Ty::Map(..) => ShapeKind::Map,
             Ty::Tuple(_) => ShapeKind::Tuple,
-            Ty::Named(d, _) => {
-                let def = &cp.types[d as usize];
-                match (def.codecs, &def.kind) {
-                    (Some(NativeCodecs { encode: Some(NativeCodec::Manual(f)), .. }), _) if !decode => ShapeKind::ManualEncode(f),
-                    (Some(NativeCodecs { decode: Some(NativeCodec::Manual(f)), .. }), _) if decode => ShapeKind::ManualDecode(f),
-                    _ if d == cp.wk.option => ShapeKind::Option,
-                    (_, TypeDefKind::Opaque(Opaque::Value(info))) => ShapeKind::Native(d, info.parse),
+            Ty::Named(def_id, _) => {
+                let def = &cp.types[def_id as usize];
+                match (def.native_codecs, &def.kind) {
+                    (Some(NativeCodecs { encode: Some(NativeCodec::Manual(f)), .. }), _) if !is_decode => ShapeKind::ManualEncode(f),
+                    (Some(NativeCodecs { decode: Some(NativeCodec::Manual(f)), .. }), _) if is_decode => ShapeKind::ManualDecode(f),
+                    _ if def_id == cp.wk.option => ShapeKind::Option,
+                    (_, TypeDefKind::Opaque(Opaque::Value(info))) => ShapeKind::Native(def_id, info.parse),
                     (_, TypeDefKind::Enum { .. }) => {
-                        let first = self.prog.variants.iter().position(|v| v.def == d).unwrap_or(0) as u32;
-                        ShapeKind::Enum { def: d, first }
+                        let first_variant = self.prog.variants.iter().position(|v| v.def == def_id).unwrap_or(0) as u32;
+                        ShapeKind::Enum { def: def_id, first_variant }
                     }
-                    _ => ShapeKind::Struct(d),
+                    _ => ShapeKind::Struct(def_id),
                 }
             }
             _ => {
@@ -2808,8 +2811,8 @@ impl<'a> Compiler<'a> {
             }
         };
         let field_consts: Vec<Option<&crate::types::ConstVal>> = match &kind {
-            ShapeKind::Struct(d) if codec.init.is_none() => {
-                cp.types[*d as usize].fields().iter().map(|f| f.const_default.as_deref()).collect()
+            ShapeKind::Struct(def_id) if codec.init.is_none() => {
+                cp.types[*def_id as usize].fields().iter().map(|f| f.const_default.as_deref()).collect()
             }
             _ => Vec::new(),
         };
@@ -2820,33 +2823,36 @@ impl<'a> Compiler<'a> {
             .map(|(i, fill)| match (field_consts.get(i).copied().flatten(), fill) {
                 (Some(c), _) | (None, CodecFill::Const(c)) => DecodeFill::Const(c.clone()),
                 (None, CodecFill::Helper(helper, dicts)) => {
-                    let dicts = dicts.iter().map(|e| self.part_template(e)).collect();
+                    let dicts = dicts.iter().map(|dict_expr| self.part_template(dict_expr)).collect();
                     DecodeFill::Call(self.fn_const(*helper), dicts)
                 }
                 (None, CodecFill::Required) => DecodeFill::Required,
             })
             .collect();
         let init = codec.init.as_ref().map(|(func, dicts)| {
-            let dicts = dicts.iter().map(|e| self.part_template(e)).collect();
+            let dicts = dicts.iter().map(|dict_expr| self.part_template(dict_expr)).collect();
             let names = cp.fns[*func as usize].params.iter().map(|p| cp.name(p.name).to_string()).collect();
             InitCall { func: self.fn_const(*func), dicts, names }
         });
-        let names: Vec<String> = match (&kind, &init) {
+        let slot_names: Vec<String> = match (&kind, &init) {
             (ShapeKind::Struct(_), Some(init)) => init.names.to_vec(),
-            (ShapeKind::Struct(d), None) if decode => cp.types[*d as usize].fields().iter().map(|f| cp.name(f.name).to_string()).collect(),
+            (ShapeKind::Struct(def_id), None) if is_decode => {
+                cp.types[*def_id as usize].fields().iter().map(|f| cp.name(f.name).to_string()).collect()
+            }
             _ => Vec::new(),
         };
-        let slot_index = (names.len() > INDEXED_SLOTS).then(|| names.into_iter().enumerate().map(|(i, n)| (n, i as u32)).collect());
+        let slot_index =
+            (slot_names.len() > MAX_SCANNED_SLOTS).then(|| slot_names.into_iter().enumerate().map(|(i, n)| (n, i as u32)).collect());
         CodecShape { kind, parts, fills, init, slot_index }
     }
 
-    /// Lowers part dictionary expression `e` into a [`PartTemplate`] relative
-    /// to the outer dictionary.
-    fn part_template(&mut self, e: &'a HExpr) -> PartTemplate {
-        if let Some(k) = self.const_dict(e) {
+    /// Lowers `dict_expr` into a [`PartTemplate`] relative to the outer codec
+    /// dictionary.
+    fn part_template(&mut self, dict_expr: &'a HExpr) -> PartTemplate {
+        if let Some(k) = self.const_dict(dict_expr) {
             return PartTemplate::Const(k);
         }
-        match &e.kind {
+        match &dict_expr.kind {
             HKind::Dict { impl_id, args } => {
                 let mut items: Vec<PartTemplate> = self.dict_header_consts(*impl_id).into_iter().map(PartTemplate::Const).collect();
                 items.extend(args.iter().map(|a| self.part_template(a)));
@@ -2857,7 +2863,7 @@ impl<'a> Compiler<'a> {
                 _ => PartTemplate::Field(Box::new(self.part_template(obj)), *index),
             },
             _ => {
-                self.errors.push(Diag::error(e.span, "internal error: a codec part has no dictionary"));
+                self.errors.push(Diag::error(dict_expr.span, "internal error: a codec part has no dictionary"));
                 PartTemplate::Const(0)
             }
         }

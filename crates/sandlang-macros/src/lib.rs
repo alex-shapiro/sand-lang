@@ -1,25 +1,25 @@
 //! Derive macros that bind Rust types to Sand types.
 //!
-//! Every derived type requires `#[sand(module = "<module>")]`. Optional type
-//! attributes customize the binding:
+//! Place `#[sand(module = "<module>")]` on every derived type. The macros copy
+//! Rust doc comments into Sand documentation.
 //!
-//! - `#[sand(name = "<Name>")]` overrides the Sand type name.
-//! - `#[sand(private)]` marks the type private.
-//! - `#[sand(crate = <path>)]` overrides the `::sandlang` crate path.
-//! - `#[sand(manual_conversion)]` omits the `FromVmValue` and `IntoVmValue`
-//!   implementations.
-//! - `#[sand(no_value)]` omits the `ToValue` implementation for types whose
-//!   fields do not implement `ToValue`, such as `VmVal`.
-//! - `#[sand(encode)]` and `#[sand(decode)]` derive the Sand `Encode` and
-//!   `Decode` traits from the type's structure.
-//! - `#[sand(encode = "manual")]` and `#[sand(decode = "manual")]` delegate to
-//!   the Rust traits `native::codec::Encode` and `native::codec::Decode`.
+//! Each derive macro accepts optional `#[sand(...)]` attributes on the type:
 //!
-//! A type without `encode` or `decode` implements neither Sand codec trait.
-//! `SandObject` types support only `"manual"` codecs. Generic native types
-//! cannot implement `Encode` or `Decode`.
+//! - `name = "<Name>"`: the macro registers the type under `<Name>`.
+//! - `private`: the macro marks the Sand type private.
+//! - `crate = <path>`: the macro resolves `sandlang` items through `<path>`
+//!   instead of `::sandlang`.
+//! - `manual_conversion`: the macro omits `FromVmValue` and `IntoVmValue` on
+//!   `SandEnum` and `SandStruct`.
+//! - `no_value`: the macro omits `ToValue` on `SandEnum` and `SandStruct`.
+//! - `encode` and `decode`: the checker derives the Sand `Encode` and `Decode`
+//!   traits from the type's structure.
+//! - `encode = "manual"` and `decode = "manual"`: the macro delegates to the
+//!   Rust traits `native::codec::Encode` and `native::codec::Decode`.
 //!
-//! The macros copy Rust doc comments into Sand documentation.
+//! The macros omit Sand codec traits unless `encode` or `decode` is present.
+//! `SandObject` accepts only `encode = "manual"` and `decode = "manual"`. The
+//! macros reject `encode` and `decode` on generic types.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
@@ -32,13 +32,20 @@ use syn::{
     parse_macro_input, parse_quote,
 };
 
-/// Binds a Rust enum to a Sand enum.
+/// Derive macro that binds a Rust enum to a Sand enum.
 ///
-/// Implements `NamedType`, `EnumType`, `SandType`, `FromVmValue`,
-/// `IntoVmValue`, and `ToValue`. Supports unit, tuple, and struct variants on
-/// concrete and generic enums. Every payload type must implement `IntoVmValue`
-/// and owned `FromVmValue`. Payload types must also implement `ToValue` unless
-/// the enum has `#[sand(no_value)]`.
+/// `SandEnum` accepts unit, tuple, and struct variants on concrete or generic
+/// enums. The macro implements:
+///
+/// - `NamedType`, `EnumType`, and `SandType` for type registration.
+/// - `FromVmValue` and `IntoVmValue` for VM conversion, unless
+///   `#[sand(manual_conversion)]` is present.
+/// - `ToValue` for host value conversion, unless `#[sand(no_value)]` is
+///   present.
+///
+/// Every payload type must implement `IntoVmValue` and owned `FromVmValue`
+/// unless `#[sand(manual_conversion)]` is present. Payload types must also
+/// implement `ToValue` unless `#[sand(no_value)]` is present.
 ///
 /// Place `#[sand(name = "<name>")]` on a struct variant field to override its
 /// Sand field name.
@@ -47,45 +54,58 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     expand(input, sand_enum)
 }
 
-/// Binds a Rust struct to a Sand struct.
+/// Derive macro that binds a Rust struct to a Sand struct.
 ///
-/// Implements `NamedType`, `StructType`, `SandType`, `FromVmValue`,
-/// `IntoVmValue`, and `ToValue`. Rust type parameters become Sand type
-/// parameters. Every field type must implement `IntoVmValue` and owned
-/// `FromVmValue`. Field types must also implement `ToValue` unless the struct
-/// has `#[sand(no_value)]`.
+/// The macro maps each Rust type parameter to a Sand type parameter. The macro
+/// implements:
 ///
-/// Optional field attributes customize each field:
+/// - `NamedType`, `StructType`, and `SandType` for type registration.
+/// - `FromVmValue` and `IntoVmValue` for VM conversion, unless
+///   `#[sand(manual_conversion)]` is present.
+/// - `ToValue` for host value conversion, unless `#[sand(no_value)]` is
+///   present.
 ///
-/// - `#[sand(name = "<name>")]` overrides the Sand field name.
-/// - `#[sand(private)]` marks the field private.
-/// - `#[sand(var)]` marks the field mutable.
-/// - `#[sand(default)]` sets the field default from `Default::default()`.
-/// - `#[sand(default = <expr>)]` sets the field default from
-///   `Into::into(<expr>)`.
+/// Every field type must implement `IntoVmValue` and owned `FromVmValue` unless
+/// `#[sand(manual_conversion)]` is present. Field types must also implement
+/// `ToValue` unless `#[sand(no_value)]` is present.
 ///
-/// Each field default converts to a `Value` through `ToValue` and must form a
-/// valid Sand constant of the field type. Native value types cannot appear in
-/// field defaults. `HostModules::new` reports a compile error if a default is
-/// not a valid constant.
+/// The macro accepts optional `#[sand(...)]` attributes on named fields:
+///
+/// - `name = "<name>"`: the macro registers the field under `<name>`.
+/// - `private`: the macro marks the Sand field private.
+/// - `var`: the macro marks the Sand field mutable.
+/// - `default`: the macro evaluates `Default::default()` for the field default.
+/// - `default = <expr>`: the macro evaluates `Into::into(<expr>)` for the field
+///   default.
+///
+/// The macro converts each field default to a `Value` with `ToValue`.
+/// `HostModules::new` lowers that `Value` to a Sand constant of the field type.
+/// It reports an error if a default contains a native value type or another
+/// non-constant value.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
 }
 
-/// Binds a Rust type to an opaque Sand reference type.
+/// Derive macro that binds a Rust type to an opaque Sand reference type.
 ///
-/// Implements `NamedType`, `ObjectType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
-/// The type must implement `NativeObject`.
+/// The target type must implement `NativeObject`. The macro implements:
+///
+/// - `NamedType` and `ObjectType` for `Self`.
+/// - `SandType` for `Self` and `&Self`.
+/// - `FromVmValue` for `&Self` and `IntoVmValue` for `Self`.
 #[proc_macro_derive(SandObject, attributes(sand))]
 pub fn derive_sand_object(input: TokenStream) -> TokenStream {
     expand(input, sand_object)
 }
 
-/// Binds a Rust type to an opaque Sand value type.
+/// Derive macro that binds a Rust type to an opaque Sand value type.
 ///
-/// Implements `NamedType`, `SandType`, `FromVmValue`, `IntoVmValue`, and
-/// `ToValue`. The Rust type must implement `ValueType`.
+/// The target type must implement `ValueType`. The macro implements:
+///
+/// - `NamedType` and `SandType` for type registration.
+/// - `FromVmValue` and `IntoVmValue` for VM conversion.
+/// - `ToValue` for host value conversion.
 #[proc_macro_derive(SandValue, attributes(sand))]
 pub fn derive_sand_value(input: TokenStream) -> TokenStream {
     expand(input, sand_value)
@@ -104,18 +124,21 @@ struct TypeAttrs {
     doc: Tokens,
     manual_conversion: bool,
     no_value: bool,
-    /// `None` if unimplemented, `Some(false)` if structural, or `Some(true)` if
-    /// manual.
+    /// Codec mode for `Encode` and `Decode`:
+    ///
+    /// - `None`: the type does not implement the trait.
+    /// - `Some(false)`: the checker derives a structural implementation.
+    /// - `Some(true)`: a manual Rust codec implements the trait.
     encode: Option<bool>,
     decode: Option<bool>,
 }
 
-/// Parses `encode` or `decode` and returns `true` for `= "manual"`.
-fn parse_codec(meta: &syn::meta::ParseNestedMeta, derive: &str) -> syn::Result<bool> {
+/// Parses an `encode` or `decode` attribute and returns `true` for `= "manual"`.
+fn parse_codec_is_manual(meta: &syn::meta::ParseNestedMeta, derive: &str) -> syn::Result<bool> {
     if meta.input.peek(syn::Token![=]) {
-        let v: LitStr = meta.value()?.parse()?;
-        if v.value() != "manual" {
-            return Err(Error::new_spanned(v, "expected `\"manual\"`"));
+        let mode: LitStr = meta.value()?.parse()?;
+        if mode.value() != "manual" {
+            return Err(Error::new_spanned(mode, "expected `\"manual\"`"));
         }
         return Ok(true);
     }
@@ -145,9 +168,9 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
             } else if meta.path.is_ident("crate") {
                 krate = meta.value()?.parse()?;
             } else if meta.path.is_ident("encode") {
-                encode = Some(parse_codec(&meta, derive)?);
+                encode = Some(parse_codec_is_manual(&meta, derive)?);
             } else if meta.path.is_ident("decode") {
-                decode = Some(parse_codec(&meta, derive)?);
+                decode = Some(parse_codec_is_manual(&meta, derive)?);
             } else if meta.path.is_ident("manual_conversion") && matches!(derive, "SandEnum" | "SandStruct") {
                 manual_conversion = true;
             } else if meta.path.is_ident("no_value") && matches!(derive, "SandEnum" | "SandStruct") {
@@ -292,13 +315,13 @@ fn reject_member_attrs(data: &Data) -> syn::Result<()> {
 
 fn expand_named_type(input: &DeriveInput, a: &TypeAttrs, type_params: &TypeParams, binding: Tokens) -> Tokens {
     let TypeAttrs { module, name, public, krate, doc, encode, decode, .. } = a;
-    let codec = |manual: Option<bool>, f: Tokens| match manual {
+    let codec_tokens = |manual: Option<bool>, f: Tokens| match manual {
         None => quote!(::std::option::Option::None),
         Some(false) => quote!(::std::option::Option::Some(#krate::native::codec::NativeCodec::Derived)),
         Some(true) => quote!(::std::option::Option::Some(#krate::native::codec::NativeCodec::Manual(#f))),
     };
-    let encode = codec(*encode, quote!(#krate::native::codec::manual_encode::<Self>));
-    let decode = codec(*decode, quote!(#krate::native::codec::manual_decode::<Self>));
+    let encode = codec_tokens(*encode, quote!(#krate::native::codec::manual_encode::<Self>));
+    let decode = codec_tokens(*decode, quote!(#krate::native::codec::manual_decode::<Self>));
     let binding = quote!(#binding.codecs(#krate::native::codec::NativeCodecs { encode: #encode, decode: #decode }));
     let ty = &input.ident;
     let check = assert_type_name(krate, "type", &name.value(), name.span());
@@ -346,24 +369,23 @@ fn expand_sand_type(input: &DeriveInput, krate: &Path, type_params: &TypeParams)
 
 /// Generic parameter lists and `where` clauses for generated trait
 /// implementations.
-struct ConversionGenerics {
+struct ImplGenerics {
     /// Generic parameters on each `impl` block.
     params: Tokens,
     /// Type arguments on the target type.
     args: Tokens,
-    /// `where` clause for `NamedType`, `SandType`, `EnumType`, and
-    /// `StructType`.
+    /// `where` clause for `EnumType` and `StructType`.
     type_where: Tokens,
     from_vm_value_where: Tokens,
     into_vm_value_where: Tokens,
     to_value_where: Tokens,
 }
 
-impl ConversionGenerics {
-    fn new(input: &DeriveInput, krate: &Path, type_params: &TypeParams) -> ConversionGenerics {
+impl ImplGenerics {
+    fn new(input: &DeriveInput, krate: &Path, type_params: &TypeParams) -> ImplGenerics {
         let (params, args, type_where) = type_params.split_for_impl(input, |_| quote!(#krate::native::ty::SandType));
         let where_clause = |bound: &dyn Fn(&Ident) -> Tokens| type_params.split_for_impl(input, bound).2;
-        ConversionGenerics {
+        ImplGenerics {
             params,
             args,
             type_where,
@@ -404,7 +426,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut indexes = Vec::new();
     let mut reads = Vec::new();
     let mut writes = Vec::new();
-    let mut to_values = Vec::new();
+    let mut to_value_arms = Vec::new();
     let mut checks = Vec::new();
     for (i, v) in data.variants.iter().enumerate() {
         let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), doc_expr(&v.attrs));
@@ -468,12 +490,12 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             false => quote!(move |vm| ::std::result::Result::Ok([#(#puts),*])),
         };
         writes.push(quote! { #pattern => #krate::native::variant_into_vm_value::<Self, _>(vm, #i, #write) });
-        to_values.push(quote! { #pattern => #krate::native::variant_to_value::<Self>(&SAND_VARIANT_DESCS, #i, [#(#krate::value::ToValue::to_value(#names)),*]) });
+        to_value_arms.push(quote! { #pattern => #krate::native::variant_to_value::<Self>(&SAND_VARIANT_DESCS, #i, [#(#krate::value::ToValue::to_value(#names)),*]) });
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
     let sand_type = expand_sand_type(input, krate, &type_params);
-    let ConversionGenerics { params, args, type_where, from_vm_value_where, into_vm_value_where, to_value_where } =
-        ConversionGenerics::new(input, krate, &type_params);
+    let ImplGenerics { params, args, type_where, from_vm_value_where, into_vm_value_where, to_value_where } =
+        ImplGenerics::new(input, krate, &type_params);
     let count = data.variants.len();
     let to_value_impl = (!attrs.no_value).then(|| {
         quote! {
@@ -482,7 +504,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                     static SAND_VARIANT_DESCS: [#krate::native::VariantDescCell; #count] =
                         [const { #krate::native::VariantDescCell::new() }; #count];
                     match self {
-                        #(#to_values),*
+                        #(#to_value_arms),*
                     }
                 }
             }
@@ -587,7 +609,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut reads = Vec::new();
     let mut writes = Vec::new();
     let mut names = Vec::new();
-    let mut to_values = Vec::new();
+    let mut field_to_values = Vec::new();
     let mut checks = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         let ident = f.ident.as_ref().expect("named field");
@@ -642,18 +664,18 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         });
         reads.push(quote! { #ident: #krate::native::field_from_vm_value::<#fty>(vm, fields[#i], conv)? });
         writes.push(quote! { #krate::native::convert::IntoVmValue::into_vm_value(self.#ident, vm)? });
-        to_values.push(quote! { #krate::value::ToValue::to_value(&self.#ident) });
+        field_to_values.push(quote! { #krate::value::ToValue::to_value(&self.#ident) });
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
     let sand_type = expand_sand_type(input, krate, &type_params);
-    let ConversionGenerics { params, args, type_where, from_vm_value_where, into_vm_value_where, to_value_where } =
-        ConversionGenerics::new(input, krate, &type_params);
+    let ImplGenerics { params, args, type_where, from_vm_value_where, into_vm_value_where, to_value_where } =
+        ImplGenerics::new(input, krate, &type_params);
     let to_value_impl = (!attrs.no_value).then(|| {
         quote! {
             impl #params #krate::value::ToValue for #ty #args #to_value_where {
                 fn to_value(&self) -> #krate::value::Value {
                     static SAND_STRUCT_DESC: #krate::native::StructDescCell = #krate::native::StructDescCell::new();
-                    #krate::native::struct_to_value::<Self>(&SAND_STRUCT_DESC, [#(#to_values),*])
+                    #krate::native::struct_to_value::<Self>(&SAND_STRUCT_DESC, [#(#field_to_values),*])
                 }
             }
         }

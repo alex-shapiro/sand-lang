@@ -1576,10 +1576,10 @@ struct Settings {
 
 #[test]
 fn rust_field_defaults_fill_constructions_and_decoded_json() {
-    let mut m = NativeModule::new("conf");
-    m.bind::<Settings>();
-    m.function("port", |s: Settings| s.port);
-    m.function("key", |s: Settings| s.key);
+    let mut module = NativeModule::new("conf");
+    module.bind::<Settings>();
+    module.function("port", |settings: Settings| settings.port);
+    module.function("key", |settings: Settings| settings.key);
     let src = r#"
 import conf
 import json
@@ -1591,12 +1591,12 @@ let d: conf.Settings = json.decode("{\"name\": \"c\", \"verbose\": true}")?
 print(d)
 help(conf.Settings)
 "#;
-    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), src);
-    r.unwrap();
-    let s = "Settings(name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\")";
-    let d = "Settings(name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\")";
+    let (result, out, _) = run_src(Config::new().host_modules(HostModules::new([module]).unwrap()), src);
+    result.unwrap();
+    let constructed = "Settings(name: \"a\", port: 8080, verbose: false, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\")";
+    let decoded = "Settings(name: \"c\", port: 8080, verbose: true, level: \"info\", timeout: 30s, tags: [:], parent: None, ratio: -0.5, log: Warn, key: b\"\")";
     let help = "struct conf.Settings\n\nSettings with defaults.\n\nFields:\n    name: str\n    port: int = 8080\n    verbose: bool = false\n    level: str = \"info\"\n    timeout: duration = 30s\n    tags: [str: str] = [:]\n    parent: Settings? = None\n    ratio: float = -0.5\n    log: Level = Level.Warn\n    key: bytes = b\"\"\n\nImplements:\n    Eq\n    Encode\n    Decode\n";
-    assert_eq!(out, format!("{s}\n1\nb\"\"\n{d}\n{help}"));
+    assert_eq!(out, format!("{constructed}\n1\nb\"\"\n{decoded}\n{help}"));
 }
 
 fn default_doc() -> sandlang::stdlib::json::Json {
@@ -1617,12 +1617,12 @@ struct Doc {
 
 #[test]
 fn rust_json_field_defaults_are_constants() {
-    let mut m = NativeModule::new("conf");
-    m.bind::<Doc>();
-    m.function("same", |d: Doc| d.body == default_doc());
+    let mut module = NativeModule::new("conf");
+    module.bind::<Doc>();
+    module.function("same", |doc: Doc| doc.body == default_doc());
     let src = "import conf\nimport json\nlet d = conf.Doc()\nprint(json.encode(d.body)?)\nprint(conf.same(d))\nlet e: conf.Doc = json.decode(\"{}\")?\nprint(conf.same(e))\n";
-    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), src);
-    r.unwrap();
+    let (result, out, _) = run_src(Config::new().host_modules(HostModules::new([module]).unwrap()), src);
+    result.unwrap();
     assert_eq!(out, "{\"on\":[true,-1,0.5,\"x\",null]}\ntrue\ntrue\n");
 }
 
@@ -1824,17 +1824,17 @@ fn rust_field_defaults_can_be_any_constant() {
         #[sand(default)]
         none: std::collections::HashSet<i64>,
     }
-    let mut m = draw_module();
-    m.bind::<Frame>().bind::<Sketch>();
-    m.function("figure", |s: Sketch| s.figure);
-    m.function("keep", |s: Sketch| s);
+    let mut module = draw_module();
+    module.bind::<Frame>().bind::<Sketch>();
+    module.function("figure", |sketch: Sketch| sketch.figure);
+    module.function("keep", |sketch: Sketch| sketch);
     let src = "import draw\nimport json\nprint(draw.figure(draw.Sketch()))\nlet s: draw.Sketch = json.decode(\"{}\")?\nprint(s)\n\
                print(s == draw.Sketch())\nprint(draw.keep(s) == s)\nprint(draw.Frame())\n\
                struct Scene { sketch: draw.Sketch = draw.Sketch(pair: (4, \"y\")) }\nlet scene: Scene = json.decode(\"{}\")?\n\
                print(scene == Scene() and scene.sketch.pair == (4, \"y\") and scene.sketch.border == draw.Frame(width: 2.0, labels: [\"l\"]))\n\
                help(draw.Sketch)";
-    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), src);
-    r.unwrap();
+    let (result, out, _) = run_src(Config::new().host_modules(HostModules::new([module]).unwrap()), src);
+    result.unwrap();
     assert_eq!(
         out,
         "Empty\nSketch(figure: Empty, backdrop: None, frame: Some(Labeled(\"a\\\"b\", Rect(w: 1.0, h: -2.0))), layers: Some(2), \
@@ -1939,20 +1939,20 @@ print(none.product())
 fn natives_can_require_encode() {
     use sandlang::native::ty::Param;
     use sandlang::types::traits;
-    let module = |decl: &str| {
-        let mut m = NativeModule::new("store");
-        m.function("keep", |x: Param<0, traits::Encode>| x);
-        m.source(decl);
-        m
+    let build_module = |decl: &str| {
+        let mut module = NativeModule::new("store");
+        module.function("keep", |value: Param<0, traits::Encode>| value);
+        module.source(decl);
+        module
     };
     let run = |src: &str| {
         run_src(
-            Config::new().host_modules(HostModules::new([module("pub native fn keep<T: Encode>(x: T) -> T")]).unwrap()),
+            Config::new().host_modules(HostModules::new([build_module("pub native fn keep<T: Encode>(x: T) -> T")]).unwrap()),
             &format!("import store\n{src}"),
         )
     };
-    let (r, out, _) = run("print(store.keep((1, [\"a\"])))\nfn pass<T: Num>(x: T) -> T {\n    store.keep(x)\n}\nprint(pass(2))");
-    r.unwrap();
+    let (result, out, _) = run("print(store.keep((1, [\"a\"])))\nfn pass<T: Num>(x: T) -> T {\n    store.keep(x)\n}\nprint(pass(2))");
+    result.unwrap();
     assert_eq!(out, "(1, [\"a\"])\n2\n");
     let cases = [
         ("store.keep(() => 1)", "fn() -> int does not implement `Encode`"),
@@ -1960,11 +1960,11 @@ fn natives_can_require_encode() {
         ("let f: fn(fn() -> int) -> fn() -> int = store.keep", "fn() -> int does not implement `Encode`"),
     ];
     for (src, msg) in cases {
-        let (r, _, _) = run(src);
-        let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
-        assert_eq!(ds[0].message, msg, "{src}");
+        let (result, _, _) = run(src);
+        let Err(Error::Compile(diags)) = result else { panic!("{src}: expected a compile error, got {result:?}") };
+        assert_eq!(diags[0].message, msg, "{src}");
     }
-    let errors = host_module_errors([module("pub native fn keep<T>(x: T) -> T")]);
+    let errors = host_module_errors([build_module("pub native fn keep<T>(x: T) -> T")]);
     assert_eq!(errors, ["native function `keep` must declare `T: Encode`, as its Rust function requires `T: Encode`"]);
 }
 
@@ -1986,31 +1986,31 @@ fn json_rejects_unrepresentable_types_at_compile_time() {
     ];
     let http = ("import http\nlet r = http.post_json(\"http://h/\", (x: int) => x)", "fn(int) -> int does not implement `Encode`");
     for (src, msg) in cases.into_iter().chain(cfg!(feature = "os").then_some(http)) {
-        let (r, _, _) = run_src(Config::new(), &format!("import json\n{src}"));
-        let Err(Error::Compile(ds)) = r else { panic!("{src}: expected a compile error, got {r:?}") };
-        assert_eq!(ds[0].message, msg, "{src}");
+        let (result, _, _) = run_src(Config::new(), &format!("import json\n{src}"));
+        let Err(Error::Compile(diags)) = result else { panic!("{src}: expected a compile error, got {result:?}") };
+        assert_eq!(diags[0].message, msg, "{src}");
     }
     let src = "import json\nprint(json.encode(1..4)?)\nprint(json.to_json([Some(1), None]))\nfn dump<T: Encode>(x: T) -> Result<str> {\n    json.encode(x)\n}\nprint(dump([1])?)";
-    let (r, out, _) = run_src(Config::new(), src);
-    r.unwrap();
+    let (result, out, _) = run_src(Config::new(), src);
+    result.unwrap();
     assert_eq!(out, "{\"start\":1,\"end\":4}\nArr([Int(1), Null])\n[1]\n");
 }
 
 #[test]
 fn host_functions_take_and_return_json_values() {
     use sandlang::stdlib::json::Json;
-    let mut m = NativeModule::new("doc");
-    m.function("keys", |j: Json| match j {
+    let mut module = NativeModule::new("doc");
+    module.function("keys", |value: Json| match value {
         Json::Obj(fields) => fields.keys().cloned().collect(),
         _ => Vec::new(),
     });
-    m.function("make", || {
+    module.function("make", || {
         let mut fields = indexmap::IndexMap::new();
         fields.insert("z".to_string(), Json::Int(1));
         fields.insert("a".to_string(), Json::Arr(vec![Json::Null, Json::Bool(true), Json::Float(1.5), Json::Str("s".into())]));
         Json::Obj(fields)
     });
-    m.function("same", |a: Json, b: Json| a == b);
+    module.function("same", |left: Json, right: Json| left == right);
     let src = r#"
 import doc
 import json
@@ -2021,40 +2021,40 @@ print(doc.same(made, json.parse(json.encode(made)?)?))
 print(made.get("a")?.at(2)?.as_float())
 print(doc.keys(json.Json.Null))
 "#;
-    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), src);
-    r.unwrap();
+    let (result, out, _) = run_src(Config::new().host_modules(HostModules::new([module]).unwrap()), src);
+    result.unwrap();
     assert_eq!(out, "[\"b\", \"a\", \"c\"]\n{\"z\":1,\"a\":[null,true,1.5,\"s\"]}\ntrue\nSome(1.5)\n[]\n");
 }
 
 #[test]
 fn convert_deep_json_values_on_small_stack() {
     use sandlang::stdlib::json::Json;
-    fn nest(n: usize) -> Json {
-        (0..n).fold(Json::Str("leaf".into()), |j, i| match i % 2 {
-            0 => Json::Arr(vec![Json::Int(i as i64), j, Json::Null]),
-            _ => Json::Obj([("a".to_string(), Json::Bool(true)), ("k".to_string(), j)].into_iter().collect()),
+    fn nest(depth: usize) -> Json {
+        (0..depth).fold(Json::Str("leaf".into()), |value, idx| match idx % 2 {
+            0 => Json::Arr(vec![Json::Int(idx as i64), value, Json::Null]),
+            _ => Json::Obj([("a".to_string(), Json::Bool(true)), ("k".to_string(), value)].into_iter().collect()),
         })
     }
     let run = |src: &'static str| {
         let run = move || {
-            let mut m = NativeModule::new("doc");
-            m.function("make", |n: i64| nest(n as usize));
-            m.function("check", |j: Json, n: i64| j == nest(n as usize));
-            run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), &format!("import doc\nimport json\n{src}"))
+            let mut module = NativeModule::new("doc");
+            module.function("make", |num: i64| nest(num as usize));
+            module.function("check", |value: Json, num: i64| value == nest(num as usize));
+            run_src(Config::new().host_modules(HostModules::new([module]).unwrap()), &format!("import doc\nimport json\n{src}"))
         };
         std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap()
     };
-    let (r, out, _) = run("let text = json.encode(doc.make(512))?\nlet parsed = json.parse(text)?\nprint(doc.check(parsed, 512))\n\
+    let (result, out, _) = run("let text = json.encode(doc.make(512))?\nlet parsed = json.parse(text)?\nprint(doc.check(parsed, 512))\n\
          print(json.encode(parsed)? == text)\nprint(doc.check(json.Json.Obj([\"k\": doc.make(511)]), 512))");
-    r.unwrap();
+    result.unwrap();
     assert_eq!(out, "true\ntrue\nfalse\n");
     for src in [
         "print(doc.make(513))",
         "print(doc.check(json.Json.Arr([doc.make(512)]), 513))",
         "var j = json.Json.Null\nfor _ in 0..100000 {\n    j = json.Json.Arr([j])\n}\nprint(doc.check(j, 0))",
     ] {
-        let (r, _, _) = run(src);
-        let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
+        let (result, _, _) = run(src);
+        let Err(Error::Runtime { message, .. }) = result else { panic!("{src}: expected a runtime error, got {result:?}") };
         assert_eq!(message, "limit: value too deeply nested to convert", "{src}");
     }
 }
@@ -2189,20 +2189,20 @@ fn async_natives_encode_and_decode_host_values() {
     use sandlang::native::ty::{Param, TraitDict};
     use sandlang::types::traits;
     use sandlang::vm::WaitKind;
-    let mut m = NativeModule::new("store");
-    m.source("pub native fn save<T: Encode>(x: T) -> Result<str>\npub native fn load<T: Decode>(n: int) -> Result<T>");
-    m.function("save", |encode: TraitDict<0, traits::Encode>, x: Param<0>| -> Result<Later<String, HostError>, HostError> {
+    let mut module = NativeModule::new("store");
+    module.source("pub native fn save<T: Encode>(x: T) -> Result<str>\npub native fn load<T: Decode>(n: int) -> Result<T>");
+    module.function("save", |encode_dict: TraitDict<0, traits::Encode>, value: Param<0>| -> Result<Later<String, HostError>, HostError> {
         Ok(Later::new(WaitKind::Io, |mut context| {
-            let (x, encode) = (context.root(x.raw()), context.root(encode.raw()));
-            async move { Ok(format!("{:?}", context.to_value(x, encode).await?)) }
+            let (value, encode_dict) = (context.root(value.raw()), context.root(encode_dict.raw()));
+            async move { Ok(format!("{:?}", context.to_value(value, encode_dict).await?)) }
         }))
     });
-    m.function("load", |decode: TraitDict<0, traits::Decode>, n: i64| -> Result<Later<Param<0>, HostError>, HostError> {
+    module.function("load", |decode_dict: TraitDict<0, traits::Decode>, num: i64| -> Result<Later<Param<0>, HostError>, HostError> {
         Ok(Later::new(WaitKind::Io, move |mut context| {
-            let decode = context.root(decode.raw());
+            let decode_dict = context.root(decode_dict.raw());
             async move {
-                let value = Value::List(vec![Value::Str("a".into()), Value::Int(n)]);
-                let decoded = context.from_value(value, decode).await?;
+                let value = Value::List(vec![Value::Str("a".into()), Value::Int(num)]);
+                let decoded = context.from_value(value, decode_dict).await?;
                 Ok(Param::from_raw(context.value(decoded)))
             }
         }))
@@ -2213,8 +2213,8 @@ fn async_natives_encode_and_decode_host_values() {
                Int => {\n                let n: int = decoder.decode()?\n                Ok(Tag(name: \"\\(n)\"))\n            }\n            _ => Ok(Tag(name: decoder.decode()?))\n        }\n    }\n}\n\
                print(store.save([Tag(name: \"x\")])?)\nlet tags: [Tag] = store.load(2)?\nprint(tags)\n\
                let bad: Result<[int]> = store.load(3)\nprint(bad)";
-    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), src);
-    r.unwrap();
+    let (result, out, _) = run_src(Config::new().host_modules(HostModules::new([module]).unwrap()), src);
+    result.unwrap();
     assert_eq!(
         out,
         "List([Str(\"#x\")])\n[Tag(name: \"a\"), Tag(name: \"2\")]\nErr(Error(message: \"$[0]: expected int, found str\", kind: \"parse\"))\n"
@@ -2229,11 +2229,11 @@ fn a_decoder_reports_the_kind_of_each_host_value() {
     use sandlang::types::traits;
     use sandlang::value::{StructValue, ToValue};
     use sandlang::vm::WaitKind;
-    let mut m = NativeModule::new("host");
-    m.source("pub native fn kinds<T: Decode>() -> Result<T>");
-    m.function("kinds", |decode: TraitDict<0, traits::Decode>| -> Result<Later<Param<0>, HostError>, HostError> {
+    let mut module = NativeModule::new("host");
+    module.source("pub native fn kinds<T: Decode>() -> Result<T>");
+    module.function("kinds", |decode_dict: TraitDict<0, traits::Decode>| -> Result<Later<Param<0>, HostError>, HostError> {
         Ok(Later::new(WaitKind::Io, move |mut context| {
-            let decode = context.root(decode.raw());
+            let decode_dict = context.root(decode_dict.raw());
             async move {
                 let value = Value::List(vec![
                     Value::Tuple(vec![Value::Int(1)]),
@@ -2243,7 +2243,7 @@ fn a_decoder_reports_the_kind_of_each_host_value() {
                     Value::List(vec![]),
                     Value::Map(vec![]),
                 ]);
-                let decoded = context.from_value(value, decode).await?;
+                let decoded = context.from_value(value, decode_dict).await?;
                 Ok(Param::from_raw(context.value(decoded)))
             }
         }))
@@ -2253,8 +2253,8 @@ fn a_decoder_reports_the_kind_of_each_host_value() {
                let ks: [K] = host.kinds()?\nprint(ks.map(k => k.kind))\n\
                let j: Result<[json.Json]> = host.kinds()\nprint(j)";
     let src = format!("import json\n{src}");
-    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
-    r.unwrap();
+    let (result, out, _) = run_src(Config::new().host_modules(HostModules::new([module]).unwrap()), &src);
+    result.unwrap();
     assert_eq!(
         out,
         "[\"Tuple\", \"Struct\", \"Range\", \"Native\", \"List\", \"Map\"]\nErr(Error(message: \"$[0]: expected JSON data\", kind: \"parse\"))\n"
@@ -3202,19 +3202,19 @@ print(r.body == json.to_json(rows))
             "true",
         ),
     ];
-    for (src, want) in cases {
+    for (src, expected) in cases {
         let src = format!("{CODEC_GARBAGE}{src}");
         let (mut done, mut stopped) = (0, 0);
         for mib in [8, 9, 10, 12, 16, 32] {
             let config = Config::new().limits(Limits { max_memory: Some(mib << 20), ..Limits::default() });
-            let (r, out, err) = run_src(config, &src);
-            match r {
+            let (result, out, err) = run_src(config, &src);
+            match result {
                 Ok(_) => {
-                    assert_eq!(out, format!("40000\n{want}\n"), "{mib} MiB: {err}\n{src}");
+                    assert_eq!(out, format!("40000\n{expected}\n"), "{mib} MiB: {err}\n{src}");
                     done += 1;
                 }
-                Err(e) => {
-                    assert!(matches!(e, Error::Limit(LimitKind::Memory)), "{mib} MiB: {e}\n{src}");
+                Err(run_err) => {
+                    assert!(matches!(run_err, Error::Limit(LimitKind::Memory)), "{mib} MiB: {run_err}\n{src}");
                     stopped += 1;
                 }
             }
@@ -3224,7 +3224,7 @@ print(r.body == json.to_json(rows))
 }
 
 #[test]
-fn a_stored_decoder_does_not_keep_its_input_alive() {
+fn a_stored_decoder_releases_its_input_after_decode_returns() {
     let src = r#"
 import json
 let ch: Channel<Decoder> = Channel()
@@ -3242,8 +3242,8 @@ for _ in 0..150 {
 print(ch.recv().unwrap().kind())
 "#;
     let config = Config::new().limits(Limits { max_memory: Some(64 << 20), ..Limits::default() });
-    let (r, out, err) = run_src(config, src);
-    r.unwrap_or_else(|e| panic!("{e}: {err}"));
+    let (result, out, err) = run_src(config, src);
+    result.unwrap_or_else(|run_err| panic!("{run_err}: {err}"));
     assert_eq!(out, "Err(Error(message: \"a `Decoder` gives a value only during its `decode` call\", kind: \"invalid\"))\n");
 }
 
@@ -3544,8 +3544,8 @@ let ps: [P] = json.decode(text)?
 print("\(ps.len()) \(ps[99999].p)")
 "#;
     let limits = Limits { max_memory: Some(64 << 20), ..Limits::default() };
-    let (r, out, _) = run_src(Config::new().limits(limits), src);
-    r.unwrap();
+    let (result, out, _) = run_src(Config::new().limits(limits), src);
+    result.unwrap();
     assert_eq!(out, "100000 1\n");
 }
 
@@ -4334,28 +4334,28 @@ fn retry_stress_fails_a_check_in_the_native_body() {
 
 #[test]
 fn derived_impls_of_deep_field_types_are_checked_on_a_small_stack() {
-    let (ok, bad) = (format!("int{}", "?".repeat(9000)), format!("float{}", "?".repeat(9000)));
+    let (valid_type, deep_type) = (format!("int{}", "?".repeat(9000)), format!("float{}", "?".repeat(9000)));
     let src = format!(
-        "struct S {{ f: {ok} }}\nstruct F {{ f: {bad} }}\nstruct B<T: Hash> {{ v: T }}\nprint(Set([S(f: None)]).len())\n\
+        "struct S {{ f: {valid_type} }}\nstruct F {{ f: {deep_type} }}\nstruct B<T: Hash> {{ v: T }}\nprint(Set([S(f: None)]).len())\n\
          let b = B(v: S(f: None))\nlet c = B(v: F(f: None))\n"
     );
     let run = move || run_src(Config::new(), &src);
-    let (r, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
-    let Err(Error::Compile(ds)) = r else { panic!("{r:?}") };
-    assert_eq!(ds.len(), 1, "{ds:?}");
-    assert!(ds[0].message.starts_with("F does not implement `Hash`"), "{}", ds[0].message);
+    let (result, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    let Err(Error::Compile(diags)) = result else { panic!("{result:?}") };
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert!(diags[0].message.starts_with("F does not implement `Hash`"), "{}", diags[0].message);
 }
 
 #[test]
 fn deep_set_elements_and_map_keys_of_fields_are_checked_on_a_small_stack() {
-    let (ok, bad) = (format!("int{}", "?".repeat(9000)), format!("float{}", "?".repeat(9000)));
-    let src = format!("struct K {{ m: [{ok}: int], s: Set<{ok}> }}\nstruct G {{ m: [{bad}: int] }}\nprint(1)\n");
+    let (valid_type, deep_type) = (format!("int{}", "?".repeat(9000)), format!("float{}", "?".repeat(9000)));
+    let src = format!("struct K {{ m: [{valid_type}: int], s: Set<{valid_type}> }}\nstruct G {{ m: [{deep_type}: int] }}\nprint(1)\n");
     let run = move || run_src(Config::new(), &src);
-    let (r, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
-    let Err(Error::Compile(ds)) = r else { panic!("{r:?}") };
-    assert_eq!(ds.len(), 1, "{ds:?}");
-    assert_eq!(ds[0].line, 2, "{ds:?}");
-    assert!(ds[0].message.starts_with(&format!("{bad} does not implement `Hash`")), "{}", ds[0].message);
+    let (result, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    let Err(Error::Compile(diags)) = result else { panic!("{result:?}") };
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].line, 2, "{diags:?}");
+    assert!(diags[0].message.starts_with(&format!("{deep_type} does not implement `Hash`")), "{}", diags[0].message);
 }
 
 #[test]
@@ -4365,9 +4365,9 @@ fn rust_bound_field_types_meet_the_requirements_of_their_constructors() {
     struct Seen {
         rows: std::collections::HashSet<Vec<i64>>,
     }
-    let mut m = NativeModule::new("lab");
-    m.bind::<Seen>();
-    let errors = host_module_errors([m]);
+    let mut module = NativeModule::new("lab");
+    module.bind::<Seen>();
+    let errors = host_module_errors([module]);
     assert_eq!(errors, ["field `rows` of `Seen`: [int] does not implement `Hash` (required for the elements of Set<[int]>)"]);
 }
 
@@ -4375,8 +4375,9 @@ fn rust_bound_field_types_meet_the_requirements_of_their_constructors() {
 // Values copied out of the VM
 // ---------------------------------------------------------------------------
 
-/// Runs `src` with [`copy_module`] and `modules`, and returns the run outcome
-/// and the copied values.
+/// Runs `src` with [`copy_module`] and `modules`.
+///
+/// Returns the run outcome and the copied values.
 fn run_and_copy_values(
     config: Config,
     modules: impl IntoIterator<Item = NativeModule>,
@@ -4384,9 +4385,9 @@ fn run_and_copy_values(
 ) -> (Result<sandlang::engine::Outcome, Error>, Vec<Value>) {
     let (host, copies) = copy_module();
     let modules = HostModules::new(modules.into_iter().chain([host])).unwrap();
-    let (r, _, _) = run_src(config.host_modules(modules), &format!("import host\n{src}"));
+    let (result, _, _) = run_src(config.host_modules(modules), &format!("import host\n{src}"));
     let values = std::mem::take(&mut *copies.lock());
-    (r, values)
+    (result, values)
 }
 
 /// Builds the `host` test module and the vector that collects values passed
@@ -4401,10 +4402,12 @@ fn copy_module() -> (NativeModule, Arc<Mutex<Vec<Value>>>) {
     (host, copies)
 }
 
-/// Runs `src` and returns the values recorded by `host.copy`.
+/// Runs `src` with `host.copy` registered.
+///
+/// Returns the recorded [`Value`] list.
 fn copied_values(src: &str) -> Vec<Value> {
-    let (r, values) = run_and_copy_values(Config::new(), [bank_module(), stats_module()], src);
-    r.unwrap();
+    let (result, values) = run_and_copy_values(Config::new(), [bank_module(), stats_module()], src);
+    result.unwrap();
     values
 }
 
@@ -4417,7 +4420,7 @@ fn to_value_copies_each_kind_of_value() {
          host.copy(Set([3, 1]))\nhost.copy([\"k\": [1], \"j\": []])\nhost.copy(0..3)\nhost.copy(-1..=1)\n\
          host.copy([2: \"two\", 1: \"one\"])\nhost.copy([(1, 2): true])\nhost.copy([false: ()])\n",
     );
-    let ints = |ints: &[i64]| ints.iter().map(|&i| Value::Int(i)).collect::<Vec<_>>();
+    let ints = |nums: &[i64]| nums.iter().map(|&num| Value::Int(num)).collect::<Vec<_>>();
     let expected = [
         Value::Unit,
         Value::Bool(true),
@@ -4451,7 +4454,7 @@ fn to_value_preserves_qualified_names_and_fields() {
          let done: Result<Order> = Ok(Order(id: 3, note: None))\nhost.copy(done)\n\
          host.copy(json.Json.Null)\nhost.copy(json.Json.Arr([json.Json.Int(1)]))\nhost.copy(bank.cents(1250))\nhost.copy(bank.cell(2, 3))\n",
     );
-    let str_ = |s: &str| Value::Str(s.into());
+    let str_ = |text: &str| Value::Str(text.into());
     let variant = |type_name: &str, name: &str, payload: Vec<Value>| Value::Variant(VariantValue::new(type_name, name, payload));
     let (some, none) = (|value| variant("Option", "Some", vec![value]), || variant("Option", "None", vec![]));
     let order = |id, note| Value::Struct(StructValue::new("main.Order", [("id", Value::Int(id)), ("note", note)]));
@@ -4485,7 +4488,7 @@ fn encoded_host_values_require_encode() {
     let src = "import host\nimport stats\nstruct Job { name: str, run: fn() -> int }\nfn one() -> int { 1 }\n\
                host.copy(Job(name: \"first\", run: one))\nhost.copy([\"a\": stats.counter()])\n";
     let errors = match Engine::new(Config::new().host_modules(modules)).check_source("main.sand", src) {
-        Err(Error::Compile(diags)) => diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
+        Err(Error::Compile(diags)) => diags.iter().map(|diag| diag.message.clone()).collect::<Vec<_>>(),
         other => panic!("{other:?}"),
     };
     assert_eq!(
@@ -4506,24 +4509,24 @@ const NESTED_VALUES: &str = "struct Link { var next: Link? }\nfn chain(n: int) -
 fn encode_deep_and_cyclic_values_on_a_small_stack() {
     let run = |src: String| {
         let run = move || run_and_copy_values(Config::new(), [], &format!("import json\n{NESTED_VALUES}{src}"));
-        let (r, values) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
-        (r, values.len())
+        let (result, values) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+        (result, values.len())
     };
-    let (r, copies) =
+    let (result, copies) =
         run("let deep = chain(512)\nlet text = json.encode(deep)?\nprint(text.len())\nprint(json.encode(json.to_json(deep))? == text)\n\
                            host.copy([chain(256)])\n"
             .to_string());
-    r.unwrap();
+    result.unwrap();
     assert_eq!(copies, 1);
-    // Encoding to `Value` counts a nesting level for each `Link` struct and each
-    // `Some` wrapper. `[chain(256)]` therefore reaches the 512-level limit.
+    // `ValueSink` counts a nesting level for each `Link` struct and each `Some`
+    // wrapper. `[chain(256)]` therefore reaches the 512-level limit.
     for (operation, too_deep_expr) in [("json.encode", "chain(513)"), ("json.to_json", "chain(513)"), ("host.copy", "[[chain(256)]]")] {
         let message = "limit: value too deeply nested to encode or decode";
         let raise = if operation == "json.encode" { "?" } else { "" };
         for value in [too_deep_expr, "ring"] {
-            let (r, _) = run(format!("{operation}({value}){raise}"));
-            let Err(Error::Runtime { message: actual, .. }) = r else {
-                panic!("{operation}({value}): expected a runtime error, got {r:?}")
+            let (result, _) = run(format!("{operation}({value}){raise}"));
+            let Err(Error::Runtime { message: actual, .. }) = result else {
+                panic!("{operation}({value}): expected a runtime error, got {result:?}")
             };
             assert_eq!(actual, message, "{operation}({value})");
         }
@@ -4535,13 +4538,13 @@ fn to_value_counts_its_memory_against_the_memory_limit() {
     for (big, value) in [("(0..100000).to_list()", "list"), ("\"x\".repeat(4000000)", "str"), ("\"x\".repeat(4000000).bytes()", "bytes")] {
         let src = format!("let big = {big}\nlet shared = []\nfor _ in 0..1000 {{\n    shared.push(big)\n}}\nhost.copy(shared)");
         let config = Config::new().limits(Limits { max_memory: Some(64 << 20), ..Limits::default() });
-        let (r, values) = run_and_copy_values(config, [], &src);
-        assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{value}: {r:?}");
+        let (result, values) = run_and_copy_values(config, [], &src);
+        assert!(matches!(result, Err(Error::Limit(LimitKind::Memory))), "{value}: {result:?}");
         assert!(values.is_empty(), "{value}");
     }
 }
 
-/// Delivery state covering unit, tuple, and struct variants.
+/// Delivery state with unit, tuple, and struct variants.
 #[derive(Clone, sandlang::SandEnum)]
 #[sand(module = "shop", encode, decode)]
 enum Delivery {
@@ -4550,7 +4553,7 @@ enum Delivery {
     Held { reason: String, days: i64 },
 }
 
-/// Sample order containing each field kind supported by derived `Encode`.
+/// Sample order with each field kind that derived `Encode` supports.
 #[derive(Clone, sandlang::SandStruct)]
 #[sand(module = "shop", encode, decode)]
 struct Purchase {
@@ -4581,8 +4584,8 @@ fn to_value_of_a_derived_type_equals_its_encoded_host_value() {
     shop.bind::<Delivery>().bind::<Purchase>();
     let returned = purchase.clone();
     shop.function("purchase", move || returned.clone());
-    let (r, copies) = run_and_copy_values(Config::new(), [bank_module(), shop], "import shop\nhost.copy(shop.purchase())\n");
-    r.unwrap();
+    let (result, copies) = run_and_copy_values(Config::new(), [bank_module(), shop], "import shop\nhost.copy(shop.purchase())\n");
+    result.unwrap();
     let encoded = purchase.to_value();
     let Value::Struct(fields) = &encoded else { panic!("{encoded:?}") };
     assert_eq!(fields.ty.type_name, "shop.Purchase");
@@ -4593,7 +4596,7 @@ fn to_value_of_a_derived_type_equals_its_encoded_host_value() {
     assert_eq!(purchase.deliveries.as_slice().to_value(), fields.fields[1]);
     assert_eq!(purchase.note.as_deref().to_value(), fields.fields[2]);
     let tags: Vec<&str> = ["blue", "green", "red"].into();
-    assert_eq!(tags.to_value(), Value::List(["blue", "green", "red"].map(|t| Value::Str(t.into())).into()));
+    assert_eq!(tags.to_value(), Value::List(["blue", "green", "red"].map(|tag| Value::Str(tag.into())).into()));
     assert_eq!(b"ab"[..].to_value(), Value::Bytes(b"ab".to_vec()));
     assert_eq!([1i64, 2][..].to_value(), vec![1i64, 2].to_value());
 }

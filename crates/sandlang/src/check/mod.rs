@@ -399,10 +399,10 @@ impl CheckedProgram {
         self.syms.str(s)
     }
 
-    /// Returns `true` if implementation `id` uses its codec trait's native
-    /// default method.
-    pub fn is_structural_impl(&self, id: ImplId) -> bool {
-        codec::is_structural_codec_impl(&self.traits, &self.impls[id as usize])
+    /// Returns `true` if implementation `impl_id` implements `Encode` or
+    /// `Decode` with the trait's native default method.
+    pub fn is_structural_codec_impl(&self, impl_id: ImplId) -> bool {
+        codec::is_structural_codec_impl(&self.traits, &self.impls[impl_id as usize])
     }
 
     /// Returns the Rust `TypeId` bound to type definition `d`, if any.
@@ -1576,7 +1576,7 @@ impl Checker {
             is_pub,
             doc: doc.map(Arc::from),
             span: name.span,
-            codecs: None,
+            native_codecs: None,
         });
         (self.types.len() - 1) as TypeDefId
     }
@@ -1650,8 +1650,8 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Struct { fields };
     }
 
-    /// Attaches the enclosing struct's type parameter dictionaries to each
-    /// field default helper starting at `first_type`.
+    /// Attaches each struct's type parameter dictionaries to its field default
+    /// helpers for structs from `first_type` onward.
     fn add_field_default_dicts(&mut self, first_type: usize) {
         for d in first_type..self.types.len() {
             let gens = self.types[d].generics.clone();
@@ -1721,7 +1721,7 @@ impl Checker {
                 BoundKind::Struct { .. } => TypeDefKind::Struct { fields: vec![] },
             };
             let id = self.new_typedef(&ident, generics, kind, t.public, doc);
-            self.types[id as usize].codecs = Some(t.codecs);
+            self.types[id as usize].native_codecs = Some(t.codecs);
             self.define_ident(&ident, Def::Type(TyRef::Def(id)), t.public);
             match &t.kind {
                 BoundKind::Enum { rust, variants, .. } => {
@@ -2132,7 +2132,7 @@ impl Checker {
         }
         let mut generic = false;
         for t in sig.params.iter().chain([&sig.ret]) {
-            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::Dict(..) | Type::Encoded(_)));
+            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::TraitDict(..) | Type::Encoded(_)));
         }
         if generic {
             let msg = format!("native `{key}` is generic, so the module must declare it with `native fn`");
@@ -2241,7 +2241,7 @@ impl Checker {
                     return None;
                 }
             },
-            Type::Dict(..) => {
+            Type::TraitDict(..) => {
                 self.error(span, format!("{owner} takes a trait dictionary that is not one of its first parameters"));
                 return None;
             }
@@ -2317,15 +2317,16 @@ impl Checker {
                 }
             }
         }
-        let k = sig.params.iter().take_while(|t| matches!(t, Type::Dict(..))).count();
-        let (dicts, rest) = sig.params.split_at(k);
+        let dict_count = sig.params.iter().take_while(|t| matches!(t, Type::TraitDict(..))).count();
+        let (dict_params, value_params) = sig.params.split_at(dict_count);
         let accepted_dicts: Vec<(u8, Builtin)> =
-            dicts.iter().filter_map(|t| if let Type::Dict(i, b) = t { Some((*i, *b)) } else { None }).collect();
+            dict_params.iter().filter_map(|t| if let Type::TraitDict(i, b) = t { Some((*i, *b)) } else { None }).collect();
         let mut declared_iter = declared_dicts.iter();
-        let dicts_match = accepted_dicts.iter().all(|i| declared_iter.any(|j| j == i)) && !rest.iter().any(|t| matches!(t, Type::Dict(..)));
+        let dicts_match =
+            accepted_dicts.iter().all(|i| declared_iter.any(|j| j == i)) && !value_params.iter().any(|t| matches!(t, Type::TraitDict(..)));
         if dicts_match {
             let mark = self.diags.len();
-            let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
+            let want: Option<Vec<TypeId>> = value_params.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
             let want_ret = self.host_type(&sig.ret, generics, &owner, span);
             if self.diags.len() > mark {
                 return accepted_dicts;
@@ -2336,7 +2337,7 @@ impl Checker {
                 return accepted_dicts;
             }
         }
-        let declared_dict_types: Vec<Type> = declared_dicts.iter().map(|&(i, b)| Type::Dict(i, b)).collect();
+        let declared_dict_types: Vec<Type> = declared_dicts.iter().map(|&(i, b)| Type::TraitDict(i, b)).collect();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let names: Vec<String> = generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect();
         let show_rust =

@@ -54,15 +54,15 @@ pub type CodecResult<T = ()> = Result<T, HostError<Fail>>;
 
 /// Returns a memory limit error.
 #[cold]
-pub(crate) fn memory_limit<T>() -> CodecResult<T> {
+pub(crate) fn memory_limit_error<T>() -> CodecResult<T> {
     Err(Fail::limit(crate::engine::LimitKind::Memory).into())
 }
 
-/// Destination that receives one Sand value from the encode walker.
+/// Destination that receives a Sand value from the encode walker.
 ///
 /// The walker writes each scalar with a single method call. To write a
-/// container, the walker calls `begin_*`, writes each part, and calls
-/// [`EncodeSink::end`].
+/// container, the walker calls a `begin_*` method. It then writes each part and
+/// calls [`EncodeSink::end`].
 pub trait EncodeSink: Send {
     fn unit(&mut self) -> CodecResult;
     fn bool(&mut self, value: bool) -> CodecResult;
@@ -77,19 +77,24 @@ pub trait EncodeSink: Send {
     fn native(&mut self, type_name: &str, text: &str) -> CodecResult;
     /// Writes `None`.
     fn none(&mut self) -> CodecResult;
-    /// Begins `Some` before writing its single payload value.
+    /// Opens `Some`. The caller writes the payload value next.
     fn begin_some(&mut self) -> CodecResult;
     fn begin_list(&mut self, len: usize) -> CodecResult;
     fn begin_tuple(&mut self, len: usize) -> CodecResult;
     fn begin_set(&mut self, len: usize) -> CodecResult;
-    /// Begins a map of `len` entries before writing alternating keys and
-    /// values.
+    /// Opens a map of `len` entries.
+    ///
+    /// For each entry, the caller writes the key and then the value.
     fn begin_map(&mut self, len: usize) -> CodecResult;
-    /// Begins a struct before writing its fields in declaration order.
+    /// Opens the struct described by `desc`.
+    ///
+    /// The caller writes each field in declaration order.
     fn begin_struct(&mut self, desc: &Arc<StructDesc>) -> CodecResult;
-    /// Begins an enum variant before writing its `len` payload values.
+    /// Opens the enum variant described by `desc` with `len` payload values.
+    ///
+    /// The caller writes each payload value in declaration order.
     fn begin_variant(&mut self, desc: &Arc<VariantDesc>, len: usize) -> CodecResult;
-    /// Ends the innermost open container.
+    /// Closes the innermost open container or `Some` wrapper.
     fn end(&mut self) -> CodecResult;
 }
 
@@ -112,7 +117,7 @@ pub enum InputKind {
     Tuple,
     Struct,
     Range,
-    /// A native value, such as `time.Instant`.
+    /// A native value.
     Native,
     /// An enum variant other than `None`.
     Variant,
@@ -121,20 +126,24 @@ pub enum InputKind {
 /// Layout of an enum variant's payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PayloadForm {
-    /// Variant without a payload.
+    /// Empty payload.
     Unit,
-    /// Positional payload of `usize` values read after [`DecodeSource::next`].
+    /// Positional payload with the given value count.
+    ///
+    /// The caller calls [`DecodeSource::next`] before each value.
     Positional(usize),
-    /// Named payload fields read with [`DecodeSource::next_field`].
+    /// Struct-like payload with named fields.
+    ///
+    /// The caller calls [`DecodeSource::next_field`] before each field.
     Named,
 }
 
-/// Input stream that supplies one Sand value to the decode walker.
+/// Input stream that supplies a Sand value to the decode walker.
 ///
 /// The walker requests each part according to the target type. A container
 /// request opens the container. [`DecodeSource::end`] closes it. If the input
-/// does not match a request, the source returns a `"parse"` error with the
-/// current path, such as `$.items[2].price: expected int`.
+/// does not match a request, the source returns a `"parse"` error at the
+/// current path.
 pub trait DecodeSource: Send {
     /// Peeks at the kind of the next value without consuming it.
     fn kind(&mut self) -> CodecResult<InputKind>;
@@ -149,9 +158,10 @@ pub trait DecodeSource: Send {
     fn range(&mut self) -> CodecResult<(i64, i64, bool)>;
     /// Reads the text form of a native value of type `type_name`.
     fn native(&mut self, type_name: &str) -> CodecResult<Cow<'_, str>>;
-    /// Consumes `None` and returns `false`, or opens `Some` and returns `true`.
+    /// Reads an `Option` tag.
     ///
-    /// If this method returns `true`, the caller reads the payload and then
+    /// For `None`, consumes the value and returns `false`. For `Some`, opens
+    /// the wrapper and returns `true`. The caller then reads the payload and
     /// calls [`DecodeSource::end`].
     fn option(&mut self) -> CodecResult<bool>;
     /// Opens a list or set. Call [`DecodeSource::next`] before each element.
@@ -164,16 +174,18 @@ pub trait DecodeSource: Send {
     /// Call [`DecodeSource::next`] before each entry. Read the key and then
     /// the value.
     fn begin_map(&mut self) -> CodecResult;
-    /// Advances to the next element or entry, or returns `false` at the end of
-    /// the container.
+    /// Advances to the next element or entry.
+    ///
+    /// Returns `false` at the end of the container.
     fn next(&mut self) -> CodecResult<bool>;
     /// Opens a struct described by `desc`. Call [`DecodeSource::next_field`]
     /// before each field.
     fn begin_struct(&mut self, desc: &StructDesc) -> CodecResult;
-    /// Advances to the next field of a struct or named payload, or returns
-    /// `None` at the end.
+    /// Advances to the next field of a struct or named payload.
+    ///
+    /// Returns `None` at the end of the fields.
     fn next_field(&mut self) -> CodecResult<Option<Cow<'_, str>>>;
-    /// Opens a variant of enum `type_name` and returns the variant name.
+    /// Opens a variant of enum `type_name`. Returns the variant name.
     fn begin_variant(&mut self, type_name: &str) -> CodecResult<Cow<'_, str>>;
     /// Opens the payload of the current variant with layout `form`.
     fn begin_payload(&mut self, form: PayloadForm) -> CodecResult;
@@ -181,11 +193,13 @@ pub trait DecodeSource: Send {
     fn skip(&mut self) -> CodecResult;
     /// Closes the innermost open container.
     fn end(&mut self) -> CodecResult;
-    /// Formats the path to the current input position, such as `$.items[2]`.
+    /// Formats the path to the current input position.
+    ///
+    /// Paths start at `$`, as in `$.items[2]`.
     fn path(&self) -> String;
-    /// Drains the input byte count processed since the previous `work` call for
-    /// fuel accounting.
-    fn work(&mut self) -> usize;
+    /// Drains the input byte count consumed since the previous
+    /// `take_consumed_bytes` call for fuel accounting.
+    fn take_consumed_bytes(&mut self) -> usize;
 }
 
 /// Custom encoder for a native type marked `#[sand(encode = "manual")]`.

@@ -26,16 +26,16 @@ use ty::{Channel, Param, Range, SandType, Task, TraitDict, Type, VmVal};
 ///
 /// Derive this trait with [`SandEnum`](crate::SandEnum),
 /// [`SandObject`](crate::SandObject), [`SandStruct`](crate::SandStruct), or
-/// [`SandValue`](crate::SandValue), and register the type with
+/// [`SandValue`](crate::SandValue). Register the type with
 /// [`NativeModule::bind`].
 pub trait NamedType: Sized + 'static {
-    /// Name of the Sand module that owns the type (`#[sand(module = "...")]`).
+    /// Name of the Sand module that owns the type. Set by `#[sand(module = "...")]`.
     const MODULE: &'static str;
-    /// Sand type name (defaults to the Rust identifier, or `#[sand(name = "...")]`).
+    /// Sand type name. Defaults to the Rust identifier unless `#[sand(name = "...")]` overrides it.
     const NAME: &'static str;
     /// Documentation comment attached to the Sand type declaration.
     const DOC: &'static str;
-    /// `true` if the type is exported (`pub`), or `false` if marked `#[sand(private)]`.
+    /// `true` if the module exports the type, or `false` if marked `#[sand(private)]`.
     const PUBLIC: bool;
     /// Type parameter names for a generic enum or struct.
     const PARAMS: &'static [&'static str] = &[];
@@ -86,7 +86,7 @@ impl<T: ValueType> Binding<T> {
 
 /// A Rust enum that maps to a Sand `enum` with matching variants and payloads.
 ///
-/// Derive this trait with [`#[derive(SandEnum)]`](crate::SandEnum) and register
+/// Derive this trait with [`#[derive(SandEnum)]`](crate::SandEnum). Register
 /// the type with [`NativeModule::bind`]:
 ///
 /// ```
@@ -143,9 +143,10 @@ const fn same_bytes(a: &str, b: &str) -> bool {
 
 /// A Rust struct that maps to a Sand `struct` with matching fields.
 ///
-/// Derive this trait with [`#[derive(SandStruct)]`](crate::SandStruct) and
-/// register the type with [`NativeModule::bind`]. Native functions pass and
-/// return the struct by value, copying its fields between Rust and the VM heap.
+/// Derive this trait with [`#[derive(SandStruct)]`](crate::SandStruct).
+/// Register the type with [`NativeModule::bind`]. Native functions pass and
+/// return the struct by value. Each conversion copies the fields between Rust
+/// and the VM heap.
 ///
 /// ```
 /// /// A point in the plane.
@@ -178,19 +179,21 @@ pub trait StructType: NamedType + SandType {
 /// Metadata for a field of a [`StructType`].
 #[derive(Debug)]
 pub struct StructField {
-    /// Sand field name (defaults to the Rust identifier, or `#[sand(name = "...")]`).
+    /// Sand field name. Defaults to the Rust identifier unless `#[sand(name = "...")]` overrides it.
     pub name: &'static str,
     /// Documentation comment attached to the field.
     pub doc: &'static str,
-    /// `true` if the field is exported (`pub`), or `false` if marked `#[sand(private)]`.
+    /// `true` if the field is `pub`, or `false` if marked `#[sand(private)]`.
     pub public: bool,
-    /// `true` if the field is mutable (`var` via `#[sand(var)]`).
+    /// `true` if `#[sand(var)]` marks the field mutable.
     pub var: bool,
     /// Returns the Sand [`Type`] of the field.
     pub ty: fn() -> Type,
-    /// Returns the default value of the field (`#[sand(default)]`) as an
-    /// encoded [`Value`]. The default must be a Sand constant of the field
-    /// type, so it cannot contain a native value type.
+    /// Returns the default value of the field from `#[sand(default)]` as a
+    /// [`Value`].
+    ///
+    /// The default must be a Sand constant of the field type. It cannot contain
+    /// a native value type.
     pub default: Option<fn() -> Value>,
 }
 
@@ -205,10 +208,10 @@ pub type StructDescCell = OnceLock<Arc<StructDesc>>;
 pub type VariantDescCell = OnceLock<Arc<VariantDesc>>;
 
 #[doc(hidden)]
-pub fn struct_to_value<T: StructType>(ty: &StructDescCell, fields: impl IntoIterator<Item = Value>) -> Value {
-    let ty =
-        ty.get_or_init(|| StructDesc::new(qualified_name(qualified_name_module(T::MODULE), T::NAME), T::FIELDS.iter().map(|f| f.name)));
-    Value::Struct(StructValue { ty: ty.clone(), fields: fields.into_iter().collect() })
+pub fn struct_to_value<T: StructType>(desc_cell: &StructDescCell, fields: impl IntoIterator<Item = Value>) -> Value {
+    let desc = desc_cell
+        .get_or_init(|| StructDesc::new(qualified_name(qualified_name_module(T::MODULE), T::NAME), T::FIELDS.iter().map(|f| f.name)));
+    Value::Struct(StructValue { ty: desc.clone(), fields: fields.into_iter().collect() })
 }
 
 #[doc(hidden)]
@@ -488,11 +491,11 @@ struct DeriveErrors;
 /// Metadata for a variant of an [`EnumType`].
 #[derive(Debug)]
 pub struct EnumVariant {
-    /// Sand variant name (the Rust identifier).
+    /// Sand variant name.
     pub name: &'static str,
     /// Documentation comment attached to the variant.
     pub doc: &'static str,
-    /// Payload fields in declaration order (empty for a unit variant).
+    /// Payload fields in declaration order. Empty for a unit variant.
     pub fields: &'static [VariantField],
 }
 
@@ -512,16 +515,15 @@ pub struct VariantField {
 pub trait NativeObject: Any + Send {
     /// Approximate heap memory used by `self`, in bytes.
     ///
-    /// The VM reads this value on allocation and deallocation; call
+    /// The VM reads this value on allocation and deallocation. Call
     /// [`Heap::account`] if the object's size changes in place.
     fn size(&self) -> usize {
         64
     }
 
-    /// Returns `true` if `self` holds an open host resource (such as a file or
-    /// socket with an `iomem::ResourceSlot` counted against
-    /// `max_open_resources`). Allocating resource objects paces garbage
-    /// collection so unreachable handles are closed promptly.
+    /// Returns `true` if `self` holds an open host resource counted against
+    /// `max_open_resources`. The VM paces garbage collection on resource
+    /// allocations to close unreachable handles promptly.
     fn is_resource(&self) -> bool {
         false
     }
@@ -529,9 +531,8 @@ pub trait NativeObject: Any + Send {
 
 /// A Rust type exposed to scripts as an opaque reference type.
 ///
-/// Derive this trait with [`#[derive(SandObject)]`](crate::SandObject),
-/// implement [`NativeObject`], and register the type with
-/// [`NativeModule::bind`]:
+/// Derive this trait with [`#[derive(SandObject)]`](crate::SandObject) and
+/// implement [`NativeObject`]. Register the type with [`NativeModule::bind`]:
 ///
 /// ```
 /// /// A shared atomic counter.
@@ -589,12 +590,12 @@ impl<T: ObjectType> VmVal<T> {
 pub(crate) const NUM_METHODS: [&str; 2] = ["zero", "one"];
 
 impl<const N: u8> TraitDict<N, crate::types::traits::Num> {
-    /// Returns the additive identity (`0` or `0.0`) for type parameter `N`.
+    /// Returns the additive identity `0` or `0.0` for type parameter `N`.
     pub fn zero(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
         self.call_method(vm, 0)
     }
 
-    /// Returns the multiplicative identity (`1` or `1.0`) for type parameter `N`.
+    /// Returns the multiplicative identity `1` or `1.0` for type parameter `N`.
     pub fn one(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
         self.call_method(vm, 1)
     }
@@ -713,7 +714,7 @@ pub(crate) enum BoundKind {
         fields: &'static [StructField],
         defaults: Arc<[Option<Value>]>,
     },
-    /// Built-in generic type (`Task<T>` or `Channel<T>`) and its type parameter names.
+    /// Type parameter names for a built-in generic type.
     Builtin(&'static [&'static str]),
 }
 
@@ -761,11 +762,11 @@ struct FnDef {
 /// The engine infers the Sand signature of each registered function from its
 /// Rust parameter and return types. It exports functions that are absent from
 /// [`NativeModule::source`] as `pub native fn`. [`NativeModule::params`] sets
-/// their parameter names, which default to `arg1`, `arg2`, and so on.
-/// Registering a function as `"Type.name"` defines a method on `Type`. The
-/// method takes `self` if its first parameter has type `Type`. Use `native fn`
-/// declarations in [`NativeModule::source`] to specify default parameter
-/// values or generic type parameters.
+/// their parameter names. Unspecified parameter names default to `arg1`,
+/// `arg2`, and so on. Registering a function as `"Type.name"` defines a method
+/// on `Type`. The method takes `self` if its first parameter has type `Type`.
+/// Use `native fn` declarations in [`NativeModule::source`] to specify default
+/// parameter values or generic type parameters.
 /// [`HostModules::new`](crate::engine::HostModules::new) checks all
 /// declarations against the registered Rust signatures.
 ///
@@ -828,7 +829,7 @@ impl NativeModule {
     /// a synchronous function, a synchronous function that takes `&mut Vm`
     /// first, or an asynchronous function that returns a future. A function
     /// that takes `&mut Vm` must check permissions and limits before any side
-    /// effect, because the engine can run it again from the start:
+    /// effect because the engine can run it again from the start:
     ///
     /// ```
     /// # use sandlang::native::NativeModule;
@@ -855,8 +856,8 @@ impl NativeModule {
         self.add(name, F::signature(), f.into_native_fn())
     }
 
-    /// Sets the parameter names (excluding `self`) for the most recently
-    /// registered function if it is not declared in [`NativeModule::source`].
+    /// Sets the non-`self` parameter names for the most recently registered
+    /// function if it is not declared in [`NativeModule::source`].
     ///
     /// # Panics
     ///
@@ -894,7 +895,7 @@ impl NativeModule {
         }
     }
 
-    /// Registers the Rust-bound type `T` in this module (see [`NamedType`]).
+    /// Registers the Rust-bound type `T` in this module. See [`NamedType`].
     ///
     /// # Panics
     ///
@@ -959,8 +960,10 @@ impl NativeModule {
         self
     }
 
-    /// Appends Sand source code (types, helper functions, and `native fn`
-    /// declarations for registered functions) to this module.
+    /// Appends Sand source code to this module.
+    ///
+    /// Module source can declare types, helper functions, and `native fn`
+    /// signatures for registered Rust functions.
     pub fn source(&mut self, src: &str) -> &mut Self {
         self.source.push_str(src);
         self.source.push('\n');

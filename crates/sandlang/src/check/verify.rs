@@ -12,8 +12,8 @@
 //! - Every `impl` target type satisfies all supertraits of the implemented
 //!   trait.
 //!
-//! This pass does not reuse the type checker's trait solver. Bugs in the
-//! solver therefore fail verification at compile time.
+//! The verifier does not call the type checker's trait solver. It therefore
+//! catches trait-solver bugs at compile time.
 
 use super::*;
 

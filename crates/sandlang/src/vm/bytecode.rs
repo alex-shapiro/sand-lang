@@ -1309,13 +1309,13 @@ pub struct CodecShape {
     /// Constructor descriptor if `Decode` builds a struct through `init`.
     pub init: Option<InitCall>,
     /// Name-to-slot map for structs or `init` constructors with more than
-    /// [`INDEXED_SLOTS`] slots.
+    /// [`MAX_SCANNED_SLOTS`] slots.
     pub slot_index: Option<FxHashMap<String, u32>>,
 }
 
-/// Maximum slot count searched by linear scan during struct decoding before
-/// building [`CodecShape::slot_index`].
-pub const INDEXED_SLOTS: usize = 8;
+/// Maximum slot count scanned linearly before the compiler builds
+/// [`CodecShape::slot_index`].
+pub const MAX_SCANNED_SLOTS: usize = 8;
 
 /// Constructor metadata for decoding a struct through `init`.
 #[derive(Clone, Debug)]
@@ -1353,13 +1353,13 @@ pub enum ShapeKind {
     /// Struct `def` whose parts match its fields or `init` parameters. See
     /// [`CodecShape::init`].
     Struct(u32),
-    /// Enum `def` whose parts flatten all variant payloads in variant order.
+    /// Enum `def`. `parts` lists all variant payloads in variant order.
     Enum {
         def: u32,
         /// Runtime ID of the first variant of `def`.
-        first: u32,
+        first_variant: u32,
     },
-    /// Native value type `def` encoded and decoded via text.
+    /// Native value type `def` encoded and decoded as text.
     Native(u32, crate::vm::value::ParseValue),
     ManualEncode(crate::native::codec::EncodeFn),
     ManualDecode(crate::native::codec::DecodeFn),
@@ -1370,9 +1370,9 @@ pub enum ShapeKind {
 pub enum PartTemplate {
     /// Constant pool index of a static dictionary.
     Const(u32),
-    /// Tuple slot `i` of the outer dictionary.
+    /// Tuple slot of the outer dictionary.
     Bound(u32),
-    /// Tuple slot `i` of the dictionary built by the inner template.
+    /// Tuple slot of the dictionary built by the inner template.
     Field(Box<PartTemplate>, u32),
     /// Tuple dictionary assembled from the inner templates.
     Dict(Vec<PartTemplate>),

@@ -72,8 +72,8 @@ pub(crate) struct NativeCallState {
     pub request: Option<VmRequest>,
     /// Rooted return value from the most recent [`VmRequest::Call`].
     pub callback_result: Option<RootedValue>,
-    /// Temporary root slices kept alive across a single [`VmRequest`].
-    pub kept: Vec<Vec<VmValue>>,
+    /// Temporary root vectors for the active [`VmRequest`].
+    pub temp_roots: Vec<Vec<VmValue>>,
 }
 
 impl NativeCallState {
@@ -183,63 +183,69 @@ impl NativeContext {
 
     /// Calls the Sand function `callee` with `args` on the calling task.
     ///
-    /// Keeps `kept`, `callee`, and `args` rooted during the call without
-    /// growing the persistent root table. The returned [`VmValue`] remains
+    /// Keeps `temp_roots`, `callee`, and `args` rooted during the call. Leaves
+    /// the persistent root table unchanged. The returned [`VmValue`] remains
     /// valid until the next wait.
-    pub(crate) async fn call_keeping(&mut self, callee: VmValue, args: &[VmValue], kept: [&mut Vec<VmValue>; 2]) -> VmValue {
+    pub(crate) async fn call_keeping(&mut self, callee: VmValue, args: &[VmValue], temp_roots: [&mut Vec<VmValue>; 2]) -> VmValue {
         assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
-        let roots = self.state.lock().roots.len();
-        let mut call = Vec::with_capacity(args.len() + 1);
-        call.push(callee);
-        call.extend_from_slice(args);
-        self.wait_keeping(VmRequest::Call { callee, args: args.to_vec() }, kept, call).await;
+        let saved_root_len = self.state.lock().roots.len();
+        let mut call_roots = Vec::with_capacity(args.len() + 1);
+        call_roots.push(callee);
+        call_roots.extend_from_slice(args);
+        self.wait_keeping(VmRequest::Call { callee, args: args.to_vec() }, temp_roots, call_roots).await;
         let mut state = self.state.lock();
         let rooted = state.callback_result.take().expect("the scheduler stores the callback result before polling again");
         let result = state.roots[rooted.0 as usize];
-        state.roots.truncate(roots);
+        state.roots.truncate(saved_root_len);
         result
     }
 
-    /// Triggers garbage collection while keeping `kept` rooted.
-    pub(crate) async fn collect_keeping(&mut self, kept: [&mut Vec<VmValue>; 2]) {
-        self.wait_keeping(VmRequest::Collect, kept, Vec::new()).await;
+    /// Triggers garbage collection while keeping `temp_roots` rooted.
+    pub(crate) async fn collect_keeping(&mut self, temp_roots: [&mut Vec<VmValue>; 2]) {
+        self.wait_keeping(VmRequest::Collect, temp_roots, Vec::new()).await;
     }
 
-    /// Submits `request` while keeping `kept` and `values` rooted.
-    async fn wait_keeping(&mut self, request: VmRequest, kept: [&mut Vec<VmValue>; 2], values: Vec<VmValue>) {
-        let [a, b] = kept;
-        self.state.lock().kept = vec![std::mem::take(a), std::mem::take(b), values];
+    /// Submits `request` while keeping `temp_roots` and `values` rooted.
+    async fn wait_keeping(&mut self, request: VmRequest, temp_roots: [&mut Vec<VmValue>; 2], values: Vec<VmValue>) {
+        let [first, second] = temp_roots;
+        self.state.lock().temp_roots = vec![std::mem::take(first), std::mem::take(second), values];
         self.wait_for_request(request).await;
-        let mut lists = std::mem::take(&mut self.state.lock().kept).into_iter();
-        (*a, *b) = (lists.next().unwrap_or_default(), lists.next().unwrap_or_default());
+        let mut lists = std::mem::take(&mut self.state.lock().temp_roots).into_iter();
+        (*first, *second) = (lists.next().unwrap_or_default(), lists.next().unwrap_or_default());
     }
 
-    /// Encodes `value` into a [`Value`] using the `Encode` dictionary `encode`.
+    /// Encodes `value` into a host [`Value`] with `encode_dict`.
     ///
-    /// Pass a [`TraitDict`](super::ty::TraitDict) from the native function as
-    /// `encode`. Suspends to run custom Sand `encode` methods.
+    /// Pass a rooted [`TraitDict`](super::ty::TraitDict) for `Encode` as
+    /// `encode_dict`. Calls custom Sand `encode` methods if `value` or its
+    /// parts define them.
     ///
-    /// Fails with a `"limit"` error if `value` exceeds 512 nesting levels.
-    /// Propagates any error returned by a custom `encode` method.
-    pub async fn to_value(&mut self, value: RootedValue, encode: RootedValue) -> Result<Value, HostError<Fail>> {
-        let (value, encode) = (self.value(value), self.value(encode));
-        crate::vm::codec::to_value(self, value, encode).await
+    /// # Errors
+    ///
+    /// Returns a `"limit"` error if `value` exceeds 512 nesting levels or the
+    /// VM memory limit. Returns any error produced by a custom `encode` method.
+    pub async fn to_value(&mut self, value: RootedValue, encode_dict: RootedValue) -> Result<Value, HostError<Fail>> {
+        let (value, encode_dict) = (self.value(value), self.value(encode_dict));
+        crate::vm::codec::to_value(self, value, encode_dict).await
     }
 
-    /// Decodes `value` into a Sand value using the `Decode` dictionary
-    /// `decode`.
+    /// Decodes `value` into a rooted Sand value with `decode_dict`.
     ///
-    /// Pass a [`TraitDict`](super::ty::TraitDict) from the native function as
-    /// `decode`. Suspends to run custom Sand `decode` methods, `init`
-    /// constructors, and computed field defaults.
+    /// Pass a rooted [`TraitDict`](super::ty::TraitDict) for `Decode` as
+    /// `decode_dict`. Calls custom Sand `decode` methods, `init` constructors,
+    /// and computed field defaults as needed.
     ///
-    /// Each part of `value` must match the exact [`Value`] variant for its Sand
-    /// type. For example, `bytes` accepts only [`Value::Bytes`]. Fails with a
-    /// `"parse"` error that includes the path of a mismatched part, such as
-    /// `$.items[2]`.
-    pub async fn from_value(&mut self, value: Value, decode: RootedValue) -> Result<RootedValue, HostError<Fail>> {
-        let decode = self.value(decode);
-        let decoded = crate::vm::codec::from_value(self, value, decode).await?;
+    /// Each part of `value` must use the exact [`Value`] variant for its Sand
+    /// type. For example, a `bytes` field requires [`Value::Bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a `"parse"` error at the path of any mismatched part. Returns a
+    /// `"limit"` error if `value` exceeds 512 nesting levels or the VM memory
+    /// limit. Returns any error produced by a callback.
+    pub async fn from_value(&mut self, value: Value, decode_dict: RootedValue) -> Result<RootedValue, HostError<Fail>> {
+        let decode_dict = self.value(decode_dict);
+        let decoded = crate::vm::codec::from_value(self, value, decode_dict).await?;
         Ok(self.root(decoded))
     }
 

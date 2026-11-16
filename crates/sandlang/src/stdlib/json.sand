@@ -134,8 +134,8 @@ pub native fn parse(text: str) -> Result<Json>
 /// - unit enum variants
 /// - native value types
 ///
-/// Fails with kind `"invalid"` for a `NaN` or infinite float or an unsupported
-/// map key type. Fails with kind `"limit"` if nesting exceeds 512 levels.
+/// Fails with kind `"invalid"` for a non-finite float or an unsupported map
+/// key type. Fails with kind `"limit"` if nesting exceeds 512 levels.
 /// Propagates any error returned by a custom `Encode.encode` implementation.
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>
 
@@ -151,16 +151,16 @@ pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>
 /// parameter from the JSON object and calls `init`. Any `init` parameter can be
 /// provided in the JSON object, even if the parameter has a default.
 ///
-/// `decode` runs custom `Decode.decode` implementations, `init`, and computed
-/// defaults as it visits each value. A custom decoder, `init`, or default
-/// expression can therefore run before a later value fails to decode.
+/// `decode` runs custom `Decode.decode` methods, `init`, and computed defaults
+/// as it visits each value. Those calls still run even if a later value fails
+/// to decode.
 ///
 /// Fails with kind `"parse"` on invalid JSON syntax, missing required fields,
 /// or type mismatches. `decode` prefixes value error messages with the JSON
 /// path, such as `$.items[2].price`.
 pub native fn decode<T: Decode>(text: str) -> Result<T>
 
-/// Converts `value` into a `Json` value using the same representation as
+/// Converts `value` into a `Json` value with the same representation as
 /// `encode`.
 ///
 /// Aborts with the error that `encode(value)` would return.
