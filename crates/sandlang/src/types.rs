@@ -543,9 +543,11 @@ macro_rules! builtins {
                 const TRAITS: Builtins = A::TRAITS.union(B::TRAITS);
             }
 
-            /// A single built-in trait, whose dictionary a
-            /// [`TraitDict`](crate::native::ty::TraitDict) holds.
-            pub trait One: Set {
+            /// Marker for a single built-in trait.
+            ///
+            /// [`TraitDict`](crate::native::ty::TraitDict) uses this trait to
+            /// select a dictionary parameter.
+            pub trait Single: Set {
                 const BUILTIN: Builtin;
             }
 
@@ -557,7 +559,7 @@ macro_rules! builtins {
                     const TRAITS: Builtins = Builtins::of(Builtin::$name);
                 }
 
-                impl One for $name {
+                impl Single for $name {
                     const BUILTIN: Builtin = Builtin::$name;
                 }
             )*
@@ -573,7 +575,9 @@ impl Builtin {
     }
 
     /// Returns `true` if the checker verifies `self` from the structure of a
-    /// type, without a dictionary (`Eq`, `Ord`, and `Hash`).
+    /// type without a runtime dictionary.
+    ///
+    /// This applies to `Eq`, `Ord`, and `Hash`.
     pub fn is_derived(self) -> bool {
         matches!(self, Builtin::Eq | Builtin::Ord | Builtin::Hash)
     }
@@ -741,8 +745,7 @@ pub struct TypeDef {
     pub is_pub: bool,
     pub doc: Option<Arc<str>>,
     pub span: Span,
-    /// The codec traits of a native type, or `None` for a type that Sand
-    /// source declares.
+    /// Codec traits declared on a native type, or `None` for a Sand type.
     pub codecs: Option<crate::native::codec::NativeCodecs>,
 }
 

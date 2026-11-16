@@ -142,7 +142,7 @@ pub struct ParamSig {
 
 #[derive(Clone, Debug)]
 pub enum DefaultArg {
-    /// Inlined closed constant expression (see [`closed_const`]).
+    /// Closed constant expression inlined at call sites. See [`closed_const`].
     Inline(Arc<ast::Expr>),
     /// Computed by a helper function from the preceding parameters.
     Helper(FnId),
@@ -277,7 +277,7 @@ pub(crate) struct DeclRules<'s> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DefaultRule {
     All,
-    /// Only closed constants (`closed_const`).
+    /// Closed constant expressions only. See [`closed_const`].
     Const,
     None,
 }
@@ -399,9 +399,10 @@ impl CheckedProgram {
         self.syms.str(s)
     }
 
-    /// Returns `true` if impl `id` uses the native default method of its trait.
+    /// Returns `true` if implementation `id` uses its codec trait's native
+    /// default method.
     pub fn is_structural_impl(&self, id: ImplId) -> bool {
-        codec::is_structural(&self.traits, &self.impls[id as usize])
+        codec::is_structural_codec_impl(&self.traits, &self.impls[id as usize])
     }
 
     /// Returns the Rust `TypeId` bound to type definition `d`, if any.
@@ -635,14 +636,15 @@ pub struct Checker {
     /// Set while checking an expression for `Session::type_of`.
     pub(crate) type_query: Option<TypeQuery>,
     pub(crate) builtins: [Option<TraitId>; Builtin::ALL.len()],
-    /// The structural impl of each codec trait for `never`.
-    pub(crate) never_impls: [Option<ImplId>; Builtin::ALL.len()],
-    /// Why each type definition does not implement a codec trait
-    /// structurally, by trait and type definition.
-    pub(crate) codec_refuted: PMap<(TraitId, TypeDefId), Arc<str>>,
-    /// The bounds that the checker finds while it checks the parts of a
-    /// structural codec impl.
-    pub(crate) codec_reqs: Option<codec::CodecReqs>,
+    /// Cached structural codec implementations for `never`, indexed by
+    /// [`Builtin`].
+    pub(crate) never_codec_impls: [Option<ImplId>; Builtin::ALL.len()],
+    /// Diagnostic reason why a type definition lacks a structural codec
+    /// implementation.
+    pub(crate) codec_failure_reasons: PMap<(TraitId, TypeDefId), Arc<str>>,
+    /// Active collector for type parameter bounds during structural codec
+    /// derivation.
+    pub(crate) codec_bound_collector: Option<codec::CodecBoundCollector>,
     /// The prelude's `Iterator` trait and `Iter` struct, which `for` loops use.
     pub(crate) iter_trait: Option<TraitId>,
     /// The prelude's `Close` trait, which `use` bindings call.
@@ -706,9 +708,9 @@ impl Default for Checker {
             type_query: None,
             budget: Arc::new(CompileBudget::default()),
             builtins: [None; Builtin::ALL.len()],
-            never_impls: [None; Builtin::ALL.len()],
-            codec_refuted: PMap::new(),
-            codec_reqs: None,
+            never_codec_impls: [None; Builtin::ALL.len()],
+            codec_failure_reasons: PMap::new(),
+            codec_bound_collector: None,
             iter_trait: None,
             close_trait: None,
             flows: PMap::new(),
@@ -1648,8 +1650,8 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Struct { fields };
     }
 
-    /// Gives the default helper of each struct field from `first_type` the
-    /// dictionaries of the struct's type parameter bounds.
+    /// Attaches the enclosing struct's type parameter dictionaries to each
+    /// field default helper starting at `first_type`.
     fn add_field_default_dicts(&mut self, first_type: usize) {
         for d in first_type..self.types.len() {
             let gens = self.types[d].generics.clone();
@@ -2289,9 +2291,10 @@ impl Checker {
     }
 
     /// Verifies that a `native fn` declaration matches its registered Rust
-    /// signature and declares each built-in trait that the Rust function
-    /// requires. Returns the trait dictionaries that the Rust function takes,
-    /// as type parameter indices and traits.
+    /// signature and trait bounds.
+    ///
+    /// Returns the `(param_index, builtin)` pairs for the trait dictionaries
+    /// accepted by the Rust function.
     fn check_native_signature(
         &mut self,
         f: &ast::FnDecl,
@@ -2303,41 +2306,42 @@ impl Checker {
     ) -> Vec<(u8, Builtin)> {
         let span = f.name.span;
         let owner = format!("the Rust function of native `{key}`");
-        let mut available: Vec<(u8, Builtin)> = Vec::new();
+        let mut declared_dicts: Vec<(u8, Builtin)> = Vec::new();
         for i in 0..generics.len() as u8 {
             for &b in Builtin::ALL {
                 if let Some(t) = self.builtins[b as usize]
                     && self.traits[t as usize].has_dict
                     && self.param_has_trait(generics[i as usize], t)
                 {
-                    available.push((i, b));
+                    declared_dicts.push((i, b));
                 }
             }
         }
         let k = sig.params.iter().take_while(|t| matches!(t, Type::Dict(..))).count();
         let (dicts, rest) = sig.params.split_at(k);
-        let taken: Vec<(u8, Builtin)> = dicts.iter().filter_map(|t| if let Type::Dict(i, b) = t { Some((*i, *b)) } else { None }).collect();
-        let mut wanted = available.iter();
-        let leads_match = taken.iter().all(|i| wanted.any(|j| j == i)) && !rest.iter().any(|t| matches!(t, Type::Dict(..)));
-        if leads_match {
+        let accepted_dicts: Vec<(u8, Builtin)> =
+            dicts.iter().filter_map(|t| if let Type::Dict(i, b) = t { Some((*i, *b)) } else { None }).collect();
+        let mut declared_iter = declared_dicts.iter();
+        let dicts_match = accepted_dicts.iter().all(|i| declared_iter.any(|j| j == i)) && !rest.iter().any(|t| matches!(t, Type::Dict(..)));
+        if dicts_match {
             let mark = self.diags.len();
             let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
             let want_ret = self.host_type(&sig.ret, generics, &owner, span);
             if self.diags.len() > mark {
-                return taken;
+                return accepted_dicts;
             }
             let have: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
             if want.as_ref() == Some(&have) && want_ret == Some(ret) {
                 self.check_native_traits(f, sig, generics);
-                return taken;
+                return accepted_dicts;
             }
         }
-        let leads: Vec<Type> = available.iter().map(|&(i, b)| Type::Dict(i, b)).collect();
+        let declared_dict_types: Vec<Type> = declared_dicts.iter().map(|&(i, b)| Type::Dict(i, b)).collect();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let names: Vec<String> = generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect();
         let show_rust =
             |t: &Type| t.render_with(&module, &|i| names.get(i as usize).cloned().unwrap_or_else(|| format!("<type parameter {i}>")));
-        let mut declared: Vec<String> = leads.iter().map(show_rust).collect();
+        let mut declared: Vec<String> = declared_dict_types.iter().map(show_rust).collect();
         declared.extend(params.iter().map(|p| self.show(p.ty)));
         let rust: Vec<String> = sig.params.iter().map(show_rust).collect();
         let msg = format!(
@@ -2670,7 +2674,7 @@ impl Checker {
             "members" => Some(Intrinsic::Members),
             _ => None,
         };
-        let mut taken_dicts = Vec::new();
+        let mut accepted_dicts = Vec::new();
         let kind = if let Some(i) = intrinsic.filter(|_| f.is_native && owner.is_none() && Some(self.cur_mod) == self.prelude) {
             FnKind::Intrinsic(i)
         } else if f.is_native {
@@ -2681,7 +2685,7 @@ impl Checker {
             };
             match self.natives.get(&key).cloned() {
                 Some(decl) => {
-                    taken_dicts = self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
+                    accepted_dicts = self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
                     if decl.names.is_some() || decl.doc.is_some() {
                         let msg =
                             format!("native `{key}` has `params` or `doc`, which apply only to a native that the module does not declare");
@@ -2708,7 +2712,7 @@ impl Checker {
                 self.error(f.name.span, "native functions can only require built-in traits");
             }
             dicts.clear();
-            for (i, b) in taken_dicts {
+            for (i, b) in accepted_dicts {
                 if let Some(tr) = self.builtin_trait(b) {
                     dicts.push((self.param_ty(generics[i as usize]), tr));
                 }
@@ -3338,8 +3342,10 @@ pub fn ctor_of(t: Ty) -> Option<Ctor> {
     })
 }
 
-/// Returns the value of `e` if it is a closed constant: a literal, an empty
-/// list or map, or a negated number. A closed parameter default is inlined.
+/// Evaluates `e` if it is a closed constant expression.
+///
+/// Closed constants include literals, negated numeric literals, empty lists,
+/// and empty maps. The checker inlines closed parameter defaults at call sites.
 pub(crate) fn closed_const(e: &ast::Expr) -> Option<ConstVal> {
     use ast::ExprKind;
     Some(match &e.kind {

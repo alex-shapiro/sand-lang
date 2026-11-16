@@ -136,10 +136,10 @@ pub fn patch_json<T: Encode>(
     request_json("PATCH", url, value, headers: headers, timeout: timeout)
 }
 
-/// Sends an HTTP request with `value` encoded as JSON, setting
-/// `Content-Type: application/json` if `headers` does not specify a
-/// `Content-Type`. Fails with the error of `json.encode` if `value` cannot be
-/// encoded.
+/// Sends an HTTP request with `value` encoded as JSON in the request body.
+///
+/// Adds `Content-Type: application/json` if `headers` omits `Content-Type`.
+/// Propagates any error from `json.encode(value)`.
 pub fn request_json<T: Encode>(
     method: str,
     url: str,

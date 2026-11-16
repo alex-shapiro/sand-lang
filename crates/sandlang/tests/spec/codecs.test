@@ -1,4 +1,4 @@
-=== custom impls nest inside custom impls and derived types
+=== custom codec implementations can be nested inside derived and custom types
 import json
 struct Celsius { degrees: float }
 impl Encode for Celsius {
@@ -43,7 +43,7 @@ Secret(v: [Celsius(degrees: 1.5), Celsius(degrees: 2.5)])
 [1,[2,[3,null]]]
 true
 
-=== an Encoder takes exactly one value during its call
+=== an Encoder accepts a single value during its encode call
 import json
 struct Twice { a: int }
 impl Encode for Twice {
@@ -90,7 +90,7 @@ Ok("[1]")
 Err(Error(message: "an `Encoder` accepts a value only during its `encode` call", kind: "invalid"))
 Err(Error(message: "no", kind: "denied"))
 
-=== a Decoder gives at most one value, and skips the input that a method does not read
+=== Decoder single-read checks and unread input skipping
 import json
 struct Twice { a: int }
 impl Decode for Twice {
@@ -141,13 +141,13 @@ print(ids)
 let bad: Result<[Id]> = json.decode("[true]")
 print(bad)
 let kinds = ["null", "true", "1", "1.5", "\"s\"", "[]", "{}"]
-struct K { k: str }
-impl Decode for K {
-    fn decode(decoder: Decoder) -> Result<K> { Ok(K(k: "\(decoder.kind()?)")) }
+struct SeenKind { name: str }
+impl Decode for SeenKind {
+    fn decode(decoder: Decoder) -> Result<SeenKind> { Ok(SeenKind(name: "\(decoder.kind()?)")) }
 }
 for text in kinds {
-    let k: K = json.decode(text)?
-    print(k.k)
+    let seen: SeenKind = json.decode(text)?
+    print(seen.name)
 }
 let l: Result<Late> = json.decode("1")
 print(l)
@@ -166,7 +166,7 @@ List
 Map
 Err(Error(message: "a `decode` method asked for the kind of a value that it read", kind: "invalid"))
 
-=== an impl for one instantiation and the impls of never
+=== concrete generic Encode implementation and never codecs
 import json
 struct Wrapper<T> { v: T }
 impl Encode for Wrapper<int> {
@@ -185,7 +185,7 @@ print(json.encode(ok)?)
 Err(Error(message: "$[0]: cannot decode a value of type never", kind: "parse"))
 {"Ok":[3]}
 
-=== a type without its own Encode impl explains why it does not derive Encode
+=== diagnostics explain why a type lacks a derived Encode implementation
 import json
 struct Wrapper<T> { v: T }
 impl Encode for Wrapper<int> {
@@ -202,7 +202,7 @@ let e: Email = json.decode("{\"raw\": \"B\"}").unwrap()
 10: Wrapper<str> does not implement `Encode`
 11: Email does not implement `Encode` because the parameters of `Email.init` differ from its fields
 
-=== an init default reads the parameters before it, as a call does
+=== decoding evaluates init parameter defaults using earlier parameters
 import json
 struct Span {
     lo: int
@@ -214,27 +214,27 @@ struct Name {
     label: str
     fn init(name: str, label: str = name.to_upper()) -> Name { Name(name: name, label: label) }
 }
-struct Range2<T: Num> {
+struct Interval<T: Num> {
     lo: T
     hi: T
-    fn init(lo: T, hi: T = lo + T.one()) -> Range2<T> { Range2(lo: lo, hi: hi) }
+    fn init(lo: T, hi: T = lo + T.one()) -> Interval<T> { Interval(lo: lo, hi: hi) }
 }
 let s: Span = json.decode("{\"lo\": 1}")?
 print(s == Span(lo: 1))
 print(s)
 let n: Name = json.decode("{\"name\": \"ab\"}")?
 print(n)
-let r: Range2<float> = json.decode("{\"lo\": 1.5}")?
+let r: Interval<float> = json.decode("{\"lo\": 1.5}")?
 print(r)
-print(r == Range2(lo: 1.5))
+print(r == Interval(lo: 1.5))
 --- stdout
 true
 Span(lo: 1, hi: 11)
 Name(name: "ab", label: "AB")
-Range2(lo: 1.5, hi: 2.5)
+Interval(lo: 1.5, hi: 2.5)
 true
 
-=== the encode walker reads each container as a for loop that begins with it does
+=== the encode walker snapshots maps and reads container lengths on entry
 import json
 struct Key { s: str }
 impl Encode for Key {
@@ -264,25 +264,25 @@ true
 Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))
 Err(Error(message: "nesting too deep at line 1, column 521", kind: "parse"))
 
-=== an option chain round-trips through JSON to the nesting limit, because Some opens no bracket
+=== Some wrappers are excluded from the JSON nesting limit
 import json
-struct D { n: int, next: D? }
-fn chain(k: int) -> D {
-    var d = D(n: 0, next: None)
+struct Link { n: int, next: Link? }
+fn chain(k: int) -> Link {
+    var link = Link(n: 0, next: None)
     for i in 1..k {
-        d = D(n: i, next: Some(d))
+        link = Link(n: i, next: Some(link))
     }
-    d
+    link
 }
 let text = json.encode(chain(500))?
-let back: D = json.decode(text)?
+let back: Link = json.decode(text)?
 print(back.n)
 print(json.encode(chain(513)))
 --- stdout
 499
 Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))
 
-=== a custom encode method fails if a task that it spawns has not finished its write
+=== encoding fails if an encode method returns while a spawned write is still running
 import json
 struct Slow { n: int }
 impl Encode for Slow {
@@ -309,7 +309,7 @@ print("after")
 Err(Error(message: "an `encode` method returned before its write ended", kind: "invalid"))
 after
 
-=== a custom decode method fails if a task that it spawns has not finished its read
+=== decoding fails if a decode method returns while a spawned read is still running
 import json
 struct Slow { n: int }
 impl Decode for Slow {
@@ -337,7 +337,7 @@ Err(Error(message: "a `decode` method returned before its read ended", kind: "in
 spawned: {w}
 after
 
-=== a local generic function builds dictionaries from its own bounds
+=== trait dictionaries for local generic functions with Encode bounds
 import json
 trait Size {
     fn size(self) -> int
@@ -349,7 +349,7 @@ impl<T: Size> Size for [T] {
     fn size(self) -> int { self.map(x => x.size()).sum() }
 }
 fn main() -> Result<()> {
-    fn enc2<T: Encode>(x: T) -> Result<str> { json.encode([x, x]) }
+    fn encode_pair<T: Encode>(x: T) -> Result<str> { json.encode([x, x]) }
     fn opt<T: Encode>(x: T) -> Result<str> {
         let o: T? = Some(x)
         json.encode(o)
@@ -360,7 +360,7 @@ fn main() -> Result<()> {
         for _ in 0..2 { out += json.encode([x])? }
         Ok(out)
     }
-    print(enc2(5)?)
+    print(encode_pair(5)?)
     print(opt("a")?)
     print(both(3))
     print(looped(true)?)
@@ -373,19 +373,19 @@ main().unwrap()
 2
 [true][true]
 
-=== an init with the fields as parameters in another order keeps Encode, and InputKind encodes
+=== derived Encode with reordered init parameters and InputKind
 import json
-struct P2 {
+struct Pair {
     a: int
     b: str
-    fn init(b: str, a: int) -> P2 { P2(a: a, b: b) }
+    fn init(b: str, a: int) -> Pair { Pair(a: a, b: b) }
 }
-let text = json.encode(P2("x", 1))?
+let text = json.encode(Pair("x", 1))?
 print(text)
-let back: P2 = json.decode(text)?
+let back: Pair = json.decode(text)?
 print(back)
 print(json.encode([InputKind.Int, InputKind.Map])?)
 --- stdout
 {"a":1,"b":"x"}
-P2(a: 1, b: "x")
+Pair(a: 1, b: "x")
 ["Int","Map"]

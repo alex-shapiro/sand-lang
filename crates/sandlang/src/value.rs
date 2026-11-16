@@ -12,16 +12,16 @@ use std::fmt;
 use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
 
-/// The Rust representation of a Sand value of a type that implements
-/// `Encode` or `Decode`.
+/// Host representation of a Sand value for types that implement `Encode` or
+/// `Decode`.
 ///
 /// A `Value` is independent of the VM and remains valid after a run ends.
 /// [`NativeContext::to_value`](crate::native::context::NativeContext::to_value)
-/// encodes a Sand value as a `Value`, and
+/// encodes a Sand value into a `Value`.
 /// [`NativeContext::from_value`](crate::native::context::NativeContext::from_value)
-/// decodes one.
+/// decodes a `Value` back into the VM.
 ///
-/// `Debug` formats structs and variants with their type names, such as
+/// `Debug` formats structs and variants with their qualified names, such as
 /// `Struct(shop.Order { id: Int(1) })`.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -240,14 +240,14 @@ fn debug_named_fields(mut out: fmt::DebugStruct<'_, '_>, names: &[String], value
     out.finish()
 }
 
-/// Converts a Rust value into a [`Value`] constant, such as the default of a
-/// field of a native struct (`#[sand(default)]`).
+/// Converts a Rust value into a constant [`Value`] for host APIs and
+/// `#[sand(default)]` field defaults.
 ///
 /// Common Rust types and native value types implement `ToValue`.
 /// [`#[derive(SandStruct)]`](crate::SandStruct) and
-/// [`#[derive(SandEnum)]`](crate::SandEnum) derive it for structs and enums.
-/// A derived `to_value` returns the structure of the Rust value. It does
-/// not apply the `Encode` impls of Sand code.
+/// [`#[derive(SandEnum)]`](crate::SandEnum) derive `ToValue` for structs and
+/// enums. Derived `to_value` implementations mirror the Rust type's fields or
+/// variants without running Sand `Encode` implementations.
 ///
 /// ```
 /// # use sandlang::value::{ToValue, Value};
@@ -460,36 +460,37 @@ pub(crate) fn qualified_name_module(rust_module: &str) -> Option<&str> {
     (rust_module != "prelude").then_some(rust_module)
 }
 
-/// Bytes counted for each [`Value`] that a [`ValueSink`] builds.
+/// Memory byte estimate charged for each [`Value`] node.
 const VALUE_BYTES: usize = size_of::<Value>();
 
-/// The maximum nesting depth of a [`Value`] that a [`ValueSink`] builds,
-/// counting each `Some`. The default drop of a `Value` recurses once per
-/// level.
+/// Maximum container nesting depth accepted by [`ValueSink`], including `Some`
+/// wrappers.
+///
+/// Bounding depth prevents stack overflow during recursive `Drop` of [`Value`].
 const MAX_VALUE_DEPTH: usize = 512;
 
-/// An open container of a [`ValueSink`].
-enum Partial {
+/// Open container under construction in [`ValueSink`].
+enum PartialValue {
     List(Vec<Value>),
     Tuple(Vec<Value>),
     Set(Vec<Value>),
-    /// Map entries, and whether the last entry has its key but not its value.
+    /// Map entries and a flag that is `true` after pushing a key while
+    /// awaiting its value.
     Map(Vec<(Value, Value)>, bool),
     Struct(Arc<StructDesc>, Vec<Value>),
     Variant(Arc<VariantDesc>, Vec<Value>),
     Some(Vec<Value>),
 }
 
-/// Builds a [`Value`] from the encode walker.
+/// [`EncodeSink`] that assembles a host [`Value`].
 pub(crate) struct ValueSink {
     root: Option<Value>,
-    open: Vec<Partial>,
-    /// The bytes of the value that the sink builds.
+    open: Vec<PartialValue>,
+    /// Total bytes accounted for the value under construction.
     allocated: usize,
-    /// The memory of the value that the sink builds, which the memory limit
-    /// counts. It reserves up to twice `allocated` ahead.
+    /// Memory reservation tracked against the VM memory limit.
     reservation: Reservation,
-    /// Cached qualified names of native value types.
+    /// Interned qualified names for native value types.
     type_names: FxHashMap<String, Arc<str>>,
 }
 
@@ -505,15 +506,14 @@ impl ValueSink {
         ValueSink { root: None, open: Vec::new(), allocated: 0, reservation: Reservation::new(memory), type_names: FxHashMap::default() }
     }
 
-    /// Returns the value that the walker wrote, and the reservation of its
-    /// memory.
+    /// Takes the completed [`Value`] and its memory [`Reservation`].
     pub(crate) fn take(&mut self) -> Option<(Value, Reservation)> {
         let root = self.root.take()?;
         let sibling = self.reservation.sibling();
         Some((root, std::mem::replace(&mut self.reservation, sibling)))
     }
 
-    /// Reserves `bytes` more within the memory limit.
+    /// Reserves `bytes` additional bytes within the VM memory limit.
     fn grow(&mut self, bytes: usize) -> CodecResult {
         self.allocated = self.allocated.saturating_add(bytes);
         if self.allocated <= self.reservation.bytes() {
@@ -527,7 +527,7 @@ impl ValueSink {
     }
 
     fn push(&mut self, value: Value) -> CodecResult {
-        // An open container counted the slot of `value` when it opened.
+        // `open` pre-reserves element slots for every open container.
         if self.open.is_empty() {
             self.grow(VALUE_BYTES)?;
         }
@@ -535,19 +535,19 @@ impl ValueSink {
         Ok(())
     }
 
-    /// Places `value` in the innermost open container, or as the root.
+    /// Appends `value` to the innermost open container or stores it as `root`.
     fn place(&mut self, value: Value) {
         match self.open.last_mut() {
             None => self.root = Some(value),
             Some(
-                Partial::List(items)
-                | Partial::Tuple(items)
-                | Partial::Set(items)
-                | Partial::Struct(_, items)
-                | Partial::Variant(_, items)
-                | Partial::Some(items),
+                PartialValue::List(items)
+                | PartialValue::Tuple(items)
+                | PartialValue::Set(items)
+                | PartialValue::Struct(_, items)
+                | PartialValue::Variant(_, items)
+                | PartialValue::Some(items),
             ) => items.push(value),
-            Some(Partial::Map(entries, has_key)) => {
+            Some(PartialValue::Map(entries, has_key)) => {
                 match entries.last_mut() {
                     Some(entry) if *has_key => entry.1 = value,
                     _ => entries.push((value, Value::Unit)),
@@ -557,14 +557,13 @@ impl ValueSink {
         }
     }
 
-    /// Opens a container of `len` parts, which `partial` builds in a vector
-    /// with that capacity.
-    fn open<T>(&mut self, len: usize, partial: impl FnOnce(Vec<T>) -> Partial) -> CodecResult {
+    /// Pushes a new open container with pre-reserved capacity for `len` items.
+    fn open<T>(&mut self, len: usize, build: impl FnOnce(Vec<T>) -> PartialValue) -> CodecResult {
         if self.open.len() >= MAX_VALUE_DEPTH {
             return crate::vm::codec::too_deep();
         }
         self.grow(len.saturating_mul(size_of::<T>()))?;
-        self.open.push(partial(Vec::with_capacity(len)));
+        self.open.push(build(Vec::with_capacity(len)));
         Ok(())
     }
 }
@@ -623,46 +622,46 @@ impl EncodeSink for ValueSink {
     }
 
     fn begin_some(&mut self) -> CodecResult {
-        self.open(1, Partial::Some)
+        self.open(1, PartialValue::Some)
     }
 
     fn begin_list(&mut self, len: usize) -> CodecResult {
-        self.open(len, Partial::List)
+        self.open(len, PartialValue::List)
     }
 
     fn begin_tuple(&mut self, len: usize) -> CodecResult {
-        self.open(len, Partial::Tuple)
+        self.open(len, PartialValue::Tuple)
     }
 
     fn begin_set(&mut self, len: usize) -> CodecResult {
-        self.open(len, Partial::Set)
+        self.open(len, PartialValue::Set)
     }
 
     fn begin_map(&mut self, len: usize) -> CodecResult {
-        self.open(len, |entries| Partial::Map(entries, false))
+        self.open(len, |entries| PartialValue::Map(entries, false))
     }
 
     fn begin_struct(&mut self, desc: &Arc<StructDesc>) -> CodecResult {
-        self.open(desc.fields.len(), |fields| Partial::Struct(desc.clone(), fields))
+        self.open(desc.fields.len(), |fields| PartialValue::Struct(desc.clone(), fields))
     }
 
     fn begin_variant(&mut self, desc: &Arc<VariantDesc>, len: usize) -> CodecResult {
         if len == 0 {
-            self.open.push(Partial::Variant(desc.clone(), Vec::new()));
+            self.open.push(PartialValue::Variant(desc.clone(), Vec::new()));
             return Ok(());
         }
-        self.open(len, |payload| Partial::Variant(desc.clone(), payload))
+        self.open(len, |payload| PartialValue::Variant(desc.clone(), payload))
     }
 
     fn end(&mut self) -> CodecResult {
         let value = match self.open.pop() {
-            Some(Partial::List(items)) => Value::List(items),
-            Some(Partial::Tuple(items)) => Value::Tuple(items),
-            Some(Partial::Set(items)) => Value::Set(items),
-            Some(Partial::Map(entries, _)) => Value::Map(entries),
-            Some(Partial::Struct(ty, fields)) => Value::Struct(StructValue { ty, fields: fields.into() }),
-            Some(Partial::Variant(variant, payload)) => Value::Variant(VariantValue { variant, payload: payload.into() }),
-            Some(Partial::Some(payload)) => Value::Variant(VariantValue { variant: option_desc(true), payload: payload.into() }),
+            Some(PartialValue::List(items)) => Value::List(items),
+            Some(PartialValue::Tuple(items)) => Value::Tuple(items),
+            Some(PartialValue::Set(items)) => Value::Set(items),
+            Some(PartialValue::Map(entries, _)) => Value::Map(entries),
+            Some(PartialValue::Struct(ty, fields)) => Value::Struct(StructValue { ty, fields: fields.into() }),
+            Some(PartialValue::Variant(variant, payload)) => Value::Variant(VariantValue { variant, payload: payload.into() }),
+            Some(PartialValue::Some(payload)) => Value::Variant(VariantValue { variant: option_desc(true), payload: payload.into() }),
             None => return Ok(()),
         };
         self.place(value);
@@ -670,54 +669,54 @@ impl EncodeSink for ValueSink {
     }
 }
 
-/// An open container of a [`ValueSource`].
-struct Level {
-    kind: LevelKind,
-    /// The path segment of the current member.
+/// Active container frame in [`ValueSource`].
+struct ValueSourceFrame {
+    kind: ValueSourceFrameKind,
+    /// Path segment for the current element or field.
     segment: Option<String>,
     count: usize,
 }
 
-enum LevelKind {
-    /// A list, set, tuple, or positional payload.
+enum ValueSourceFrameKind {
+    /// Elements of a list, set, tuple, or positional variant payload.
     Items(std::vec::IntoIter<Value>),
-    /// A map, and the value of the entry whose key the walker reads.
+    /// Remaining map entries and the pending value for the current key.
     Map(std::vec::IntoIter<(Value, Value)>, Option<Value>),
-    /// The fields of a struct or of a named payload.
+    /// Field names and values of a struct or named variant payload.
     Fields(Vec<String>, std::vec::IntoIter<Value>),
-    /// `Some`, whose payload is the value to read next.
+    /// `Some` wrapper around the value in `ValueSource::next`.
     Some,
-    /// A variant, whose payload level follows it.
+    /// Enum variant awaiting closure of its payload frame.
     Variant,
 }
 
-/// Reads a [`Value`] for the decode walker. It accepts only the exact form of
-/// each Sand type, such as `Value::Bytes` for `bytes`.
+/// [`DecodeSource`] that reads from a host [`Value`].
+///
+/// Requires the exact [`Value`] variant for each Sand type, such as
+/// [`Value::Bytes`] for `bytes`.
 pub(crate) struct ValueSource {
-    /// The value to read next.
     next: Option<Value>,
-    levels: Vec<Level>,
-    /// The payload of the variant from the last `begin_variant`, and its
-    /// field names.
+    frames: Vec<ValueSourceFrame>,
+    /// Payload values stashed by `begin_variant` until `begin_payload`.
     payload: Vec<Value>,
     payload_names: Vec<String>,
 }
 
 impl ValueSource {
     pub(crate) fn new(value: Value) -> ValueSource {
-        ValueSource { next: Some(value), levels: Vec::new(), payload: Vec::new(), payload_names: Vec::new() }
+        ValueSource { next: Some(value), frames: Vec::new(), payload: Vec::new(), payload_names: Vec::new() }
     }
 
     fn fail<T>(&self, msg: impl fmt::Display) -> CodecResult<T> {
         Err(HostError::new("parse", format!("{}: {msg}", self.path())))
     }
 
-    /// Takes the value to read next.
+    /// Consumes and returns the next pending value.
     fn take(&mut self, what: &str) -> CodecResult<Value> {
         if let Some(v) = self.next.take() {
             return Ok(v);
         }
-        if let Some(Level { kind: LevelKind::Map(_, value @ Some(_)), .. }) = self.levels.last_mut() {
+        if let Some(ValueSourceFrame { kind: ValueSourceFrameKind::Map(_, value @ Some(_)), .. }) = self.frames.last_mut() {
             return Ok(value.take().unwrap_or(Value::Unit));
         }
         self.fail(format!("expected {what}, found no value"))
@@ -727,14 +726,14 @@ impl ValueSource {
         self.fail(format!("expected {what}, found {}", kind_name(found)))
     }
 
-    fn open(&mut self, kind: LevelKind) {
-        self.levels.push(Level { kind, segment: None, count: 0 });
+    fn open(&mut self, kind: ValueSourceFrameKind) {
+        self.frames.push(ValueSourceFrame { kind, segment: None, count: 0 });
     }
 
     fn peek(&self) -> Option<&Value> {
-        match (&self.next, self.levels.last()) {
+        match (&self.next, self.frames.last()) {
             (Some(v), _) => Some(v),
-            (None, Some(Level { kind: LevelKind::Map(_, Some(v)), .. })) => Some(v),
+            (None, Some(ValueSourceFrame { kind: ValueSourceFrameKind::Map(_, Some(v)), .. })) => Some(v),
             _ => None,
         }
     }
@@ -853,7 +852,7 @@ impl DecodeSource for ValueSource {
             Value::Variant(v) if v.variant.type_name == "Option" && v.variant.name == "None" => Ok(false),
             Value::Variant(v) if v.variant.type_name == "Option" && v.variant.name == "Some" && v.payload.len() == 1 => {
                 self.next = v.payload.into_vec().pop();
-                self.open(LevelKind::Some);
+                self.open(ValueSourceFrameKind::Some);
                 Ok(true)
             }
             v => self.expected("an option", &v),
@@ -863,7 +862,7 @@ impl DecodeSource for ValueSource {
     fn begin_list(&mut self) -> CodecResult {
         match self.take("a list")? {
             Value::List(items) | Value::Set(items) => {
-                self.open(LevelKind::Items(items.into_iter()));
+                self.open(ValueSourceFrameKind::Items(items.into_iter()));
                 Ok(())
             }
             v => self.expected("a list", &v),
@@ -873,7 +872,7 @@ impl DecodeSource for ValueSource {
     fn begin_tuple(&mut self, len: usize) -> CodecResult {
         match self.take("a tuple")? {
             Value::Tuple(items) if items.len() == len => {
-                self.open(LevelKind::Items(items.into_iter()));
+                self.open(ValueSourceFrameKind::Items(items.into_iter()));
                 Ok(())
             }
             v => self.expected(&format!("a tuple of {len} elements"), &v),
@@ -883,7 +882,7 @@ impl DecodeSource for ValueSource {
     fn begin_map(&mut self) -> CodecResult {
         match self.take("a map")? {
             Value::Map(entries) => {
-                self.open(LevelKind::Map(entries.into_iter(), None));
+                self.open(ValueSourceFrameKind::Map(entries.into_iter(), None));
                 Ok(())
             }
             v => self.expected("a map", &v),
@@ -891,17 +890,17 @@ impl DecodeSource for ValueSource {
     }
 
     fn next(&mut self) -> CodecResult<bool> {
-        let Some(level) = self.levels.last_mut() else { return Ok(false) };
-        let (next, segment) = match &mut level.kind {
-            LevelKind::Items(items) => match items.next() {
-                Some(v) => (v, Some(format!("[{}]", level.count))),
+        let Some(frame) = self.frames.last_mut() else { return Ok(false) };
+        let (next, segment) = match &mut frame.kind {
+            ValueSourceFrameKind::Items(items) => match items.next() {
+                Some(v) => (v, Some(format!("[{}]", frame.count))),
                 None => return Ok(false),
             },
-            LevelKind::Map(entries, value) => match entries.next() {
+            ValueSourceFrameKind::Map(entries, value) => match entries.next() {
                 Some((k, v)) => {
                     let segment = match &k {
                         Value::Str(s) => format!("[{s:?}]"),
-                        _ => format!("[{}]", level.count),
+                        _ => format!("[{}]", frame.count),
                     };
                     *value = Some(v);
                     (k, Some(segment))
@@ -910,8 +909,8 @@ impl DecodeSource for ValueSource {
             },
             _ => return Err(Fail::internal("value: `next` outside a container").into()),
         };
-        level.count += 1;
-        level.segment = segment;
+        frame.count += 1;
+        frame.segment = segment;
         self.next = Some(next);
         Ok(true)
     }
@@ -919,7 +918,7 @@ impl DecodeSource for ValueSource {
     fn begin_struct(&mut self, desc: &StructDesc) -> CodecResult {
         match self.take(&desc.type_name)? {
             Value::Struct(s) if s.ty.type_name == desc.type_name => {
-                self.open(LevelKind::Fields(s.ty.fields.clone(), s.fields.into_vec().into_iter()));
+                self.open(ValueSourceFrameKind::Fields(s.ty.fields.clone(), s.fields.into_vec().into_iter()));
                 Ok(())
             }
             v => self.expected(&format!("`{}`", desc.type_name), &v),
@@ -927,14 +926,14 @@ impl DecodeSource for ValueSource {
     }
 
     fn next_field(&mut self) -> CodecResult<Option<Cow<'_, str>>> {
-        let Some(level) = self.levels.last_mut() else { return Ok(None) };
-        let LevelKind::Fields(names, values) = &mut level.kind else {
+        let Some(frame) = self.frames.last_mut() else { return Ok(None) };
+        let ValueSourceFrameKind::Fields(names, values) = &mut frame.kind else {
             return Err(Fail::internal("value: a field outside a struct").into());
         };
         let Some(v) = values.next() else { return Ok(None) };
-        let name = names.get(level.count).cloned().unwrap_or_default();
-        level.count += 1;
-        level.segment = Some(format!(".{name}"));
+        let name = names.get(frame.count).cloned().unwrap_or_default();
+        frame.count += 1;
+        frame.segment = Some(format!(".{name}"));
         self.next = Some(v);
         Ok(Some(Cow::Owned(name)))
     }
@@ -944,7 +943,7 @@ impl DecodeSource for ValueSource {
             Value::Variant(v) if v.variant.type_name == type_name => {
                 self.payload = v.payload.into_vec();
                 self.payload_names = v.variant.fields.clone().unwrap_or_default();
-                self.open(LevelKind::Variant);
+                self.open(ValueSourceFrameKind::Variant);
                 Ok(Cow::Owned(v.variant.name.clone()))
             }
             v => self.expected(&format!("a variant of `{type_name}`"), &v),
@@ -956,12 +955,12 @@ impl DecodeSource for ValueSource {
         match form {
             PayloadForm::Unit if payload.is_empty() => Ok(()),
             PayloadForm::Positional(n) if payload.len() == n => {
-                self.open(LevelKind::Items(payload.into_iter()));
+                self.open(ValueSourceFrameKind::Items(payload.into_iter()));
                 Ok(())
             }
             PayloadForm::Named => {
                 let names = std::mem::take(&mut self.payload_names);
-                self.open(LevelKind::Fields(names, payload.into_iter()));
+                self.open(ValueSourceFrameKind::Fields(names, payload.into_iter()));
                 Ok(())
             }
             _ => {
@@ -980,19 +979,19 @@ impl DecodeSource for ValueSource {
     }
 
     fn end(&mut self) -> CodecResult {
-        let level = self.levels.pop();
-        if let Some(Level { kind: LevelKind::Items(..) | LevelKind::Fields(..), .. }) = level
-            && let Some(Level { kind: LevelKind::Variant, .. }) = self.levels.last()
+        let frame = self.frames.pop();
+        if let Some(ValueSourceFrame { kind: ValueSourceFrameKind::Items(..) | ValueSourceFrameKind::Fields(..), .. }) = frame
+            && let Some(ValueSourceFrame { kind: ValueSourceFrameKind::Variant, .. }) = self.frames.last()
         {
-            self.levels.pop();
+            self.frames.pop();
         }
         Ok(())
     }
 
     fn path(&self) -> String {
         let mut s = String::from("$");
-        for level in &self.levels {
-            if let Some(seg) = &level.segment {
+        for frame in &self.frames {
+            if let Some(seg) = &frame.segment {
                 s.push_str(seg);
             }
         }

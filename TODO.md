@@ -114,19 +114,18 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ _Testing._ Compare fuel across hash seeds in the spec suite. Add a test
       configuration option to set the hash seed.
 - [ ] ❓ _Testing._ Compare fuel between a 32-bit and a 64-bit target. Only code
-      review currently verifies cross-platform fuel determinism. Add programs
-      with pinned fuel totals that run on both a native target and `wasm32`.
-      Include a host function that takes an `Encoded` argument.
+      review verifies cross-platform fuel determinism. Add programs with pinned
+      fuel totals for both a native target and `wasm32`. Include a host function
+      that takes an `Encoded` argument.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
       recurse once per nesting level. Deep values can overflow a small host
       thread stack in debug builds before reaching the 256-level limit.
-- [ ] ❓ _Embedding._ Clone, compare, and drop a deep `Value` iteratively. The
-      derived `Clone` and `PartialEq` implementations and the default drop
-      recurse once per level. On a 512-level value from a conversion, a debug
-      build uses up to 721 KiB of stack for `clone`, 417 KiB for `==`, and
-      129 KiB for drop. A host can also construct a `Value` deeper than 512
-      levels in Rust.
+- [ ] ❓ _Embedding._ Clone, compare, and drop a deep `Value` iteratively. Derived
+      `Clone`, derived `PartialEq`, and default `Drop` recurse once per level. On
+      a 512-level value from a conversion, a debug build uses up to 721 KiB of
+      stack for `clone`, 417 KiB for `==`, and 129 KiB for `drop`. A host can
+      also construct a `Value` deeper than 512 levels in Rust.
 - [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form. This lets
       `#[sand(default)]` support value-type fields and lets `json.decode`
       evaluate constant value-type defaults directly.
@@ -406,64 +405,67 @@ Visible defects that rarely block users.
 
 ### Embedding
 
-- [ ] ❓ Decide whether a codec walk rewinds a part that reaches the memory
-      limit after a callback. Now the run stops, because the part has moved
-      the source or written to the sink. A request loop with a custom
-      `Decode` and garbage on the heap passes at 40M, stops at 44M and 48M,
-      and passes at 52M. Sources and sinks could save a mark before each part,
-      and the walker could restore its frames; `JsonSource` and `TextOut` can
-      rewind cheaply, but `ValueSource` must change to read by index. A rewind
-      would also let `Encoder.encode` and `Decoder.decode` run their first
-      pass synchronously.
-- [ ] ❓ Decide whether generic native types may derive `Encode` and `Decode`
-      with `#[sand(encode, decode)]`. The design doc denies both forms,
-      because a manual Rust codec cannot run callbacks for an erased `T`, so
-      types such as `Labeled<T>` lose the codecs that they had on main. The
-      derived form needs no Rust code.
-- [ ] ❓ Decide what `Decoder.kind()` reports for a host `Option.None`. It
-      reports `Null`, but the `unit()` read of `from_value` denies `None`.
-      Either `kind()` reports `Variant`, or `unit()` accepts `None` as it
-      accepts JSON `null`.
-- [ ] ⚪ Check the growth of a set or map table before the part, as the decode
-      walker does for a list. After a callback, a set or map that grows past
-      the limit stops the run, where a collection could help. The list check
-      also runs before the walker knows that another element follows, so a
-      full list that ends needs room it never uses.
-- [ ] ❓ Decide whether `JsonSource` denies numbers out of range, as
-      serde_json does. `json.parse("[1e999]")` gives `Float(inf)`, which
-      `json.encode` then denies.
-- [ ] ⚪ Say in each codec doc what a nesting level is. The walker counts Sand
-      containers without `Some`, `TextOut` and `JsonSource` count JSON
-      brackets, and `ValueSink` counts `Value` nodes with `Some`.
-- [ ] ⚪ Deny `impl Encode for T {}` on a struct whose `init` parameters differ
-      from its fields, with the reason that the derived impl gives.
-- [ ] ⚪ Derive `ToValue` only for native types whose codec is derived. For a
-      type with a manual codec, `x.to_value()` gives a different `Value` than
-      `NativeContext::to_value`, so `from_value` of the first form fails.
-- [ ] ⚪ Run the last step of `json.to_json` (the parse of complete text) under
-      collect and retry. After a callback, a memory failure there stops the
-      run, although the step can run again.
-- [ ] ⚪ Use one map key rule for JSON encode and decode. `JsonSink` denies
-      `bytes` and `Option` keys, but `JsonSource` accepts them, so
-      `[int?: int]` decodes `{"1": 1}` and cannot encode it.
-- [ ] ⚪ Check that a manual Rust `Encode` impl writes exactly one value. The
-      walker passes its sink to `native::codec::Encode::encode` without a
-      count, so a host impl that writes two values or omits `end()` makes
-      `json.encode` return invalid JSON. A typed sink interface, as in
-      serde's `SerializeStruct::serialize_field`, would also let `JsonSink` and
-      `ValueSink` drop their own field and key counters.
-- [ ] ⚪ Borrow the input text of a synchronous `json.parse`. `JsonSource::new`
-      copies the whole input, because a source cannot reach the heap across
-      the callbacks of `json.decode`.
-- [ ] ❓ _Testing._ Add a stress mode that fails the Nth memory check of a
-      native call, not only the first. `retry_stress` fails only the first
-      check, so it never tests a check after a side effect. A codec walk
-      that waits for a callback ends with the memory limit if a check fails
-      inside a part (see the TRADEOFFS decision on collection after a
-      callback), so such a mode must expect that ending there.
-- [ ] ⚪ Decode a list from a `Value::List` only. `DecodeSource` reads lists and
-      sets with one `begin_list` request, so `NativeContext::from_value`
-      accepts a `Value::Set` for a list type.
+- [ ] ❓ Decide whether a codec walk should rewind a part that hits `max_memory`
+      after a callback. Today, the run stops if the part has already read from
+      the source or written to the sink. In a request loop with a custom
+      `Decode` implementation and heap garbage, the run passes at 40 MB and
+      52 MB. That same loop stops at 44 MB and 48 MB. Each source and sink could
+      save a position before each part so the walker can restore its frames.
+      `JsonSource` and `JsonTextWriter` can rewind cheaply. `ValueSource` would
+      need indexed reads. Rewinding would also let `Encoder.encode` and
+      `Decoder.decode` run their first pass synchronously.
+- [ ] ❓ Decide whether generic native types can derive `Encode` and `Decode`
+      with `#[sand(encode, decode)]`. Manual Rust codecs cannot run callbacks
+      for an erased type parameter `T`. The macro therefore rejects both manual
+      and derived codecs on generic native types. Generic types such as
+      `Labeled<T>` lost their derived codecs from `main`. Derived codecs run in
+      the VM walker without generated Rust code.
+- [ ] ❓ Align `Decoder.kind()` and `ValueSource::unit` on host `Option.None`.
+      `Decoder.kind()` reports `Null` for `Option.None`. `ValueSource::unit`
+      rejects `Option.None`. Either report `Variant` from `kind()`, or accept
+      `Option.None` in `ValueSource::unit` to match JSON `null`.
+- [ ] ⚪ Check set and map table growth before decoding the next entry. After a
+      callback, table growth past `max_memory` stops the run instead of
+      triggering garbage collection. Also check list growth only after
+      confirming that another element follows. Today, the decode walker reserves
+      space for another element before checking for the end of a full list.
+- [ ] ❓ Decide whether `JsonSource` should reject out-of-range numbers like
+      `serde_json`. `json.parse("[1e999]")` returns `Float(inf)`. `json.encode`
+      then rejects that infinite float.
+- [ ] ⚪ Define a nesting level in each codec doc comment. The walkers count Sand
+      containers and skip `Some`. `JsonTextWriter` and `JsonSource` count JSON
+      brackets. `ValueSink` counts `Value` nodes including `Some`.
+- [ ] ⚪ Reject an empty `impl Encode for T {}` block on a struct whose `init`
+      parameters differ from its fields. Report why the compiler cannot derive
+      `Encode` for `T`.
+- [ ] ⚪ Derive `ToValue` only for native types with derived codecs. On a type
+      with a manual codec, `ToValue::to_value` builds a different `Value` than
+      `NativeContext::to_value`. `NativeContext::from_value` then rejects the
+      `ToValue` output.
+- [ ] ⚪ Retry the final text-parsing step of `json.to_json` after garbage
+      collection. After a callback, a memory limit failure during that parse
+      stops the run. The engine can safely repeat that parse after collecting
+      garbage.
+- [ ] ⚪ Match JSON map key rules between encoding and decoding. `JsonSink`
+      rejects `bytes` and `Option` keys. `JsonSource` accepts both key types. A
+      script can decode `{"1": 1}` into `[int?: int]` and then fail to encode
+      that map back to JSON.
+- [ ] ⚪ Verify that each manual `native::codec::Encode` implementation writes a
+      single complete value. The encode walker passes its sink without tracking
+      root writes or open containers. If a host implementation writes two values
+      or omits `end()`, `json.encode` returns invalid JSON. A typed sink
+      interface like `serde::ser::SerializeStruct` would enforce that rule and
+      remove separate field and key counters from `JsonSink` and `ValueSink`.
+- [ ] ⚪ Borrow the input text during synchronous `json.parse`. `JsonSource::new`
+      copies the full input string because `json.decode` cannot borrow the VM
+      heap across Sand callbacks.
+- [ ] ❓ _Testing._ Fail the Nth memory check of a native call in a stress mode.
+      `retry_stress` fails only the first check. It misses memory checks that
+      run after a side effect. After a callback, a codec walk stops on a
+      mid-part memory limit check. The stress test must expect that stop.
+- [ ] ⚪ Reject `Value::Set` while decoding a Sand list. `DecodeSource` uses
+      `begin_list` for both lists and sets. `NativeContext::from_value`
+      therefore accepts `Value::Set` for a list type.
 - [ ] ⚪ Require at compile time that a native function that takes `&mut Vm`
       makes its scheduler requests before its side effects. The engine runs the
       call again after a prompt or a garbage collection, so it executes any
@@ -483,8 +485,8 @@ Visible defects that rarely block users.
       compiles each tool three times across `check_file`, `lint_file`, and
       `run_tests`. Return lint warnings from compilation and accept a
       `CompiledProgram` in `run_tests`.
-- [ ] ⚪ Pass `TraitDict` arguments to native `impl` methods by extracting the
-      dictionary of the trait from the `impl` dictionary.
+- [ ] ⚪ Pass `TraitDict` arguments to native `impl` methods by reading the
+      trait dictionary from the `impl` dictionary.
 - [ ] ⚪ Unify the terminology for Rust types attached via `NativeModule::bind`
       across `BoundKind`, `BoundType`, `Type::bound`, `declare_bound_types`, and
       `Binding<T>`.
@@ -519,45 +521,46 @@ Visible defects that rarely block users.
 
 ### Diagnostics
 
-- [ ] ⚪ Give a separate misuse message for an outer `Encoder` or `Decoder`
-      whose call is still in progress, and say that a `Decode` bound replaces
-      `reflect` when the parser meets `<reflect T>`.
-- [ ] ⚪ Give the errors of an encode the path of the part, as decode errors
-      have. A NaN float, a map key without a text form, and the error of a
-      custom `encode` method show no location.
-- [ ] ⚪ Show every bound of a prelude impl in `help`. `help(Decode)` shows
-      `Set<T> where T: Decode` without `Hash`, because the help printer drops
-      bounds that have no dictionary.
+- [ ] ⚪ Report a distinct error if a nested callback reuses an outer `Encoder`
+      or `Decoder` whose call is still running.
+- [ ] ⚪ Suggest a `Decode` bound if the parser sees `<reflect T>`.
+- [ ] ⚪ Include the field or element path in encode errors, matching decode
+      errors. Encode errors for non-finite floats, non-text map keys, and custom
+      `encode` methods omit the failing path.
+- [ ] ⚪ Print every bound of a prelude implementation in `help`. `help(Decode)`
+      prints `Set<T> where T: Decode` and omits `T: Hash` because the help
+      printer skips marker trait bounds without dictionaries.
 - [ ] ⚪ Deduplicate missing trait diagnostics within a single expression.
 
 ### Performance
 
-- [ ] ❓ Decide whether to add fast paths to the codec walkers. One walker for
-      each direction reads a trait dictionary for each value, so encoding and
-      decoding are 1.2 to 3.4 times as slow as on main
-      (`crates/sandlang/benches/codec.rs`: encode 469 -> 916 ns per item,
-      decode 1028 -> 1900, to_json 756 -> 2614). A custom impl costs about
-      500 ns for each value. `bench/run.py` does not measure the `json`
-      module. Fast paths could skip the dictionary reads for constant part
-      dictionaries or write JSON text without a `dyn` sink call, at the cost
-      of code that must stay in sync with the walker.
-- [ ] ⚪ Share the codec walkers' loop structure: both `run` loops repeat the
-      memory check, the fuel charge, the method dispatch, and the handle
-      setup. Also compute the payload base of each variant at compile time,
-      split `DecodeWalk::advance` into its three jobs, and match on `&Fill`
-      instead of cloning it for each missing field.
-- [ ] ❓ Find why plain recursion keeps garbage alive. A function that builds
-      a 5,000-string list, returns only its length, and then recurses keeps
-      about 0.3 MB for each level: 80 levels need 32M, and 250 levels need
-      128M, on main too. A likely cause is that the collector roots each
-      frame's whole register window, which still holds the handles of
-      returned callees.
-- [ ] ⚪ Split `CodecShape` into an encode shape and a decode shape. `fills`
-      and `init` serve only decode, and `ManualEncode` and `ManualDecode`
-      serve one direction each, so the walkers handle wrong combinations with
-      internal errors.
-- [ ] ⚪ Build the path segments of `ValueSource` only for error messages.
-      `ValueSource::next` and `next_field` format a segment for each part.
+- [ ] ❓ Decide whether to add fast paths to the codec walkers. Each walker
+      reads a trait dictionary at every value. In
+      `crates/sandlang/benches/codec.rs`, encoding takes 916 ns per item versus
+      469 ns on `main`. Decoding takes 1900 ns versus 1028 ns. `json.to_json`
+      takes 2614 ns versus 756 ns. A custom implementation adds about 500 ns per
+      value. `bench/run.py` omits the `json` module. Fast paths could skip
+      constant part dictionary reads or format JSON text without dynamic sink
+      calls. Those fast paths must stay aligned with the walker.
+- [ ] ⚪ Deduplicate and simplify the codec walkers:
+      - Share the common memory check, fuel charge, method dispatch, and handle
+        setup across both `run` loops.
+      - Precompute each variant's payload base at compile time.
+      - Split `DecodeWalker::advance` into separate phases for reading parts,
+        filling missing slots, and finishing containers.
+      - Match on `&DecodeFill` instead of cloning it for each missing field.
+- [ ] ❓ Find why plain recursion retains unreachable heap values. A function
+      that builds a 5,000-string list, takes its length, and recurses retains
+      about 0.3 MB per frame on both `main` and this branch. Eighty levels
+      require 32 MB. Two hundred fifty levels require 128 MB. The collector
+      likely traces each frame's full register window. That window still holds
+      stale handles from returned callees.
+- [ ] ⚪ Split `CodecShape` into separate encode and decode shapes. `fills`,
+      `init`, and `ManualDecode` apply only to decoding. `ManualEncode` applies
+      only to encoding. Separate shapes would eliminate unreachable internal
+      error branches in the walkers.
+- [ ] ⚪ Format `ValueSource` path segments lazily on error instead of
+      formatting a segment in every `ValueSource::next` and `next_field` call.
 - [ ] ⚪ Benchmark `HostFn::Static` against `HostFn::Shared` to determine whether
       avoiding the `Arc` dereference justifies `Box::leak` and the enum
       dispatch; if not, keep only `Arc`.
@@ -573,9 +576,10 @@ Visible defects that rarely block users.
 
 ### Language
 
-- [ ] ❓ Decide whether a variant with one positional payload encodes as its
-      payload, as serde writes a newtype variant: `{"Banned":"spam"}` instead
-      of `{"Banned":["spam"]}`. Hosts often exchange JSON with `serde_json`,
-      and scripts that depend on the derived form make a later change cost
-      more. `Some(None)` also encodes as `null` and decodes as `None`.
+- [ ] ❓ Decide whether the JSON encoder should write a single-payload tuple
+      variant as `{"Banned":"spam"}` instead of `{"Banned":["spam"]}`, matching
+      `serde` newtype variants. Hosts often exchange JSON with `serde_json`.
+      Changing the derived format later will break scripts that rely on the
+      array wrapper. `JsonSink` also writes `Some(None)` as `null`. `JsonSource`
+      then decodes `null` as `None`.
 - [ ] ⚪ Support non-constant default expressions on trait method parameters.

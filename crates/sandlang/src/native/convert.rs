@@ -141,7 +141,7 @@ impl<C: From<Fail>> HostError<C> {
         }
     }
 
-    /// Returns the kind and the message of a recoverable error.
+    /// Returns the kind and message if `self` is a recoverable Sand error.
     pub(crate) fn sand_error(&self) -> Option<(&str, &str)> {
         match &*self.0 {
             HostErrorKind::Error { kind, message } => Some((kind, message)),
@@ -160,8 +160,7 @@ impl<C: From<Fail>> HostError<C> {
 }
 
 impl HostError<Fail> {
-    /// Converts `self` into the error of a native function that runs before a
-    /// wait.
+    /// Converts `self` into a synchronous native call error.
     pub(crate) fn into_ctl_error(self) -> HostError<Ctl> {
         match *self.0 {
             HostErrorKind::Error { kind, message } => HostError::new(kind, message),
@@ -647,7 +646,7 @@ handle! {
     [const N: u8, B: traits::Set] Param<N, B>,
 }
 
-impl<const N: u8, B: traits::One> FromVmValue for TraitDict<N, B> {
+impl<const N: u8, B: traits::Single> FromVmValue for TraitDict<N, B> {
     type Item<'a> = Self;
     fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
         match vm.heap.get(v) {

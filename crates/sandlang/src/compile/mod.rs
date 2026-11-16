@@ -61,11 +61,12 @@ struct Compiler<'a> {
     ctor_wrappers: PMap<CtorTarget, u32>,
     /// Constant trait dictionaries by their elements.
     dict_consts: PMap<Vec<u32>, u32>,
-    /// The index in `Program::codec_shapes` of each structural impl.
+    /// Index in `Program::codec_shapes` for each structural codec
+    /// implementation.
     codec_shapes: PMap<ImplId, u32>,
-    /// Shapes whose index exists and whose parts the compiler has yet to
-    /// lower.
-    pending_shapes: Vec<(ImplId, u32)>,
+    /// Structural codec implementations with reserved shape indices awaiting
+    /// lowering.
+    pending_codec_shapes: Vec<(ImplId, u32)>,
     errors: Vec<Diag>,
     recv_native: Option<u32>,
     /// Natives compiled to dedicated instructions.
@@ -356,7 +357,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         ctor_wrappers: std::mem::take(&mut inc.ctor_wrappers),
         dict_consts: std::mem::take(&mut inc.dict_consts),
         codec_shapes: std::mem::take(&mut inc.codec_shapes),
-        pending_shapes: Vec::new(),
+        pending_codec_shapes: Vec::new(),
         errors: Vec::new(),
         recv_native: input.natives.id("prelude.Channel.recv"),
         inline: HashMap::new(),
@@ -751,8 +752,9 @@ enum Stub {
 }
 
 impl<'a> Compiler<'a> {
-    /// The index of constant `k`, shared with equal constants made before
-    /// (but trait dictionaries have their own cache).
+    /// Interns constant `k` in `Program::consts` and returns its index.
+    ///
+    /// Trait dictionary tuples use [`Compiler::dict_consts`] instead.
     fn const_idx(&mut self, k: Const) -> u32 {
         let next = self.prog.consts.len() as u32;
         let t = &mut self.consts;
@@ -2218,7 +2220,7 @@ impl<'a> Compiler<'a> {
                     return;
                 }
                 let mark = f.next_reg;
-                let heads = self.dict_heads(*impl_id);
+                let heads = self.dict_header_consts(*impl_id);
                 let n = heads.len() + args.len();
                 let start = self.alloc_n(f, n);
                 for (i, &k) in heads.iter().enumerate() {
@@ -2714,23 +2716,28 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Returns the constants that begin the dictionary of `impl_id`: its
-    /// methods, and the shape of a structural impl.
-    fn dict_heads(&mut self, impl_id: ImplId) -> Vec<u32> {
+    /// Returns the leading constant pool indices for the dictionary of
+    /// `impl_id`.
+    ///
+    /// These constants store the trait method functions followed by the shape
+    /// index for a structural codec implementation.
+    fn dict_header_consts(&mut self, impl_id: ImplId) -> Vec<u32> {
         let slots = self.cp.impls[impl_id as usize].slots.clone();
         let mut heads: Vec<u32> = slots.iter().map(|&fid| self.fn_const(fid)).collect();
         if self.cp.is_structural_impl(impl_id) {
             debug_assert_eq!(heads.len(), crate::vm::bytecode::CODEC_SHAPE_SLOT);
-            let shape = self.codec_shape(impl_id);
+            let shape = self.codec_shape_idx(impl_id);
             heads.push(self.const_idx(Const::Int(i64::from(shape))));
         }
         heads
     }
 
-    /// Returns the index of the shape of structural impl `impl_id` in
-    /// `Program::codec_shapes`. [`Compiler::lower_codec_shapes`] lowers its
-    /// parts later, so that recursive types do not recurse here.
-    fn codec_shape(&mut self, impl_id: ImplId) -> u32 {
+    /// Allocates or looks up the `Program::codec_shapes` index for structural
+    /// implementation `impl_id`.
+    ///
+    /// [`Compiler::lower_codec_shapes`] populates the shape later to break
+    /// cycles across recursive types.
+    fn codec_shape_idx(&mut self, impl_id: ImplId) -> u32 {
         if let Some(&s) = self.codec_shapes.get(&impl_id) {
             return s;
         }
@@ -2743,13 +2750,13 @@ impl<'a> Compiler<'a> {
             slot_index: None,
         });
         self.codec_shapes.insert(impl_id, s);
-        self.pending_shapes.push((impl_id, s));
+        self.pending_codec_shapes.push((impl_id, s));
         s
     }
 
-    /// Lowers the parts of each shape that [`Compiler::codec_shape`] added.
+    /// Populates every pending shape queued by [`Compiler::codec_shape_idx`].
     fn lower_codec_shapes(&mut self) {
-        while let Some((impl_id, s)) = self.pending_shapes.pop() {
+        while let Some((impl_id, s)) = self.pending_codec_shapes.pop() {
             let shape = self.lower_codec_shape(impl_id);
             self.prog.codec_shapes[s as usize] = shape;
         }
@@ -2811,12 +2818,12 @@ impl<'a> Compiler<'a> {
             .iter()
             .enumerate()
             .map(|(i, fill)| match (field_consts.get(i).copied().flatten(), fill) {
-                (Some(c), _) | (None, CodecFill::Const(c)) => Fill::Const(c.clone()),
+                (Some(c), _) | (None, CodecFill::Const(c)) => DecodeFill::Const(c.clone()),
                 (None, CodecFill::Helper(helper, dicts)) => {
                     let dicts = dicts.iter().map(|e| self.part_template(e)).collect();
-                    Fill::Call(self.fn_const(*helper), dicts)
+                    DecodeFill::Call(self.fn_const(*helper), dicts)
                 }
-                (None, CodecFill::Required) => Fill::Required,
+                (None, CodecFill::Required) => DecodeFill::Required,
             })
             .collect();
         let init = codec.init.as_ref().map(|(func, dicts)| {
@@ -2833,15 +2840,15 @@ impl<'a> Compiler<'a> {
         CodecShape { kind, parts, fills, init, slot_index }
     }
 
-    /// Lowers the dictionary evidence `e` of a part to a template over the
-    /// dictionary of the whole.
+    /// Lowers part dictionary expression `e` into a [`PartTemplate`] relative
+    /// to the outer dictionary.
     fn part_template(&mut self, e: &'a HExpr) -> PartTemplate {
         if let Some(k) = self.const_dict(e) {
             return PartTemplate::Const(k);
         }
         match &e.kind {
             HKind::Dict { impl_id, args } => {
-                let mut items: Vec<PartTemplate> = self.dict_heads(*impl_id).into_iter().map(PartTemplate::Const).collect();
+                let mut items: Vec<PartTemplate> = self.dict_header_consts(*impl_id).into_iter().map(PartTemplate::Const).collect();
                 items.extend(args.iter().map(|a| self.part_template(a)));
                 PartTemplate::Dict(items)
             }
@@ -2864,7 +2871,7 @@ impl<'a> Compiler<'a> {
         for a in args {
             items.push(self.const_dict(a)?);
         }
-        let mut all = self.dict_heads(*impl_id);
+        let mut all = self.dict_header_consts(*impl_id);
         all.extend(items);
         if let Some(&k) = self.dict_consts.get(&all) {
             return Some(k);

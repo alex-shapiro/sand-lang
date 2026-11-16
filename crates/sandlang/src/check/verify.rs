@@ -12,8 +12,8 @@
 //! - Every `impl` target type satisfies all supertraits of the implemented
 //!   trait.
 //!
-//! This pass is independent of the type checker's solver (`traits.rs` and
-//! `derive.rs`) so that solver bugs fail verification at compile time.
+//! This pass does not reuse the type checker's trait solver. Bugs in the
+//! solver therefore fail verification at compile time.
 
 use super::*;
 
@@ -538,8 +538,9 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    /// Verifies an instantiation of function `f` with `targs`, checking hidden
-    /// dictionary arguments if `args` is `Some`.
+    /// Verifies an instantiation of function `f` with `targs`.
+    ///
+    /// Also checks the hidden dictionary arguments if `args` is `Some`.
     fn check_fn_instance(&mut self, cx: &VerifyCtx, f: FnId, targs: &[TypeId], args: Option<&[HArg]>) -> VerifyResult {
         let cp = self.cp;
         let fi = &cp.fns[f as usize];

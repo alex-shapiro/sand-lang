@@ -26,11 +26,12 @@ use std::sync::Arc;
 
 /// Dynamic JSON value.
 ///
-/// Integers in the 64-bit signed `int` range without a fractional part,
-/// exponent, or `-0` are represented as `Int`, and all other numbers are
-/// represented as `Float`. `Json` equality is variant-exact, so
-/// `Json.Int(1) != Json.Float(1.0)`; use `as_float()` or `as_int()` to read
-/// numbers across both variants. Supports up to 512 levels of nesting.
+/// Signed 64-bit integers without a fractional part, exponent, or `-0` are
+/// represented as `Int`. All other numbers are represented as `Float`. Two
+/// `Json` values are equal only if they have the same variant and equal
+/// payloads. In particular, `Json.Int(1) != Json.Float(1.0)`. Call `as_float()`
+/// or `as_int()` to read a number from either numeric variant. `Json` values
+/// can be nested up to 512 levels.
 #[derive(Clone, Debug, PartialEq, crate::SandEnum)]
 #[sand(module = "json", manual_conversion, encode = "manual", decode = "manual")]
 pub enum Json {
@@ -95,7 +96,7 @@ pub(crate) fn module() -> NativeModule {
     });
     m.function("encode", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>, indent: i64| {
         let indent = indent.clamp(0, 1 << 16) as usize;
-        let shared = Shared::new(JsonSink::new(TextOut::new(indent, &vm.heap.io_memory)));
+        let shared = Shared::new(JsonSink::new(JsonTextWriter::new(indent, &vm.heap.io_memory)));
         codec::encode::<_, _, HostError>(vm, shared, value.raw(), dict.raw(), |vm, sink| {
             let (text, reservation) = sink.out.take_text();
             drop(reservation);
@@ -106,7 +107,7 @@ pub(crate) fn module() -> NativeModule {
         if let Some(json) = direct_json(vm, dict.raw(), value.raw())? {
             return Ok(Later::ready(Ok(VmVal::<Json>::from_raw(json))));
         }
-        let shared = Shared::new(JsonSink::new(TextOut::new(0, &vm.heap.io_memory)));
+        let shared = Shared::new(JsonSink::new(JsonTextWriter::new(0, &vm.heap.io_memory)));
         codec::encode::<_, _, Fail>(vm, shared, value.raw(), dict.raw(), |vm, sink| {
             let (text, reservation) = sink.out.take_text();
             let mut source = JsonSource::owned(text.into_boxed_str(), reservation);
@@ -447,15 +448,14 @@ impl Builder<'_, '_, '_> {
 }
 
 impl crate::native::codec::Encode for Json {
-    /// Writes the data of `value`: `Null` as `()`, `Arr` as a list, `Obj` as a
-    /// map with `str` keys, and each scalar as itself.
+    /// Writes the underlying JSON value of `value` to `sink`.
     fn encode(vm: &mut Vm, value: VmVal<Json>, sink: &mut dyn EncodeSink) -> CodecResult {
         encode_json(vm, value.raw(), sink)
     }
 }
 
 impl crate::native::codec::Decode for Json {
-    /// Reads `Json` from the data of any input.
+    /// Reads a JSON value from `source`.
     fn decode(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmVal<Json>> {
         decode_json(vm, source).map(VmVal::from_raw)
     }
@@ -526,7 +526,7 @@ fn encode_json(vm: &mut Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecR
 fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValue> {
     enum Open {
         Arr(Vec<VmValue>),
-        /// The map and the key text and hash of the value to read next.
+        /// Map builder, pending key text, and key hash for the next entry.
         Obj(MapBuilder, String, u64),
     }
     let ids = JsonIds::new(&vm.prog)?;
@@ -621,20 +621,21 @@ fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValu
     })
 }
 
-/// Returns the `Json` of a `Json` value, which is the value itself, or of a
-/// scalar with a structural `Encode` dictionary `dict`, without a walk.
-/// `json!` converts each interpolated value, and most of them are scalars or
-/// `Json`. Returns `None` for other values, and for a float that JSON cannot
-/// represent.
+/// Converts `value` to `Json` without a codec walk if `dict` is the built-in
+/// `Encode` dictionary of `Json` or of a JSON scalar.
+///
+/// This fast path handles common `json!` interpolations directly. Returns
+/// `None` for composite values, custom `Encode` implementations, and non-finite
+/// floats.
 fn direct_json(vm: &mut Vm, dict: VmValue, value: VmValue) -> Result<Option<VmValue>, Fail> {
     let ids = JsonIds::new(&vm.prog)?;
     let kind = codec::structural_kind(vm, dict)?;
-    // Variant ids are unique in a program, so a value with a manual codec
-    // and the id of a `Json` variant is a `Json`.
+    // Variant IDs are unique across a program. A manual-codec value with a
+    // `Json` variant ID is therefore already a `Json` value.
     if let Some(ShapeKind::ManualEncode(_)) = kind
         && [ids.null, ids.bool_, ids.int, ids.float, ids.str_, ids.arr, ids.obj].contains(&vm.heap.variant_id(value))
     {
-        return Ok(all_finite(vm, &ids, value)?.then_some(value));
+        return Ok(all_floats_finite(vm, &ids, value)?.then_some(value));
     }
     let id = match (kind, value) {
         (Some(ShapeKind::Unit), _) => return Ok(Some(VmValue::Tag(ids.null))),
@@ -648,9 +649,10 @@ fn direct_json(vm: &mut Vm, dict: VmValue, value: VmValue) -> Result<Option<VmVa
     Ok(Some(vm.heap.new_variant(id, &[value])))
 }
 
-/// Returns `true` if every float in the `Json` value `json` is finite, as
-/// JSON text requires. Charges a fuel unit for each node.
-fn all_finite(vm: &Vm, ids: &JsonIds, json: VmValue) -> Result<bool, Fail> {
+/// Returns `true` if every float in `json` is finite.
+///
+/// Charges fuel for each visited `Json` node.
+fn all_floats_finite(vm: &Vm, ids: &JsonIds, json: VmValue) -> Result<bool, Fail> {
     let mut stack = vec![json];
     while let Some(v) = stack.pop() {
         vm.charge(1)?;
@@ -671,61 +673,59 @@ fn all_finite(vm: &Vm, ids: &JsonIds, json: VmValue) -> Result<bool, Fail> {
     Ok(true)
 }
 
-fn invalid_key<T>() -> CodecResult<T> {
+fn invalid_key_error<T>() -> CodecResult<T> {
     Err(HostError::new("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type"))
 }
 
-/// An open container of a [`JsonSink`].
-enum Frame {
-    /// A JSON array.
+/// Open container frame in [`JsonSink`].
+enum SinkFrame {
     Array,
-    /// A map, whose even parts are keys.
-    Map { key_next: bool },
-    /// The fields of a struct.
-    Struct { desc: Arc<StructDesc>, next: usize },
-    /// The named payload of a variant, inside the object that holds the
-    /// variant name.
-    Named { desc: Arc<VariantDesc>, next: usize },
-    /// The positional payload of a variant, inside the object that holds
-    /// the variant name.
-    Positional,
-    /// `Some`, or a variant without a payload, which writes no bracket.
-    Bare,
+    Map {
+        key_next: bool,
+    },
+    Struct {
+        desc: Arc<StructDesc>,
+        next: usize,
+    },
+    /// Struct-variant payload inside the outer `{"Variant": ...}` object.
+    NamedVariant {
+        desc: Arc<VariantDesc>,
+        next: usize,
+    },
+    /// Tuple-variant payload inside the outer `{"Variant": ...}` object.
+    PositionalVariant,
+    /// `Some` or a unit variant written inline without enclosing brackets.
+    Inline,
 }
 
-/// Applies the JSON rules to Sand values and writes them as JSON text.
-///
-/// `Some(x)` is `x`, and `None` and `()` are `null`. `bytes` is a Base64
-/// string, `duration` is a count of nanoseconds, and a native value is its
-/// text. A map key is the text of a string, an int, a duration, a bool, a
-/// variant without a payload, or a native value. A variant without a payload
-/// is its name, and another variant is an object of one member, from the
-/// variant name to an array or an object of the payload.
+/// [`EncodeSink`] that serializes Sand values as JSON text.
 struct JsonSink {
-    out: TextOut,
-    frames: Vec<Frame>,
+    out: JsonTextWriter,
+    frames: Vec<SinkFrame>,
 }
 
 impl JsonSink {
-    fn new(out: TextOut) -> JsonSink {
+    fn new(out: JsonTextWriter) -> JsonSink {
         JsonSink { out, frames: Vec::new() }
     }
 
-    /// Prepares the next value. Returns `true` if the value is a map key.
-    fn slot(&mut self) -> CodecResult<bool> {
+    /// Emits any pending struct or variant field key before the next value.
+    ///
+    /// Returns `true` if the next value is a map key.
+    fn prepare_next_value(&mut self) -> CodecResult<bool> {
         match self.frames.last_mut() {
-            Some(Frame::Map { key_next }) => {
+            Some(SinkFrame::Map { key_next }) => {
                 let is_key = *key_next;
                 *key_next = !is_key;
                 Ok(is_key)
             }
-            Some(Frame::Struct { desc, next }) => {
+            Some(SinkFrame::Struct { desc, next }) => {
                 let name = desc.fields.get(*next).map_or("", String::as_str);
                 *next += 1;
                 self.out.key(name)?;
                 Ok(false)
             }
-            Some(Frame::Named { desc, next }) => {
+            Some(SinkFrame::NamedVariant { desc, next }) => {
                 let name = desc.fields.as_ref().and_then(|f| f.get(*next)).map_or("", String::as_str);
                 *next += 1;
                 self.out.key(name)?;
@@ -735,20 +735,25 @@ impl JsonSink {
         }
     }
 
-    /// Writes a scalar: as a key if it is a map key, or else as `value`.
-    fn scalar(&mut self, key: impl FnOnce() -> Option<String>, value: impl FnOnce(&mut TextOut) -> CodecResult) -> CodecResult {
-        match self.slot()? {
-            true => match key() {
+    /// Writes a scalar either as a map key via `format_key` or as a JSON value
+    /// via `write_value`.
+    fn write_scalar(
+        &mut self,
+        format_key: impl FnOnce() -> Option<String>,
+        write_value: impl FnOnce(&mut JsonTextWriter) -> CodecResult,
+    ) -> CodecResult {
+        match self.prepare_next_value()? {
+            true => match format_key() {
                 Some(k) => self.out.key(&k),
-                None => invalid_key(),
+                None => invalid_key_error(),
             },
-            false => value(&mut self.out),
+            false => write_value(&mut self.out),
         }
     }
 
-    fn begin(&mut self, frame: Frame) -> CodecResult {
-        if self.slot()? {
-            return invalid_key();
+    fn begin(&mut self, frame: SinkFrame) -> CodecResult {
+        if self.prepare_next_value()? {
+            return invalid_key_error();
         }
         self.frames.push(frame);
         Ok(())
@@ -757,22 +762,22 @@ impl JsonSink {
 
 impl EncodeSink for JsonSink {
     fn unit(&mut self) -> CodecResult {
-        self.scalar(|| None, |o| o.null())
+        self.write_scalar(|| None, |o| o.null())
     }
 
     fn bool(&mut self, b: bool) -> CodecResult {
-        self.scalar(|| Some(b.to_string()), |o| o.bool(b))
+        self.write_scalar(|| Some(b.to_string()), |o| o.bool(b))
     }
 
     fn int(&mut self, i: i64) -> CodecResult {
-        self.scalar(|| Some(i.to_string()), |o| o.int(i))
+        self.write_scalar(|| Some(i.to_string()), |o| o.int(i))
     }
 
     fn float(&mut self, f: f64) -> CodecResult {
         if !f.is_finite() {
             return Err(HostError::new("invalid", format!("JSON cannot represent the float {f}")));
         }
-        self.scalar(|| None, |o| o.float(f))
+        self.write_scalar(|| None, |o| o.float(f))
     }
 
     fn duration(&mut self, nanos: i64) -> CodecResult {
@@ -780,22 +785,22 @@ impl EncodeSink for JsonSink {
     }
 
     fn str(&mut self, s: &str) -> CodecResult {
-        match self.slot()? {
+        match self.prepare_next_value()? {
             true => self.out.key(s),
             false => self.out.str(s),
         }
     }
 
     fn bytes(&mut self, b: &[u8]) -> CodecResult {
-        if self.slot()? {
-            return invalid_key();
+        if self.prepare_next_value()? {
+            return invalid_key_error();
         }
         self.out.base64(b)
     }
 
     fn range(&mut self, start: i64, end: i64, inclusive: bool) -> CodecResult {
-        if self.slot()? {
-            return invalid_key();
+        if self.prepare_next_value()? {
+            return invalid_key_error();
         }
         self.out.begin(false)?;
         for (name, bound) in [("start", start), ("end", end)] {
@@ -810,7 +815,7 @@ impl EncodeSink for JsonSink {
     }
 
     fn native(&mut self, _: &str, text: &str) -> CodecResult {
-        match self.slot()? {
+        match self.prepare_next_value()? {
             true => self.out.key(text),
             false => self.out.str(text),
         }
@@ -821,15 +826,15 @@ impl EncodeSink for JsonSink {
     }
 
     fn begin_some(&mut self) -> CodecResult {
-        if self.slot()? {
-            return invalid_key();
+        if self.prepare_next_value()? {
+            return invalid_key_error();
         }
-        self.frames.push(Frame::Bare);
+        self.frames.push(SinkFrame::Inline);
         Ok(())
     }
 
     fn begin_list(&mut self, _: usize) -> CodecResult {
-        self.begin(Frame::Array)?;
+        self.begin(SinkFrame::Array)?;
         self.out.begin(true)
     }
 
@@ -842,24 +847,24 @@ impl EncodeSink for JsonSink {
     }
 
     fn begin_map(&mut self, _: usize) -> CodecResult {
-        self.begin(Frame::Map { key_next: true })?;
+        self.begin(SinkFrame::Map { key_next: true })?;
         self.out.begin(false)
     }
 
     fn begin_struct(&mut self, desc: &Arc<StructDesc>) -> CodecResult {
-        self.begin(Frame::Struct { desc: desc.clone(), next: 0 })?;
+        self.begin(SinkFrame::Struct { desc: desc.clone(), next: 0 })?;
         self.out.begin(false)
     }
 
     fn begin_variant(&mut self, desc: &Arc<VariantDesc>, len: usize) -> CodecResult {
         if len == 0 {
             let r = self.str(&desc.name);
-            self.frames.push(Frame::Bare);
+            self.frames.push(SinkFrame::Inline);
             return r;
         }
         let frame = match desc.fields {
-            Some(_) => Frame::Named { desc: desc.clone(), next: 0 },
-            None => Frame::Positional,
+            Some(_) => SinkFrame::NamedVariant { desc: desc.clone(), next: 0 },
+            None => SinkFrame::PositionalVariant,
         };
         self.begin(frame)?;
         self.out.begin(false)?;
@@ -872,8 +877,8 @@ impl EncodeSink for JsonSink {
 
     fn end(&mut self) -> CodecResult {
         match self.frames.pop() {
-            Some(Frame::Bare) | None => {}
-            Some(Frame::Named { .. } | Frame::Positional) => {
+            Some(SinkFrame::Inline) | None => {}
+            Some(SinkFrame::NamedVariant { .. } | SinkFrame::PositionalVariant) => {
                 self.out.end()?;
                 self.out.end()?;
             }
@@ -885,35 +890,38 @@ impl EncodeSink for JsonSink {
 
 const SPACES: &str = "                                                                ";
 
-/// Writes JSON text.
-struct TextOut {
+struct OpenJsonContainer {
+    is_array: bool,
+    is_empty: bool,
+}
+
+/// Formats tokens, separators, and indentation into a memory-tracked JSON buffer.
+struct JsonTextWriter {
     out: String,
-    /// The memory of `out`, which the memory limit counts.
+    /// Tracks the memory capacity of `out` against `max_memory`.
     reservation: Reservation,
-    /// Spaces per level, or 0 for compact text.
+    /// Spaces per indentation level, or `0` for compact output.
     indent: usize,
-    /// For each open array or object: whether it is an array, and whether it
-    /// has no member yet.
-    open: Vec<(bool, bool)>,
-    /// Whether a key precedes the next value.
+    open_containers: Vec<OpenJsonContainer>,
+    /// `true` right after an object key and `:` have been written.
     after_key: bool,
 }
 
-/// The most bytes that a scalar other than a string writes.
-const SCALAR_BYTES: usize = 32;
+/// Maximum byte length of any encoded non-string JSON scalar.
+const MAX_SCALAR_BYTES: usize = 32;
 
-impl TextOut {
-    fn new(indent: usize, memory: &Arc<IoMemory>) -> TextOut {
-        TextOut { out: String::new(), reservation: Reservation::new(memory), indent, open: Vec::new(), after_key: false }
+impl JsonTextWriter {
+    fn new(indent: usize, memory: &Arc<IoMemory>) -> JsonTextWriter {
+        JsonTextWriter { out: String::new(), reservation: Reservation::new(memory), indent, open_containers: Vec::new(), after_key: false }
     }
 
-    /// Returns the text and the reservation of its memory.
+    /// Takes the finished JSON string and its memory reservation.
     fn take_text(&mut self) -> (String, Reservation) {
         let sibling = self.reservation.sibling();
         (std::mem::take(&mut self.out), std::mem::replace(&mut self.reservation, sibling))
     }
 
-    /// Makes room for `bytes` more in `out` within the memory limit.
+    /// Ensures `out` has capacity for `bytes` additional bytes within `max_memory`.
     #[inline(always)]
     fn reserve(&mut self, bytes: usize) -> CodecResult {
         let need = self.out.len().saturating_add(bytes);
@@ -923,9 +931,11 @@ impl TextOut {
         self.grow(need)
     }
 
-    /// Grows `out` to hold `need` bytes, by the largest step that fits. The
-    /// reservation counts the old buffer too, because the two buffers exist
-    /// together while the text moves.
+    /// Grows `out` to at least `need` bytes using the largest growth step that
+    /// fits within `max_memory`.
+    ///
+    /// Reserves `target + cap` bytes because both the old and new buffers are
+    /// allocated during reallocation.
     #[cold]
     fn grow(&mut self, need: usize) -> CodecResult {
         let cap = self.out.capacity();
@@ -939,15 +949,16 @@ impl TextOut {
         crate::native::codec::memory_limit()
     }
 
-    /// Writes the separator before the next member of the innermost
-    /// container, and reserves `bytes` for the member.
+    /// Writes any comma and indentation needed before the next token.
+    ///
+    /// Also reserves `bytes` of output capacity for that token.
     #[inline(always)]
     fn separate(&mut self, bytes: usize) -> CodecResult {
         if std::mem::replace(&mut self.after_key, false) {
             return self.reserve(bytes);
         }
-        if let Some((_, empty)) = self.open.last_mut() {
-            if !std::mem::replace(empty, false) {
+        if let Some(container) = self.open_containers.last_mut() {
+            if !std::mem::replace(&mut container.is_empty, false) {
                 self.out.push(',');
             }
             self.start_line()?;
@@ -961,7 +972,7 @@ impl TextOut {
         if self.indent == 0 {
             return Ok(());
         }
-        let mut left = self.indent.saturating_mul(self.open.len());
+        let mut left = self.indent.saturating_mul(self.open_containers.len());
         self.reserve(left.saturating_add(2))?;
         self.out.push('\n');
         while left > 0 {
@@ -973,35 +984,35 @@ impl TextOut {
     }
 
     fn begin(&mut self, is_array: bool) -> CodecResult {
-        if self.open.len() >= MAX_NESTING_DEPTH {
+        if self.open_containers.len() >= MAX_NESTING_DEPTH {
             return codec::too_deep();
         }
         self.separate(1)?;
         self.out.push(if is_array { '[' } else { '{' });
-        self.open.push((is_array, true));
+        self.open_containers.push(OpenJsonContainer { is_array, is_empty: true });
         Ok(())
     }
 
     fn null(&mut self) -> CodecResult {
-        self.separate(SCALAR_BYTES)?;
+        self.separate(MAX_SCALAR_BYTES)?;
         self.out.push_str("null");
         Ok(())
     }
 
     fn bool(&mut self, b: bool) -> CodecResult {
-        self.separate(SCALAR_BYTES)?;
+        self.separate(MAX_SCALAR_BYTES)?;
         self.out.push_str(if b { "true" } else { "false" });
         Ok(())
     }
 
     fn int(&mut self, i: i64) -> CodecResult {
-        self.separate(SCALAR_BYTES)?;
+        self.separate(MAX_SCALAR_BYTES)?;
         self.out.push_str(itoa::Buffer::new().format(i));
         Ok(())
     }
 
     fn float(&mut self, f: f64) -> CodecResult {
-        self.separate(SCALAR_BYTES)?;
+        self.separate(MAX_SCALAR_BYTES)?;
         let _ = write!(self.out, "{f:?}");
         Ok(())
     }
@@ -1012,7 +1023,7 @@ impl TextOut {
         Ok(())
     }
 
-    /// Writes `b` as a Base64 string, which needs no escapes.
+    /// Writes `b` as a quoted Base64 string.
     fn base64(&mut self, b: &[u8]) -> CodecResult {
         self.separate(b.len().div_ceil(3) * 4 + 2)?;
         self.out.push('"');
@@ -1033,87 +1044,88 @@ impl TextOut {
     }
 
     fn end(&mut self) -> CodecResult {
-        let Some((is_array, empty)) = self.open.pop() else { return Ok(()) };
-        if !empty {
+        let Some(container) = self.open_containers.pop() else { return Ok(()) };
+        if !container.is_empty {
             self.start_line()?;
         }
         self.reserve(1)?;
-        self.out.push(if is_array { ']' } else { '}' });
+        self.out.push(if container.is_array { ']' } else { '}' });
         Ok(())
     }
 }
 
-/// The longest key that a path quotes in full.
-const QUOTED_KEY: usize = 64;
+/// Maximum byte length of an object key shown untruncated in a JSON path.
+const MAX_PATH_KEY_LEN: usize = 64;
 
-/// A segment of the path of a [`JsonSource`].
-enum Segment {
+/// Path component of an open container in [`JsonSource`].
+enum PathSegment {
     None,
     Index(usize),
-    /// A key, as a byte range of the input text.
+    /// Unescaped key slice `start..end` in `JsonSource::text`.
     Span(usize, usize),
-    /// A key with escapes.
+    /// Unescaped key text decoded from a JSON string with escapes.
     Owned(String),
 }
 
-/// An open container of a [`JsonSource`].
-struct Level {
-    kind: LevelKind,
-    /// The path segment of the current member.
-    segment: Segment,
-    /// The number of members read.
+/// Open container frame in [`JsonSource`].
+struct SourceFrame {
+    kind: SourceFrameKind,
+    /// Path segment of the current element or entry.
+    segment: PathSegment,
+    /// Number of elements or entries read from this frame.
     count: usize,
-    /// Whether the input of the container has ended.
+    /// `true` once the closing `]` or `}` has been consumed.
     closed: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum LevelKind {
-    /// An array, with the length of a tuple.
+enum SourceFrameKind {
+    /// JSON array, optionally constrained to an exact tuple length.
     Array(Option<usize>),
     Object,
     Map,
     Some,
-    /// A variant: written as a string, or as an object of one member.
+    /// Enum variant encoded either as a string or as a single-entry object.
     Variant {
-        object: bool,
+        is_object: bool,
     },
 }
 
-/// Reads JSON text for the decode walker.
+/// [`DecodeSource`] that parses JSON text for the decode walker.
 pub(crate) struct JsonSource {
     text: Box<str>,
-    /// The memory of `text`, which the memory limit counts.
-    _reservation: Reservation,
-    /// The memory of `scratch` and of the decoded `bytes`, at their largest.
+    /// Holds the memory reservation for `text` until decoding finishes.
+    _text_reservation: Reservation,
+    /// Tracks peak memory used by `scratch` and Base64 decoding.
     scratch_reservation: Reservation,
     pos: usize,
-    /// The position at the last call of [`DecodeSource::work`].
+    /// Byte offset in `text` already reported by [`DecodeSource::work`].
     charged: usize,
-    levels: Vec<Level>,
-    /// The `Some` levels in `levels`, which open no JSON bracket and so do
-    /// not count toward the nesting limit.
-    somes: usize,
-    /// The map key that the walker reads next, as a byte range or as owned
-    /// text.
-    key: Option<Segment>,
-    /// The text of the last string with escapes.
+    frames: Vec<SourceFrame>,
+    /// Number of `SourceFrameKind::Some` frames in `frames`.
+    ///
+    /// `Some` frames omit JSON brackets and are excluded from the nesting limit.
+    some_depth: usize,
+    /// Map key buffered for the next scalar decode step.
+    pending_map_key: Option<PathSegment>,
+    /// Unescaped contents of the most recently scanned escaped string.
     scratch: String,
-    /// The names of the variant and of its enum from the last
-    /// `begin_variant`, for messages.
-    variant: String,
+    /// Variant name from the active `begin_variant` call for error messages.
+    variant_name: String,
+    /// Enum name from the active `begin_variant` call for error messages.
     enum_name: String,
 }
 
-/// The result of a string scan: a byte range of the input, or the scratch
-/// text.
-enum Scanned {
+/// Location of a scanned JSON string's unescaped text.
+enum ScannedStr {
+    /// Unescaped slice `start..end` in `JsonSource::text`.
     Span(usize, usize),
+    /// Unescaped string written into `JsonSource::scratch`.
     Scratch,
 }
 
 impl JsonSource {
-    /// Copies `text`, a Sand `str`, into a new source.
+    /// Copies the Sand string `text` into a memory-tracked [`JsonSource`].
     fn new(vm: &Vm, text: VmValue) -> Result<JsonSource, Fail> {
         let text = vm.heap.str(text);
         let mut reservation = Reservation::new(&vm.heap.io_memory);
@@ -1123,26 +1135,26 @@ impl JsonSource {
         Ok(JsonSource::owned(text.into(), reservation))
     }
 
-    /// Reads `text`, whose memory `reservation` counts.
+    /// Creates a [`JsonSource`] over `text` backed by `reservation`.
     fn owned(text: Box<str>, reservation: Reservation) -> JsonSource {
         JsonSource {
             text,
             scratch_reservation: reservation.sibling(),
-            _reservation: reservation,
+            _text_reservation: reservation,
             pos: 0,
             charged: 0,
-            levels: Vec::new(),
-            somes: 0,
-            key: None,
+            frames: Vec::new(),
+            some_depth: 0,
+            pending_map_key: None,
             scratch: String::new(),
-            variant: String::new(),
+            variant_name: String::new(),
             enum_name: String::new(),
         }
     }
 
-    /// Fails if text other than whitespace follows the value.
+    /// Fails if `self` has trailing non-whitespace bytes.
     fn finish(&mut self) -> CodecResult {
-        self.ws();
+        self.skip_whitespace();
         if self.pos < self.text.len() { Err(self.unexpected()) } else { Ok(()) }
     }
 
@@ -1162,7 +1174,7 @@ impl JsonSource {
         hit
     }
 
-    fn ws(&mut self) {
+    fn skip_whitespace(&mut self) {
         while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.input().get(self.pos) {
             self.pos += 1;
         }
@@ -1188,7 +1200,7 @@ impl JsonSource {
         HostError::new("parse", format!("{}: {msg}", self.path()))
     }
 
-    /// Returns an error for a value that is not `what`.
+    /// Returns a parse error stating that `what` was expected at the current token.
     fn mismatch(&self, what: &str) -> HostError<Fail> {
         match self.peek() {
             Some(b'n' | b't' | b'f' | b'"' | b'-' | b'0'..=b'9' | b'[' | b'{') => self.fail(&format!("expected {what}")),
@@ -1196,14 +1208,15 @@ impl JsonSource {
         }
     }
 
-    /// Skips whitespace and returns the next byte. Fails at a map key, which
-    /// only a scalar read can take.
+    /// Skips whitespace and peeks at the next input byte.
+    ///
+    /// Fails if a map key is pending because only scalar decoders can read map keys.
     fn start(&mut self, what: &str) -> CodecResult<Option<u8>> {
-        if let Some(key) = self.key.take() {
+        if let Some(key) = self.pending_map_key.take() {
             let text = self.segment_text(&key).to_string();
-            return Err(self.fail(&format!("expected {what}, found the map key `{}`", super::truncate(&text, QUOTED_KEY))));
+            return Err(self.fail(&format!("expected {what}, found the map key `{}`", super::truncate(&text, MAX_PATH_KEY_LEN))));
         }
-        self.ws();
+        self.skip_whitespace();
         Ok(self.peek())
     }
 
@@ -1222,8 +1235,9 @@ impl JsonSource {
         }
     }
 
-    /// Scans a number. Returns its byte range and whether it has integer
-    /// syntax.
+    /// Scans a JSON number and returns `(start, end, is_int)`.
+    ///
+    /// `is_int` is `false` if the token has a fraction or exponent.
     fn number(&mut self) -> CodecResult<(usize, usize, bool)> {
         let start = self.pos;
         self.eat(b'-');
@@ -1262,9 +1276,11 @@ impl JsonSource {
         Ok(code)
     }
 
-    /// Scans a string at the opening quote. Keeps the text of a string with
-    /// escapes in `scratch` if `keep` is set.
-    fn string(&mut self, keep: bool) -> CodecResult<Scanned> {
+    /// Scans a quoted JSON string starting at `"`.
+    ///
+    /// Writes unescaped text into `self.scratch` if the string contains escapes
+    /// and `keep` is `true`.
+    fn string(&mut self, keep: bool) -> CodecResult<ScannedStr> {
         self.pos += 1;
         let first = self.pos;
         let mut escaped = false;
@@ -1287,7 +1303,7 @@ impl JsonSource {
                         }
                     }
                     self.pos += 1;
-                    return Ok(if escaped { Scanned::Scratch } else { Scanned::Span(first, self.pos - 1) });
+                    return Ok(if escaped { ScannedStr::Scratch } else { ScannedStr::Span(first, self.pos - 1) });
                 }
                 Some(b'\\') => {
                     if keep {
@@ -1342,83 +1358,85 @@ impl JsonSource {
         }
     }
 
-    fn scanned(&self, s: &Scanned) -> &str {
+    fn scanned_str(&self, s: &ScannedStr) -> &str {
         match s {
-            Scanned::Span(a, b) => &self.text[*a..*b],
-            Scanned::Scratch => &self.scratch,
+            ScannedStr::Span(a, b) => &self.text[*a..*b],
+            ScannedStr::Scratch => &self.scratch,
         }
     }
 
-    fn segment_text<'a>(&'a self, s: &'a Segment) -> &'a str {
+    fn segment_text<'a>(&'a self, s: &'a PathSegment) -> &'a str {
         match s {
-            Segment::Span(a, b) => &self.text[*a..*b],
-            Segment::Owned(t) => t,
-            Segment::None | Segment::Index(_) => "",
+            PathSegment::Span(a, b) => &self.text[*a..*b],
+            PathSegment::Owned(t) => t,
+            PathSegment::None | PathSegment::Index(_) => "",
         }
     }
 
     /// Scans a string and returns it as a path segment.
-    fn key_segment(&mut self) -> CodecResult<Segment> {
+    fn key_segment(&mut self) -> CodecResult<PathSegment> {
         Ok(match self.string(true)? {
-            Scanned::Span(a, b) => Segment::Span(a, b),
-            Scanned::Scratch => Segment::Owned(self.scratch.clone()),
+            ScannedStr::Span(a, b) => PathSegment::Span(a, b),
+            ScannedStr::Scratch => PathSegment::Owned(self.scratch.clone()),
         })
     }
 
-    /// Reads a string value, or the text of the map key to read.
+    /// Consumes a pending map key or scans a quoted JSON string.
     fn text_value(&mut self, what: &str) -> CodecResult<Cow<'_, str>> {
-        if let Some(key) = self.key.take() {
+        if let Some(key) = self.pending_map_key.take() {
             return Ok(match key {
-                Segment::Span(a, b) => Cow::Borrowed(&self.text[a..b]),
-                Segment::Owned(t) => Cow::Owned(t),
+                PathSegment::Span(a, b) => Cow::Borrowed(&self.text[a..b]),
+                PathSegment::Owned(t) => Cow::Owned(t),
                 _ => Cow::Borrowed(""),
             });
         }
-        self.ws();
+        self.skip_whitespace();
         if self.peek() != Some(b'"') {
             return Err(self.mismatch(what));
         }
         let s = self.string(true)?;
-        Ok(Cow::Borrowed(self.scanned(&s)))
+        Ok(Cow::Borrowed(self.scanned_str(&s)))
     }
 
-    /// Parses the map key to read with `parse`, or reads a number.
+    /// Parses a pending map key with `parse_key` or a JSON number token with
+    /// `parse_number`.
     fn number_value<T>(
         &mut self,
         what: &str,
-        key: impl Fn(&str) -> Option<T>,
-        number: impl Fn(&Self, &str, bool) -> CodecResult<T>,
+        parse_key: impl Fn(&str) -> Option<T>,
+        parse_number: impl Fn(&Self, &str, bool) -> CodecResult<T>,
     ) -> CodecResult<T> {
-        if let Some(k) = self.key.take() {
+        if let Some(k) = self.pending_map_key.take() {
             let text = self.segment_text(&k);
-            return key(text).ok_or_else(|| self.fail(&format!("invalid map key `{}`", super::truncate(text, QUOTED_KEY))));
+            return parse_key(text).ok_or_else(|| self.fail(&format!("invalid map key `{}`", super::truncate(text, MAX_PATH_KEY_LEN))));
         }
-        self.ws();
+        self.skip_whitespace();
         if !matches!(self.peek(), Some(b'-' | b'0'..=b'9')) {
             return Err(self.mismatch(what));
         }
         let (a, b, is_int) = self.number()?;
-        number(self, &self.text[a..b], is_int)
+        parse_number(self, &self.text[a..b], is_int)
     }
 
-    fn open(&mut self, kind: LevelKind) -> CodecResult {
-        if kind == LevelKind::Some {
-            self.somes += 1;
-        } else if self.levels.len() - self.somes >= MAX_NESTING_DEPTH {
+    fn open(&mut self, kind: SourceFrameKind) -> CodecResult {
+        if kind == SourceFrameKind::Some {
+            self.some_depth += 1;
+        } else if self.frames.len() - self.some_depth >= MAX_NESTING_DEPTH {
             return Err(self.err_at(self.pos, "nesting too deep"));
         }
-        self.levels.push(Level { kind, segment: Segment::None, count: 0, closed: false });
+        self.frames.push(SourceFrame { kind, segment: PathSegment::None, count: 0, closed: false });
         Ok(())
     }
 
-    fn top(&mut self) -> CodecResult<&mut Level> {
-        self.levels.last_mut().ok_or_else(|| HostError::from(Fail::internal("json: no open container")))
+    fn top(&mut self) -> CodecResult<&mut SourceFrame> {
+        self.frames.last_mut().ok_or_else(|| HostError::from(Fail::internal("json: no open container")))
     }
 
-    /// Reads the separator before the next member of the innermost array or
-    /// object. Returns `false` and closes the container at its end.
+    /// Advances to the next member of the innermost container.
+    ///
+    /// Consumes `close` and returns `false` at the closing delimiter.
     fn next_member(&mut self, close: u8) -> CodecResult<bool> {
-        self.ws();
+        self.skip_whitespace();
         let first = self.top()?.count == 0;
         if self.eat(close) {
             self.top()?.closed = true;
@@ -1427,15 +1445,16 @@ impl JsonSource {
         if !first && !self.eat(b',') {
             return Err(self.unexpected());
         }
-        self.ws();
+        self.skip_whitespace();
         let top = self.top()?;
         top.count += 1;
         Ok(true)
     }
 
-    /// Reads the key of the next member of the innermost object and the `:`
-    /// after it. Returns `None` and closes the object at its end.
-    fn next_key(&mut self) -> CodecResult<Option<Segment>> {
+    /// Reads the next object key and its trailing `:`.
+    ///
+    /// Consumes `}` and returns `None` at the end of the object.
+    fn next_key(&mut self) -> CodecResult<Option<PathSegment>> {
         if !self.next_member(b'}')? {
             return Ok(None);
         }
@@ -1443,14 +1462,14 @@ impl JsonSource {
             return Err(self.unexpected());
         }
         let key = self.key_segment()?;
-        self.ws();
+        self.skip_whitespace();
         if !self.eat(b':') {
             return Err(self.unexpected());
         }
         Ok(Some(key))
     }
 
-    /// Begins the payload of a variant in object form.
+    /// Opens the container for a variant payload inside `{"Variant": ...}`.
     fn begin_payload_value(&mut self, form: PayloadForm) -> CodecResult {
         match form {
             PayloadForm::Named => {
@@ -1458,7 +1477,7 @@ impl JsonSource {
                     return Err(self.mismatch("object"));
                 }
                 self.pos += 1;
-                self.open(LevelKind::Object)
+                self.open(SourceFrameKind::Object)
             }
             PayloadForm::Unit => self.begin_tuple(0),
             PayloadForm::Positional(n) => self.begin_tuple(n),
@@ -1472,10 +1491,10 @@ impl JsonSource {
 
 impl DecodeSource for JsonSource {
     fn kind(&mut self) -> CodecResult<InputKind> {
-        if self.key.is_some() {
+        if self.pending_map_key.is_some() {
             return Ok(InputKind::Str);
         }
-        self.ws();
+        self.skip_whitespace();
         Ok(match self.peek() {
             Some(b'n') => InputKind::Null,
             Some(b't' | b'f') => InputKind::Bool,
@@ -1502,14 +1521,14 @@ impl DecodeSource for JsonSource {
     }
 
     fn bool(&mut self) -> CodecResult<bool> {
-        if let Some(k) = self.key.take() {
+        if let Some(k) = self.pending_map_key.take() {
             return match self.segment_text(&k) {
                 "true" => Ok(true),
                 "false" => Ok(false),
-                t => Err(self.fail(&format!("invalid map key `{}`", super::truncate(t, QUOTED_KEY)))),
+                t => Err(self.fail(&format!("invalid map key `{}`", super::truncate(t, MAX_PATH_KEY_LEN)))),
             };
         }
-        self.ws();
+        self.skip_whitespace();
         match self.peek() {
             Some(b't') => self.literal(b"true").map(|()| true),
             Some(b'f') => self.literal(b"false").map(|()| false),
@@ -1547,16 +1566,16 @@ impl DecodeSource for JsonSource {
     }
 
     fn bytes(&mut self) -> CodecResult<Cow<'_, [u8]>> {
-        let mut largest = self.scratch_reservation.sibling();
+        let mut decoded_reservation = self.scratch_reservation.sibling();
         let decoded = {
             let text = self.text_value("base64 str")?;
-            if largest.ensure(text.len() / 4 * 3 + 3).is_err() {
+            if decoded_reservation.ensure(text.len() / 4 * 3 + 3).is_err() {
                 return crate::native::codec::memory_limit();
             }
             base64::decode(&text, false)
         };
-        let need = self.scratch.capacity() + largest.bytes();
-        drop(largest);
+        let need = self.scratch.capacity() + decoded_reservation.bytes();
+        drop(decoded_reservation);
         if self.scratch_reservation.ensure(need).is_err() {
             return crate::native::codec::memory_limit();
         }
@@ -1568,7 +1587,7 @@ impl DecodeSource for JsonSource {
             return Err(self.mismatch("object"));
         }
         self.pos += 1;
-        self.open(LevelKind::Object)?;
+        self.open(SourceFrameKind::Object)?;
         let (mut start, mut end, mut inclusive) = (None, None, false);
         while let Some(key) = self.next_key()? {
             let name = self.segment_text(&key).to_string();
@@ -1580,13 +1599,13 @@ impl DecodeSource for JsonSource {
                 _ => self.skip()?,
             }
         }
-        self.top()?.segment = Segment::None;
+        self.top()?.segment = PathSegment::None;
         let r = match (start, end) {
             (Some(start), Some(end)) => Ok((start, end, inclusive)),
             (None, _) => Err(self.fail("missing field `start`")),
             (_, None) => Err(self.fail("missing field `end`")),
         };
-        self.levels.pop();
+        self.frames.pop();
         r
     }
 
@@ -1596,14 +1615,14 @@ impl DecodeSource for JsonSource {
     }
 
     fn option(&mut self) -> CodecResult<bool> {
-        if self.key.is_none() {
-            self.ws();
+        if self.pending_map_key.is_none() {
+            self.skip_whitespace();
             if self.peek() == Some(b'n') {
                 self.literal(b"null")?;
                 return Ok(false);
             }
         }
-        self.open(LevelKind::Some)?;
+        self.open(SourceFrameKind::Some)?;
         Ok(true)
     }
 
@@ -1611,7 +1630,7 @@ impl DecodeSource for JsonSource {
         if self.start("array")? != Some(b'[') {
             return Err(self.mismatch("array"));
         }
-        self.open(LevelKind::Array(None))?;
+        self.open(SourceFrameKind::Array(None))?;
         self.pos += 1;
         Ok(())
     }
@@ -1621,7 +1640,7 @@ impl DecodeSource for JsonSource {
         if self.start(&what)? != Some(b'[') {
             return Err(self.mismatch(&what));
         }
-        self.open(LevelKind::Array(Some(len)))?;
+        self.open(SourceFrameKind::Array(Some(len)))?;
         self.pos += 1;
         Ok(())
     }
@@ -1630,27 +1649,27 @@ impl DecodeSource for JsonSource {
         if self.start("object")? != Some(b'{') {
             return Err(self.mismatch("object"));
         }
-        self.open(LevelKind::Map)?;
+        self.open(SourceFrameKind::Map)?;
         self.pos += 1;
         Ok(())
     }
 
     fn next(&mut self) -> CodecResult<bool> {
         match self.top()?.kind {
-            LevelKind::Map => match self.next_key()? {
+            SourceFrameKind::Map => match self.next_key()? {
                 Some(key) => {
                     let copy = match &key {
-                        Segment::Span(a, b) => Segment::Span(*a, *b),
-                        Segment::Owned(t) => Segment::Owned(t.clone()),
-                        _ => Segment::None,
+                        PathSegment::Span(a, b) => PathSegment::Span(*a, *b),
+                        PathSegment::Owned(t) => PathSegment::Owned(t.clone()),
+                        _ => PathSegment::None,
                     };
                     self.top()?.segment = key;
-                    self.key = Some(copy);
+                    self.pending_map_key = Some(copy);
                     Ok(true)
                 }
                 None => Ok(false),
             },
-            LevelKind::Array(len) => {
+            SourceFrameKind::Array(len) => {
                 let count = self.top()?.count;
                 if !self.next_member(b']')? {
                     return Ok(false);
@@ -1658,7 +1677,7 @@ impl DecodeSource for JsonSource {
                 if len.is_some_and(|n| count >= n) {
                     return Err(self.fail(&format!("expected array of length {}", len.unwrap_or(0))));
                 }
-                self.top()?.segment = Segment::Index(count);
+                self.top()?.segment = PathSegment::Index(count);
                 Ok(true)
             }
             _ => Err(Fail::internal("json: `next` outside an array or a map").into()),
@@ -1669,7 +1688,7 @@ impl DecodeSource for JsonSource {
         if self.start("object")? != Some(b'{') {
             return Err(self.mismatch("object"));
         }
-        self.open(LevelKind::Object)?;
+        self.open(SourceFrameKind::Object)?;
         self.pos += 1;
         Ok(())
     }
@@ -1678,11 +1697,11 @@ impl DecodeSource for JsonSource {
         match self.next_key()? {
             Some(key) => {
                 self.top()?.segment = key;
-                let top = self.levels.last().expect("an open object");
+                let top = self.frames.last().expect("an open object");
                 Ok(Some(Cow::Borrowed(self.segment_text(&top.segment))))
             }
             None => {
-                self.top()?.segment = Segment::None;
+                self.top()?.segment = PathSegment::None;
                 Ok(None)
             }
         }
@@ -1691,55 +1710,55 @@ impl DecodeSource for JsonSource {
     fn begin_variant(&mut self, type_name: &str) -> CodecResult<Cow<'_, str>> {
         let name = Self::short_name(type_name).to_string();
         self.enum_name.clone_from(&name);
-        if let Some(key) = self.key.take() {
-            self.open(LevelKind::Variant { object: false })?;
-            self.variant = self.segment_text(&key).to_string();
-            return Ok(Cow::Borrowed(&self.variant));
+        if let Some(key) = self.pending_map_key.take() {
+            self.open(SourceFrameKind::Variant { is_object: false })?;
+            self.variant_name = self.segment_text(&key).to_string();
+            return Ok(Cow::Borrowed(&self.variant_name));
         }
-        self.ws();
+        self.skip_whitespace();
         match self.peek() {
             Some(b'"') => {
                 let s = self.string(true)?;
-                self.variant = self.scanned(&s).to_string();
-                self.open(LevelKind::Variant { object: false })?;
+                self.variant_name = self.scanned_str(&s).to_string();
+                self.open(SourceFrameKind::Variant { is_object: false })?;
             }
             Some(b'{') => {
                 self.pos += 1;
-                self.open(LevelKind::Variant { object: true })?;
+                self.open(SourceFrameKind::Variant { is_object: true })?;
                 match self.next_key()? {
-                    Some(key) => self.variant = self.segment_text(&key).to_string(),
+                    Some(key) => self.variant_name = self.segment_text(&key).to_string(),
                     None => return Err(self.fail(&format!("expected a variant of {name}"))),
                 }
             }
             _ => return Err(self.mismatch(&name)),
         }
-        Ok(Cow::Borrowed(&self.variant))
+        Ok(Cow::Borrowed(&self.variant_name))
     }
 
     fn begin_payload(&mut self, form: PayloadForm) -> CodecResult {
-        let LevelKind::Variant { object } = self.top()?.kind else {
+        let SourceFrameKind::Variant { is_object } = self.top()?.kind else {
             return Err(Fail::internal("json: a payload outside a variant").into());
         };
-        match (object, form) {
+        match (is_object, form) {
             (false, PayloadForm::Unit) => Ok(()),
             (false, _) => {
-                let msg = format!("variant `{}` of {} needs a payload", self.variant, self.enum_name);
+                let msg = format!("variant `{}` of {} needs a payload", self.variant_name, self.enum_name);
                 Err(self.fail(&msg))
             }
             (true, form) => {
-                self.top()?.segment = Segment::Owned(self.variant.clone());
+                self.top()?.segment = PathSegment::Owned(self.variant_name.clone());
                 self.begin_payload_value(form)
             }
         }
     }
 
     fn skip(&mut self) -> CodecResult {
-        if self.key.take().is_some() {
+        if self.pending_map_key.take().is_some() {
             return Ok(());
         }
-        let depth = self.levels.len();
+        let depth = self.frames.len();
         loop {
-            self.ws();
+            self.skip_whitespace();
             match self.peek() {
                 Some(b'n') => self.literal(b"null")?,
                 Some(b't') => self.literal(b"true")?,
@@ -1750,66 +1769,66 @@ impl DecodeSource for JsonSource {
                 Some(b'-' | b'0'..=b'9') => drop(self.number()?),
                 Some(b'[') => {
                     self.pos += 1;
-                    self.open(LevelKind::Array(None))?;
+                    self.open(SourceFrameKind::Array(None))?;
                 }
                 Some(b'{') => {
                     self.pos += 1;
-                    self.open(LevelKind::Object)?;
+                    self.open(SourceFrameKind::Object)?;
                 }
                 _ => return Err(self.unexpected()),
             }
             loop {
-                if self.levels.len() == depth {
+                if self.frames.len() == depth {
                     return Ok(());
                 }
                 let more = match self.top()?.kind {
-                    LevelKind::Object => self.next_key()?.is_some(),
+                    SourceFrameKind::Object => self.next_key()?.is_some(),
                     _ => self.next_member(b']')?,
                 };
                 if more {
                     break;
                 }
-                self.levels.pop();
+                self.frames.pop();
             }
         }
     }
 
     fn end(&mut self) -> CodecResult {
-        let Some(level) = self.levels.pop() else { return Ok(()) };
-        if level.kind == LevelKind::Some {
-            self.somes -= 1;
+        let Some(frame) = self.frames.pop() else { return Ok(()) };
+        if frame.kind == SourceFrameKind::Some {
+            self.some_depth -= 1;
         }
-        if let LevelKind::Array(Some(n)) = level.kind {
-            self.ws();
-            if level.count != n || (!level.closed && !self.eat(b']')) {
-                self.levels.push(level);
+        if let SourceFrameKind::Array(Some(n)) = frame.kind {
+            self.skip_whitespace();
+            if frame.count != n || (!frame.closed && !self.eat(b']')) {
+                self.frames.push(frame);
                 return Err(self.fail(&format!("expected array of length {n}")));
             }
         }
-        if let Some(Level { kind: LevelKind::Variant { object: true }, .. }) = self.levels.last()
-            && !matches!(level.kind, LevelKind::Variant { .. })
+        if let Some(SourceFrame { kind: SourceFrameKind::Variant { is_object: true }, .. }) = self.frames.last()
+            && !matches!(frame.kind, SourceFrameKind::Variant { .. })
         {
-            // The payload ended. Close the object that holds the variant name.
-            self.ws();
+            // Consume the outer `}` of `{"Variant": payload}`.
+            self.skip_whitespace();
             if !self.eat(b'}') {
                 let msg = format!("expected a single variant of {}", self.enum_name);
                 return Err(if self.peek() == Some(b',') { self.fail(&msg) } else { self.unexpected() });
             }
-            self.levels.pop();
+            self.frames.pop();
         }
         Ok(())
     }
 
     fn path(&self) -> String {
         let mut s = String::from("$");
-        for level in &self.levels {
-            match &level.segment {
-                Segment::None => {}
-                Segment::Index(i) => {
+        for frame in &self.frames {
+            match &frame.segment {
+                PathSegment::None => {}
+                PathSegment::Index(i) => {
                     let _ = write!(s, "[{i}]");
                 }
                 seg => {
-                    let k = super::truncate(self.segment_text(seg), QUOTED_KEY);
+                    let k = super::truncate(self.segment_text(seg), MAX_PATH_KEY_LEN);
                     if is_ident(k) {
                         s.push('.');
                         s.push_str(k);
@@ -1831,9 +1850,10 @@ impl DecodeSource for JsonSource {
     }
 }
 
+/// Returns an upper bound on the byte length that [`write_str`] writes for `s`.
+///
+/// Assumes worst-case escaping for strings up to 4096 bytes to avoid scanning twice.
 #[inline(always)]
-/// Returns a bound on the bytes that [`write_str`] writes for `s`. The bound
-/// of a short string skips the scan for escapes.
 fn quoted_len(s: &str) -> usize {
     let escaped = if s.len() <= 4096 || has_escape(s.as_bytes()) { 6 * s.len() } else { s.len() };
     escaped + 2

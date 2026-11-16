@@ -1,20 +1,20 @@
-//! The encode and decode walkers of the `Encode` and `Decode` traits.
+//! Iterative walkers for the `Encode` and `Decode` traits.
 //!
-//! A walker visits a value one part at a time. It builds the dictionary of
-//! each part from the dictionary of the whole through the [`CodecShape`] of a
-//! structural dictionary. It handles a structural part in Rust. At a part
-//! with a custom method, an `init` constructor, or a computed field default,
-//! it stops and returns a [`Callback`] for its caller to run.
+//! Each walker processes a value part by part. For a structural
+//! implementation, the walker derives each part's dictionary from the outer
+//! dictionary using its [`CodecShape`]. It then processes the part in Rust. If
+//! a part uses a custom trait method, an `init` constructor, or a computed
+//! default, the walker yields a [`Callback`] to the scheduler.
 //!
-//! A walker keeps every heap value that it holds in [`Walk::values`], so that
-//! its caller can root them during a callback. A pass of a walker checks the
-//! memory limit before each part. If the check fails, the pass stops with
-//! [`Step::Collect`], and the walk continues after a collection. A failure
-//! inside a part ends the walk, because the part can have changed the sink or
-//! the source. Only the first pass of a native call, which the VM can run
-//! again from the start, returns that failure as a retryable error.
+//! [`WalkState`] stores every live heap value so the caller can root them
+//! across callbacks and garbage collections. Before visiting each part, the
+//! walker checks the memory limit. If that check fails, the walker returns
+//! [`Step::Collect`] and resumes after garbage collection. A failure after a
+//! part mutates the sink or source aborts the walk. Only an initial
+//! synchronous pass before any suspension can return a retryable limit error
+//! to the VM.
 
-use super::bytecode::{CODEC_SHAPE_SLOT, CodecShape, Fill, PartTemplate, Program, ShapeKind};
+use super::bytecode::{CODEC_SHAPE_SLOT, CodecShape, DecodeFill, PartTemplate, Program, ShapeKind};
 use super::meter::SLOW_BYTES_PER_UNIT;
 use super::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
 use super::{Fail, Vm, WaitKind};
@@ -30,66 +30,64 @@ use crate::value::ValueSink;
 use parking_lot::Mutex;
 use std::sync::{Arc, Weak};
 
-/// Bytes that a walker reserves for each value that it builds.
+/// Heap byte estimate reserved per visited value.
 pub(crate) const NODE_BYTES: usize = 64;
 
-/// The number of parts that a walker visits between two checks of the memory
-/// limit.
+/// Number of visited parts per amortized memory limit check.
 const CHECKED_VALUES: u32 = 32;
 
-/// The maximum nesting depth of a value that a walker encodes or decodes.
-/// The limit also stops a cyclic value.
+/// Maximum container nesting depth for encoding and decoding.
+///
+/// Enforcing this limit also halts cyclic values.
 pub(crate) const MAX_NESTING_DEPTH: usize = 512;
 
-/// A call that a walker needs before it can continue.
+/// Sand function call requested by a walker before continuing.
 pub(crate) struct Callback {
     pub callee: VmValue,
     pub args: Vec<VmValue>,
-    pub purpose: Purpose,
+    pub kind: CallbackKind,
 }
 
-/// The use of the result of a [`Callback`].
+/// Role of a [`Callback`] return value.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Purpose {
-    /// A custom `encode` or `decode` method, which returns a `Result`.
+pub(crate) enum CallbackKind {
+    /// Custom `encode` or `decode` method returning `Result`.
     Method,
-    /// A computed field or parameter default.
-    Fill,
-    /// An `init` constructor.
+    /// Computed field or parameter default helper.
+    Default,
+    /// Struct `init` constructor.
     Init,
 }
 
-/// The progress of a walk.
+/// Outcome of a single walker pass.
 pub(crate) enum Step {
     Done,
     Call(Callback),
-    /// A memory check failed before the next part. The walk can continue
-    /// after a collection.
+    /// Pre-step memory check failed. Collect garbage before resuming.
     Collect(Fail),
 }
 
-/// The heap values of a walker.
+/// GC-rooted heap state shared by [`EncodeWalker`] and [`DecodeWalker`].
 #[derive(Default)]
-pub(crate) struct Walk {
-    /// Every heap value that the walk holds, except `cached`.
+pub(crate) struct WalkState {
+    /// Live heap values on the walker stack.
     values: Vec<VmValue>,
-    /// Whether the walk collected garbage and has made no progress since.
+    /// `true` if garbage collection ran since the walker last completed a part.
     collected: bool,
-    /// Part dictionaries built from templates, by shape, part, and the heap
-    /// handle of the dictionary of the whole.
+    /// Memoized part dictionaries keyed by `(shape_idx, part, whole_handle)`.
     cache: FxHashMap<(u32, u32, u32), VmValue>,
     cached: Vec<VmValue>,
 }
 
-impl Walk {
-    fn new(values: Vec<VmValue>) -> Walk {
-        Walk { values, ..Walk::default() }
+impl WalkState {
+    fn new(values: Vec<VmValue>) -> WalkState {
+        WalkState { values, ..WalkState::default() }
     }
 
-    /// Checks the memory limit before the next part, once for each
-    /// [`CHECKED_VALUES`] parts, and counts the part in `unchecked`. Returns
-    /// the step if the check failed. Sinks and sources reserve their own
-    /// memory, which the check counts.
+    /// Checks the memory limit every [`CHECKED_VALUES`] parts and advances
+    /// `unchecked`.
+    ///
+    /// Returns `Some` if the check stops the current pass.
     fn check_memory(&mut self, vm: &Vm, unchecked: &mut u32) -> Option<CodecResult<Step>> {
         let check = if *unchecked == 0 || vm.heap.fail_next_check.get() {
             let held = self.values.capacity() * size_of::<VmValue>();
@@ -104,121 +102,121 @@ impl Walk {
         step
     }
 
-    /// Returns the step after a memory check before a change to the walk, if
-    /// the check failed. A second failure before the walk makes progress
-    /// ends the walk, because a collection did not help.
+    /// Converts a pre-step memory check error into [`Step::Collect`] on the
+    /// first failure or a terminal error if a collection just ran.
     fn checked(&mut self, check: Result<(), Fail>) -> Option<CodecResult<Step>> {
         match check {
             Ok(()) => None,
-            Err(e) if !self.collected && e.as_limit() == Some(LimitKind::Memory) => Some(Ok(Step::Collect(e))),
-            Err(e) => Some(Err(e.into())),
+            Err(err) if !self.collected && err.as_limit() == Some(LimitKind::Memory) => Some(Ok(Step::Collect(err))),
+            Err(err) => Some(Err(err.into())),
         }
     }
 
-    /// Returns the dictionary of part `part` of shape `s`, from `whole`.
-    fn part_dict(&mut self, vm: &mut Vm, prog: &Program, s: u32, part: u32, whole: VmValue) -> Result<VmValue, Fail> {
-        let Some(t) = shape(prog, s)?.parts.get(part as usize) else {
+    /// Resolves the dictionary for `part` of `shape_idx` from `whole`.
+    fn part_dict(&mut self, vm: &mut Vm, prog: &Program, shape_idx: u32, part: u32, whole: VmValue) -> Result<VmValue, Fail> {
+        let Some(template) = shape(prog, shape_idx)?.parts.get(part as usize) else {
             return Err(Fail::internal("a codec shape has too few parts"));
         };
-        match t {
+        match template {
             PartTemplate::Const(k) => Ok(vm.consts[*k as usize]),
             PartTemplate::Bound(i) => dict_slot(vm, whole, *i),
             _ => {
-                let key = (s, part, handle(whole));
-                if let Some(&d) = self.cache.get(&key) {
-                    return Ok(d);
+                let key = (shape_idx, part, handle(whole));
+                if let Some(&dict) = self.cache.get(&key) {
+                    return Ok(dict);
                 }
-                let d = eval_template(vm, t, whole)?;
-                self.cache.insert(key, d);
-                self.cached.push(d);
-                Ok(d)
+                let dict = eval_template(vm, template, whole)?;
+                self.cache.insert(key, dict);
+                self.cached.push(dict);
+                Ok(dict)
             }
         }
     }
-}
 
-impl Walk {
-    /// Returns the lists of every heap value that the walk holds.
+    /// Borrows the two root vectors held by this walk.
     fn roots(&mut self) -> [&mut Vec<VmValue>; 2] {
         [&mut self.values, &mut self.cached]
     }
 
-    /// Collects garbage and keeps the values of the walk rooted.
-    async fn collect(&mut self, cx: &mut NativeContext) {
-        cx.collect_keeping(self.roots()).await;
+    /// Runs garbage collection while keeping all walk values rooted.
+    async fn collect(&mut self, context: &mut NativeContext) {
+        context.collect_keeping(self.roots()).await;
         self.collected = true;
     }
 }
 
-fn handle(v: VmValue) -> u32 {
-    match v {
+fn handle(value: VmValue) -> u32 {
+    match value {
         VmValue::Obj(h) => h,
         _ => u32::MAX,
     }
 }
 
-fn dict_slot(vm: &Vm, dict: VmValue, i: u32) -> Result<VmValue, Fail> {
+fn dict_slot(vm: &Vm, dict: VmValue, slot: u32) -> Result<VmValue, Fail> {
     match vm.heap.get(dict) {
-        Obj::Tuple(items) => items.get(i as usize).copied().ok_or_else(|| Fail::internal("a codec dictionary has too few slots")),
+        Obj::Tuple(items) => items.get(slot as usize).copied().ok_or_else(|| Fail::internal("a codec dictionary has too few slots")),
         _ => Err(Fail::internal("a codec dictionary is not a tuple")),
     }
 }
 
-/// Builds a dictionary from template `t`. The memory check at the start of
-/// each pass of a walker covers its allocations.
-fn eval_template(vm: &mut Vm, t: &PartTemplate, whole: VmValue) -> Result<VmValue, Fail> {
-    Ok(match t {
+/// Evaluates `template` against outer dictionary `whole`.
+///
+/// Each walker pass pre-checks enough heap headroom to cover these tuple
+/// allocations.
+fn eval_template(vm: &mut Vm, template: &PartTemplate, whole: VmValue) -> Result<VmValue, Fail> {
+    Ok(match template {
         PartTemplate::Const(k) => vm.consts[*k as usize],
         PartTemplate::Bound(i) => dict_slot(vm, whole, *i)?,
         PartTemplate::Field(inner, i) => {
-            let d = eval_template(vm, inner, whole)?;
-            dict_slot(vm, d, *i)?
+            let dict = eval_template(vm, inner, whole)?;
+            dict_slot(vm, dict, *i)?
         }
         PartTemplate::Dict(items) => {
             vm.charge(1)?;
-            let items = items.iter().map(|t| eval_template(vm, t, whole)).collect::<Result<Vec<_>, _>>()?;
+            let items = items.iter().map(|inner| eval_template(vm, inner, whole)).collect::<Result<Vec<_>, _>>()?;
             vm.heap.alloc(Obj::Tuple(items.into_boxed_slice()))
         }
     })
 }
 
-/// The method of a codec dictionary.
+/// Dispatch target extracted from a codec dictionary.
 enum Method {
-    /// The native default method, with the index of the shape.
+    /// Structural walker using the given [`CodecShape`] index.
     Structural(u32),
-    /// A method that a Sand impl declares.
+    /// Custom Sand method closure or native function.
     Custom(VmValue),
 }
 
 fn method(vm: &Vm, dict: VmValue) -> Result<Method, Fail> {
     match vm.heap.get(dict) {
         Obj::Tuple(items) => match (items.first(), items.get(CODEC_SHAPE_SLOT)) {
-            (_, Some(&VmValue::Int(s))) => Ok(Method::Structural(s as u32)),
-            (Some(&m), _) => Ok(Method::Custom(m)),
+            (_, Some(&VmValue::Int(shape_idx))) => Ok(Method::Structural(shape_idx as u32)),
+            (Some(&callee), _) => Ok(Method::Custom(callee)),
             (None, _) => Err(Fail::internal("a codec dictionary is empty")),
         },
         _ => Err(Fail::internal("a codec dictionary is not a tuple")),
     }
 }
 
-/// Returns shape `s` of `prog`. A host can pass any value as a dictionary, so
-/// the index needs a check.
-fn shape(prog: &Program, s: u32) -> Result<&CodecShape, Fail> {
-    prog.codec_shapes.get(s as usize).ok_or_else(|| Fail::internal("unknown codec shape"))
+/// Looks up `shape_idx` in `prog.codec_shapes`.
+///
+/// Validates the index because host callers can supply arbitrary dictionary
+/// tuples.
+fn shape(prog: &Program, shape_idx: u32) -> Result<&CodecShape, Fail> {
+    prog.codec_shapes.get(shape_idx as usize).ok_or_else(|| Fail::internal("unknown codec shape"))
 }
 
-/// Fails a walk with kind `"limit"` for a value nested more than
-/// [`MAX_NESTING_DEPTH`] levels.
+/// Returns a `"limit"` error for values nested deeper than
+/// [`MAX_NESTING_DEPTH`].
 pub(crate) fn too_deep<T>() -> CodecResult<T> {
     Err(HostError::new("limit", "value too deeply nested to encode or decode"))
 }
 
-/// Adds the path of the current part of `source` to `e`, the error of a
-/// callback.
-fn at_path(e: HostError<Fail>, source: &dyn DecodeSource) -> HostError<Fail> {
-    match e.sand_error() {
+/// Prefixes recoverable callback error `err` with the current path of `source`.
+fn at_path(err: HostError<Fail>, source: &dyn DecodeSource) -> HostError<Fail> {
+    match err.sand_error() {
         Some((kind, message)) => HostError::new(kind, format!("{}: {message}", source.path())),
-        None => e,
+        None => err,
     }
 }
 
@@ -226,50 +224,54 @@ fn parse_error<T>(source: &dyn DecodeSource, msg: impl std::fmt::Display) -> Cod
     Err(HostError::new("parse", format!("{}: {msg}", source.path())))
 }
 
-/// Returns the payload of `v` if it is an `Err`.
-fn err_payload(vm: &Vm, v: VmValue) -> Option<VmValue> {
-    (vm.heap.variant_id(v) == vm.prog.ids.err).then(|| vm.heap.payload_if(&v, vm.prog.ids.err))
+/// Extracts the payload if `value` is `Result.Err`.
+fn err_payload(vm: &Vm, value: VmValue) -> Option<VmValue> {
+    (vm.heap.variant_id(value) == vm.prog.ids.err).then(|| vm.heap.payload_if(&value, vm.prog.ids.err))
 }
 
-/// Converts the error `e` of a Sand callback into a [`HostError`]. An `Error`
-/// keeps its kind. Another error has kind `"invalid"` and its display text.
-fn sand_error(vm: &Vm, e: VmValue) -> Result<HostError<Fail>, Fail> {
+/// Converts Sand `Err` payload `err_val` into a [`HostError`].
+///
+/// Preserves the kind and message of a `prelude.Error` struct and formats any
+/// other error value with kind `"invalid"`.
+fn sand_error(vm: &Vm, err_val: VmValue) -> Result<HostError<Fail>, Fail> {
     let error_def = vm.prog.struct_types.get(&<crate::stdlib::core::Error as crate::native::NamedType>::rust_type()).copied();
-    if let Obj::Struct(def, fields) = vm.heap.get(e)
+    if let Obj::Struct(def, fields) = vm.heap.get(err_val)
         && Some(*def) == error_def
         && let [message, kind] = fields[..]
     {
         return Ok(HostError::new(vm.heap.str(kind), vm.heap.str(message)));
     }
-    Ok(HostError::new("invalid", vm.display(e)?))
+    Ok(HostError::new("invalid", vm.display(err_val)?))
 }
 
-/// Converts the [`HostError`] of a walk into the [`Fail`] that stops the run.
-pub(crate) fn abort(e: HostError<Fail>) -> Fail {
-    match e.into_abort() {
+/// Converts a walk [`HostError`] into a [`Fail`] that terminates execution.
+pub(crate) fn abort(err: HostError<Fail>) -> Fail {
+    match err.into_abort() {
         Ok(fail) => fail,
-        Err(e) => {
-            let (kind, message) = e.sand_error().unwrap_or(("error", ""));
+        Err(err) => {
+            let (kind, message) = err.sand_error().unwrap_or(("error", ""));
             Fail::runtime_error(kind, message)
         }
     }
 }
 
-/// Tracks which `Encoder` or `Decoder` of a walk can take its value.
+/// Tracks single-use turn ownership for `Encoder` and `Decoder` handles.
 pub(crate) struct Turn {
-    /// The token of the handle that can take the value, or 0.
+    /// Token of the currently active handle, or `0` if none is active.
     active: u64,
-    /// Whether the active handle has taken its value.
+    /// `true` once the active handle has consumed its single operation.
     used: bool,
     next_token: u64,
-    /// The nested writes or reads that have begun and not ended. A task that
-    /// the custom method spawns can keep one going after the method returns.
+    /// Count of in-flight nested writes or reads.
+    ///
+    /// A spawned task can keep an operation in flight after its custom method
+    /// returns.
     open: u32,
-    /// The error of a failed nested write or read, which fails the walk.
+    /// Saved `(kind, message)` from a failed nested operation.
     failed: Option<(String, String)>,
 }
 
-/// The turn that the callback of a custom method interrupts.
+/// Snapshot of [`Turn`] saved across a nested custom method callback.
 #[derive(Clone, Copy)]
 struct SavedTurn {
     active: u64,
@@ -278,8 +280,8 @@ struct SavedTurn {
 }
 
 impl Turn {
-    /// Starts the turn of the handle with token `next_token`, and returns
-    /// the turn that it interrupts.
+    /// Activates a fresh handle token and returns the interrupted
+    /// [`SavedTurn`].
     fn begin(&mut self) -> (u64, SavedTurn) {
         let token = self.next_token;
         self.next_token += 1;
@@ -288,9 +290,8 @@ impl Turn {
         (token, saved)
     }
 
-    /// Gives the value of the walk to the handle with `token`. Fails with
-    /// `inactive` if the turn is not the handle's, or with `second` if the
-    /// handle has already taken its value.
+    /// Claims the single operation of `token`, or fails with `inactive` or
+    /// `second`.
     fn claim(&mut self, token: u64, inactive: &str, second: &str) -> Result<(), HostError> {
         if self.active != token {
             return Err(self.misuse(inactive));
@@ -303,10 +304,11 @@ impl Turn {
         Ok(())
     }
 
-    /// Ends the turn of `token` and resumes `saved`. Returns `true` if the
-    /// handle took no value. Fails with the error of a failed nested write
-    /// or read, or with `unfinished` if the custom method returned before
-    /// its nested write or read ended.
+    /// Restores `saved` after `token`'s callback finishes.
+    ///
+    /// Returns `Ok(true)` if `token` was never used. Propagates any recorded
+    /// nested error, or fails with `unfinished` if a nested operation is still
+    /// in flight.
     fn end(&mut self, token: u64, saved: SavedTurn, unfinished: &str) -> CodecResult<bool> {
         let unused = self.active == token && !self.used;
         let open = self.open > saved.open;
@@ -320,23 +322,22 @@ impl Turn {
         Ok(unused)
     }
 
-    /// Records the error of a nested write or read, so that the walk fails
-    /// even if the custom method ignores the error.
-    fn record(&mut self, e: &HostError<Fail>) {
-        if let Some((kind, message)) = e.sand_error() {
+    /// Saves a recoverable nested error so the outer walk fails even if the
+    /// custom method discards the `Result`.
+    fn record(&mut self, err: &HostError<Fail>) {
+        if let Some((kind, message)) = err.sand_error() {
             self.failed = Some((kind.to_string(), message.to_string()));
         }
     }
 
-    /// Returns an `"invalid"` error for a misused handle, and records it.
+    /// Records and returns an `"invalid"` error for handle misuse.
     fn misuse(&mut self, message: &str) -> HostError {
         self.failed = Some(("invalid".to_string(), message.to_string()));
         HostError::new("invalid", message)
     }
 }
 
-/// The state that a walk shares with the `Encoder`s or `Decoder`s of its
-/// callbacks: the turn and the sink or source.
+/// Turn state and sink or source shared with `Encoder` or `Decoder` handles.
 pub(crate) struct Shared<IO: ?Sized> {
     turn: Turn,
     pub io: IO,
@@ -349,87 +350,93 @@ impl<IO> Shared<IO> {
     }
 }
 
-/// A shared encode state with any sink.
+/// Shared state for an active encode walk.
 pub(crate) type EncodeCell = Arc<Mutex<Shared<dyn EncodeSink>>>;
 
-/// A shared decode state with any source.
+/// Shared state for an active decode walk.
 pub(crate) type DecodeCell = Arc<Mutex<Shared<dyn DecodeSource>>>;
 
-/// Writes the single value of a custom `encode` method.
+/// Handle that writes the single value of a custom `encode` method.
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
 pub(crate) struct Encoder {
-    /// The state of the walk, which a stored `Encoder` does not keep alive.
+    /// Weak reference so retaining an `Encoder` does not retain the sink.
     shared: Weak<Mutex<Shared<dyn EncodeSink>>>,
     token: u64,
 }
 
 impl crate::native::NativeObject for Encoder {}
 
-/// Reads the single value of a custom `decode` method.
+/// Handle that reads the single value of a custom `decode` method.
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
 pub(crate) struct Decoder {
-    /// The state of the walk, which a stored `Decoder` does not keep alive.
+    /// Weak reference so retaining a `Decoder` does not retain the source.
     shared: Weak<Mutex<Shared<dyn DecodeSource>>>,
     token: u64,
 }
 
 impl crate::native::NativeObject for Decoder {}
 
-/// An open container of the encode walker.
+/// Open container frame on the [`EncodeWalker`] stack.
 struct EncodeFrame {
-    /// The index of the container in [`Walk::values`]. Its dictionary
-    /// follows it, and for a set or a map, its iterator. For a map, the value
-    /// of the current entry follows the iterator.
-    at: usize,
+    /// Start index of this frame's slots in [`WalkState::values`].
+    ///
+    /// Slot `base` holds the container and `base + 1` holds its dictionary.
+    /// Set and map frames also store the iterator at `base + 2` and the
+    /// pending map value at `base + 3`.
+    base: usize,
     shape: u32,
     kind: EncodeKind,
-    /// The position of the next child.
+    /// Index of the next child to visit.
     next: usize,
-    /// For a list: its length when the walker began it. The walker reads no
-    /// element past it, as a `for` loop does.
+    /// Initial list length snapshot.
+    ///
+    /// Matching `for` loop semantics, the walker stops at this bound even if a
+    /// callback appends to the list.
     bound: usize,
 }
 
-/// An open container of the encode walker. The walker reads a set or a map
-/// through the iterator of a `for` loop, so a callback that changes the set
-/// or the map does not change what the walker writes.
+/// Container kind for an [`EncodeFrame`].
+///
+/// Sets and maps iterate through `Vm::container_iter` snapshots so mutations
+/// during callbacks do not corrupt traversal.
 #[derive(Clone, Copy)]
 enum EncodeKind {
-    /// The elements of a list, which share one part.
+    /// List elements sharing part 0.
     List,
-    /// The elements of a set, which share one part.
+    /// Set elements sharing part 0.
     Set,
-    /// The elements of a tuple or the fields of a struct, one part each.
+    /// Tuple elements or struct fields with one part per index.
     Fields,
-    /// A map: its even children are keys and its odd children are values.
+    /// Map entries alternating between keys at even indices and values at odd
+    /// indices.
     Map,
-    /// The payload of a variant whose parts start at `base`.
+    /// Variant payload values starting at `base` in `CodecShape::parts`.
     Payload { base: u32 },
-    /// The payload of `Some`.
+    /// Payload of `Option.Some`.
     Some,
 }
 
-/// Walks a value and writes it to an [`EncodeSink`].
-pub(crate) struct EncodeWalk {
-    walk: Walk,
-    /// The values written since the last check of the memory limit.
+/// Iterative walker that encodes a Sand value into an [`EncodeSink`].
+pub(crate) struct EncodeWalker {
+    state: WalkState,
+    /// Parts visited since the previous memory limit check.
     unchecked: u32,
     frames: Vec<EncodeFrame>,
-    /// The number of open containers other than `Some`.
+    /// Active container depth excluding `Some` wrappers.
     depth: usize,
-    /// The part to visit next: its value and its dictionary.
+    /// Next `(value, dict)` pair to visit.
     pending: Option<(VmValue, VmValue)>,
-    /// The token of the `Encoder` of the callback in progress, and the
-    /// encoder state before the callback.
+    /// Active `Encoder` token and interrupted [`SavedTurn`] during a custom
+    /// `encode` callback.
     callback: Option<(u64, SavedTurn)>,
 }
 
-impl EncodeWalk {
-    pub(crate) fn new(value: VmValue, dict: VmValue) -> EncodeWalk {
-        let walk = Walk::new(vec![value, dict]);
-        EncodeWalk { walk, unchecked: 0, frames: Vec::new(), depth: 0, pending: Some((value, dict)), callback: None }
+impl EncodeWalker {
+    pub(crate) fn new(value: VmValue, dict: VmValue) -> EncodeWalker {
+        let state = WalkState::new(vec![value, dict]);
+        EncodeWalker { state, unchecked: 0, frames: Vec::new(), depth: 0, pending: Some((value, dict)), callback: None }
     }
 
     #[inline(always)]
@@ -440,19 +447,27 @@ impl EncodeWalk {
             }
             self.depth += 1;
         }
-        let at = self.walk.values.len();
-        self.walk.values.extend([value, dict]);
+        let base = self.state.values.len();
+        self.state.values.extend([value, dict]);
         if matches!(kind, EncodeKind::Set | EncodeKind::Map) {
-            // The check before the part covers the iterator.
-            let it = vm.unchecked(|vm| vm.container_iter(value))?;
-            self.walk.values.extend([it, VmValue::Unit]);
+            // Pre-step memory check covers allocating the iterator.
+            let iter = vm.unchecked(|vm| vm.container_iter(value))?;
+            self.state.values.extend([iter, VmValue::Unit]);
         }
-        self.frames.push(EncodeFrame { at, shape, kind, next: 0, bound });
+        self.frames.push(EncodeFrame { base, shape, kind, next: 0, bound });
         Ok(())
     }
 
-    fn visit(&mut self, vm: &mut Vm, prog: &Program, sink: &mut dyn EncodeSink, s: u32, value: VmValue, dict: VmValue) -> CodecResult {
-        let shape = shape(prog, s)?;
+    fn visit(
+        &mut self,
+        vm: &mut Vm,
+        prog: &Program,
+        sink: &mut dyn EncodeSink,
+        shape_idx: u32,
+        value: VmValue,
+        dict: VmValue,
+    ) -> CodecResult {
+        let shape = shape(prog, shape_idx)?;
         let wrong = || -> CodecResult { Err(Fail::internal("encode: a value does not match its shape").into()) };
         match (&shape.kind, value) {
             (ShapeKind::Unit, _) => sink.unit()?,
@@ -479,36 +494,36 @@ impl EncodeWalk {
                 vm.meter.charge_bytes(text.len())?;
                 sink.native(&prog.types[*def as usize].desc().type_name, &text)?;
             }
-            (ShapeKind::ManualEncode(f), _) => f(vm, value, sink)?,
+            (ShapeKind::ManualEncode(encode_fn), _) => encode_fn(vm, value, sink)?,
             (ShapeKind::List, _) => {
                 let len = vm.heap.list(value).len();
-                self.push_frame(vm, value, dict, s, EncodeKind::List, len)?;
+                self.push_frame(vm, value, dict, shape_idx, EncodeKind::List, len)?;
                 sink.begin_list(len)?;
             }
             (ShapeKind::Set, _) => {
                 let Obj::Set(set) = vm.heap.get(value) else { return wrong() };
                 let live = set.live;
-                self.push_frame(vm, value, dict, s, EncodeKind::Set, 0)?;
+                self.push_frame(vm, value, dict, shape_idx, EncodeKind::Set, 0)?;
                 sink.begin_set(live)?;
             }
             (ShapeKind::Map, _) => {
                 let Obj::Map(map) = vm.heap.get(value) else { return wrong() };
                 let live = map.live;
-                self.push_frame(vm, value, dict, s, EncodeKind::Map, 0)?;
+                self.push_frame(vm, value, dict, shape_idx, EncodeKind::Map, 0)?;
                 sink.begin_map(live)?;
             }
             (ShapeKind::Tuple, _) => {
-                self.push_frame(vm, value, dict, s, EncodeKind::Fields, 0)?;
+                self.push_frame(vm, value, dict, shape_idx, EncodeKind::Fields, 0)?;
                 sink.begin_tuple(shape.parts.len())?;
             }
             (ShapeKind::Struct(def), _) => {
-                self.push_frame(vm, value, dict, s, EncodeKind::Fields, 0)?;
+                self.push_frame(vm, value, dict, shape_idx, EncodeKind::Fields, 0)?;
                 sink.begin_struct(prog.types[*def as usize].desc())?;
             }
             (ShapeKind::Option, _) if vm.heap.variant_id(value) == prog.ids.none => sink.none()?,
             (ShapeKind::Option, _) => {
                 sink.begin_some()?;
-                self.push_frame(vm, value, dict, s, EncodeKind::Some, 0)?;
+                self.push_frame(vm, value, dict, shape_idx, EncodeKind::Some, 0)?;
             }
             (ShapeKind::Enum { .. }, _) => {
                 let id = vm.heap.variant_id(value);
@@ -520,20 +535,20 @@ impl EncodeWalk {
                 }
                 charge_scan(vm, variant.index as usize)?;
                 let base = (id - variant.index..id).map(|v| prog.variants[v as usize].arity as u32).sum();
-                self.push_frame(vm, value, dict, s, EncodeKind::Payload { base }, 0)?;
+                self.push_frame(vm, value, dict, shape_idx, EncodeKind::Payload { base }, 0)?;
             }
             _ => wrong()?,
         }
         Ok(())
     }
 
-    /// Returns the next part of the innermost open container, and ends the
-    /// containers that have no more parts.
+    /// Advances to the next child `(value, dict)` or closes finished
+    /// containers.
     fn next_part(&mut self, vm: &mut Vm, prog: &Program, sink: &mut dyn EncodeSink) -> CodecResult<Option<(VmValue, VmValue)>> {
         loop {
             let Some(frame) = self.frames.last() else { return Ok(None) };
-            let (container, dict, shape) = (self.walk.values[frame.at], self.walk.values[frame.at + 1], frame.shape);
-            let (at, next) = (frame.at, frame.next);
+            let (container, dict, shape) = (self.state.values[frame.base], self.state.values[frame.base + 1], frame.shape);
+            let (base, next) = (frame.base, frame.next);
             let child = match frame.kind {
                 EncodeKind::List => {
                     let items = vm.heap.list(container);
@@ -541,22 +556,24 @@ impl EncodeWalk {
                 }
                 EncodeKind::Set => {
                     let mut element = VmValue::Unit;
-                    vm.set_step(self.walk.values[at + 2], &mut element).then_some((element, 0, next + 1))
+                    vm.set_step(self.state.values[base + 2], &mut element).then_some((element, 0, next + 1))
                 }
                 EncodeKind::Fields => field(vm, container, next)?.map(|v| (v, next as u32, next + 1)),
-                EncodeKind::Map if next % 2 == 1 => Some((self.walk.values[at + 3], 1, next + 1)),
+                EncodeKind::Map if next % 2 == 1 => Some((self.state.values[base + 3], 1, next + 1)),
                 EncodeKind::Map => {
                     let mut entry = [VmValue::Unit; 2];
-                    let found = vm.map_step(self.walk.values[at + 2], &mut entry);
-                    self.walk.values[at + 3] = entry[1];
+                    let found = vm.map_step(self.state.values[base + 2], &mut entry);
+                    self.state.values[base + 3] = entry[1];
                     found.then_some((entry[0], 0, next + 1))
                 }
                 EncodeKind::Some => (frame.next == 0).then(|| (vm.heap.payload_if(&container, vm.prog.ids.some), 0, 1)),
-                EncodeKind::Payload { base } => payload(vm, container, frame.next).map(|v| (v, base + frame.next as u32, frame.next + 1)),
+                EncodeKind::Payload { base: part_base } => {
+                    payload(vm, container, frame.next).map(|v| (v, part_base + frame.next as u32, frame.next + 1))
+                }
             };
             match child {
                 Some((value, part, next)) => {
-                    let dict = self.walk.part_dict(vm, prog, shape, part, dict)?;
+                    let dict = self.state.part_dict(vm, prog, shape, part, dict)?;
                     self.frames.last_mut().expect("an open frame").next = next;
                     return Ok(Some((value, dict)));
                 }
@@ -564,29 +581,29 @@ impl EncodeWalk {
                     sink.end()?;
                     let frame = self.frames.pop().expect("an open frame");
                     self.depth -= usize::from(!matches!(frame.kind, EncodeKind::Some));
-                    self.walk.values.truncate(frame.at);
+                    self.state.values.truncate(frame.base);
                 }
             }
         }
     }
 }
 
-impl Walker for EncodeWalk {
+impl Walker for EncodeWalker {
     type IO = dyn EncodeSink;
     type Output = ();
-    /// Walks until the end or the next callback.
+    /// Advances until completion, a memory collection stop, or a callback.
     fn run(&mut self, vm: &mut Vm, shared: &EncodeCell) -> CodecResult<Step> {
         let prog = vm.prog.clone();
-        let mut state = shared.lock();
-        // Callbacks can have changed the heap since the last pass.
+        let mut shared_guard = shared.lock();
+        // Reset `unchecked` because callbacks can allocate on the heap.
         self.unchecked = 0;
         loop {
-            if let Some(step) = self.walk.check_memory(vm, &mut self.unchecked) {
+            if let Some(step) = self.state.check_memory(vm, &mut self.unchecked) {
                 return step;
             }
             let (value, dict) = match self.pending {
                 Some(part) => part,
-                None => match self.next_part(vm, &prog, &mut state.io)? {
+                None => match self.next_part(vm, &prog, &mut shared_guard.io)? {
                     Some(part) => part,
                     None => return Ok(Step::Done),
                 },
@@ -594,29 +611,29 @@ impl Walker for EncodeWalk {
             vm.charge(1)?;
             match method(vm, dict)? {
                 Method::Custom(callee) => {
-                    let token = state.turn.next_token;
-                    // The check before the part covers the handle, which must not fail after
-                    // `next_part` has moved past the part.
+                    let token = shared_guard.turn.next_token;
+                    // Allocate `Encoder` without a limit check because `next_part`
+                    // already advanced the frame.
                     let encoder = vm.unchecked(|vm| (Encoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm))?;
-                    self.callback = Some(state.turn.begin());
+                    self.callback = Some(shared_guard.turn.begin());
                     self.pending = None;
-                    return Ok(Step::Call(Callback { callee, args: vec![dict, value, encoder], purpose: Purpose::Method }));
+                    return Ok(Step::Call(Callback { callee, args: vec![dict, value, encoder], kind: CallbackKind::Method }));
                 }
-                Method::Structural(s) => {
+                Method::Structural(shape_idx) => {
                     self.pending = None;
-                    self.visit(vm, &prog, &mut state.io, s, value, dict)?;
-                    self.walk.collected = false;
+                    self.visit(vm, &prog, &mut shared_guard.io, shape_idx, value, dict)?;
+                    self.state.collected = false;
                 }
             }
         }
     }
 
-    /// Checks the result of the callback of a custom method.
-    fn apply(&mut self, vm: &mut Vm, shared: &EncodeCell, _: Purpose, result: VmValue) -> CodecResult {
+    /// Validates completion of a custom `encode` callback.
+    fn apply(&mut self, vm: &mut Vm, shared: &EncodeCell, _: CallbackKind, result: VmValue) -> CodecResult {
         let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("encode: no callback").into()) };
         let unused = shared.lock().turn.end(token, saved, "an `encode` method returned before its write ended")?;
-        if let Some(e) = err_payload(vm, result) {
-            return Err(sand_error(vm, e)?);
+        if let Some(err_val) = err_payload(vm, result) {
+            return Err(sand_error(vm, err_val)?);
         }
         if unused {
             return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
@@ -627,177 +644,176 @@ impl Walker for EncodeWalk {
     fn output(&self) -> Result<(), Fail> {
         Ok(())
     }
-    fn walk(&mut self) -> &mut Walk {
-        &mut self.walk
+
+    fn state(&mut self) -> &mut WalkState {
+        &mut self.state
     }
 }
 
-/// Returns field `i` of a tuple or a struct, whose fields a callback cannot
-/// add or remove.
-fn field(vm: &Vm, container: VmValue, i: usize) -> Result<Option<VmValue>, Fail> {
+/// Reads element or field `index` from a tuple or struct.
+fn field(vm: &Vm, container: VmValue, index: usize) -> Result<Option<VmValue>, Fail> {
     Ok(match container {
-        VmValue::Pair(a, b) => [VmValue::Int(i64::from(a)), VmValue::Int(b)].get(i).copied(),
+        VmValue::Pair(a, b) => [VmValue::Int(i64::from(a)), VmValue::Int(b)].get(index).copied(),
         _ => match vm.heap.get(container) {
-            Obj::Tuple(items) | Obj::Struct(_, items) => items.get(i).copied(),
+            Obj::Tuple(items) | Obj::Struct(_, items) => items.get(index).copied(),
             _ => return Err(Fail::internal("encode: not a tuple or a struct")),
         },
     })
 }
 
-fn payload(vm: &Vm, v: VmValue, i: usize) -> Option<VmValue> {
-    match vm.heap.variant(v)? {
-        VariantRef::Heap(_, fields) => fields.get(i).copied(),
-        VariantRef::Inline(_, p) => p.filter(|_| i == 0),
+fn payload(vm: &Vm, value: VmValue, index: usize) -> Option<VmValue> {
+    match vm.heap.variant(value)? {
+        VariantRef::Heap(_, fields) => fields.get(index).copied(),
+        VariantRef::Inline(_, inner) => inner.filter(|_| index == 0),
     }
 }
 
-/// An open container of the decode walker. Its decoded children follow its
-/// dictionary in [`Walk::values`].
+/// Open container frame on the [`DecodeWalker`] stack.
+///
+/// Slot `base` in [`WalkState::values`] holds the container's dictionary,
+/// followed by its decoded child slots.
 struct DecodeFrame {
-    /// The index of the dictionary of the container in [`Walk::values`].
-    at: usize,
+    base: usize,
     shape: u32,
     kind: DecodeKind,
-    /// Whether the input of the container has ended.
+    /// `true` once the source reports the end of this container.
     ended: bool,
 }
 
 enum DecodeKind {
-    /// A list or a set, which the walker builds in the heap: each element
-    /// goes into the container in slot 1 as the walker reads it.
+    /// List or set stored at `base + 1` and populated incrementally.
     Seq,
     Tuple,
-    /// A map, which the walker builds in the heap: the map is in slot 1, and
-    /// a key waits in slot 2 for its value if `key` is set.
+    /// Map stored at `base + 1` with any pending key stored at `base + 2`.
     Map {
+        /// `true` if `base + 2` holds a decoded key awaiting its value.
         key: bool,
     },
     Some,
-    /// The fields of a struct, the parameters of `init`, or the payload of
-    /// a variant, in slots. `seen` marks the slots that hold values. `next`
-    /// is the slot of the part that the walk reads.
+    /// Pre-allocated slots for struct fields, `init` parameters, or variant
+    /// payloads.
     Slots {
-        slots: Slots,
+        target: SlotTarget,
+        /// Marks which slots have received values.
         seen: Vec<bool>,
+        /// Slot index receiving the current decoded value.
         next: usize,
     },
 }
 
-/// What the slots of a [`DecodeKind::Slots`] hold.
-enum Slots {
-    /// The fields of struct `def`.
+/// Destination constructed from [`DecodeKind::Slots`].
+enum SlotTarget {
+    /// Struct `def` with its descriptor.
     Struct(u32, Arc<StructDesc>),
-    /// The parameters of `init`.
+    /// Parameters of a struct `init` constructor.
     Init(Arc<[String]>),
-    /// The payload of variant `id`, whose parts start at part `base` of the
-    /// shape. `named` is whether the payload has field names.
+    /// Variant `id` whose payload parts start at `base` in
+    /// `CodecShape::parts`.
     Variant { id: u32, base: u32, named: bool },
 }
 
-impl Slots {
-    /// Returns the names of the slots, or `None` for a positional payload.
+impl SlotTarget {
+    /// Returns field or parameter names, or `None` for positional payloads.
     fn names<'a>(&'a self, prog: &'a Program) -> Option<&'a [String]> {
         match self {
-            Slots::Struct(_, desc) => Some(&desc.fields),
-            Slots::Init(names) => Some(names),
-            Slots::Variant { id, named: true, .. } => prog.variants[*id as usize].field_names.as_deref(),
-            Slots::Variant { .. } => None,
+            SlotTarget::Struct(_, desc) => Some(&desc.fields),
+            SlotTarget::Init(names) => Some(names),
+            SlotTarget::Variant { id, named: true, .. } => prog.variants[*id as usize].field_names.as_deref(),
+            SlotTarget::Variant { .. } => None,
         }
     }
 
-    /// Returns the part of the shape of the first slot.
+    /// Returns the starting index in `CodecShape::parts` for slot 0.
     fn base(&self) -> u32 {
         match self {
-            Slots::Variant { base, .. } => *base,
+            SlotTarget::Variant { base, .. } => *base,
             _ => 0,
         }
     }
 }
 
-/// Builds a value from a [`DecodeSource`].
-pub(crate) struct DecodeWalk {
-    walk: Walk,
-    /// The values read since the last check of the memory limit.
+/// Iterative walker that decodes a Sand value from a [`DecodeSource`].
+pub(crate) struct DecodeWalker {
+    state: WalkState,
+    /// Parts visited since the previous memory limit check.
     unchecked: u32,
     frames: Vec<DecodeFrame>,
-    /// The number of open containers other than `Some`.
+    /// Active container depth excluding `Some` wrappers.
     depth: usize,
-    /// The dictionary of the part to read next.
+    /// Dictionary of the next part to decode.
     pending: Option<VmValue>,
-    /// The token of the `Decoder` of the callback in progress, and the
-    /// decoder state before the callback.
+    /// Active `Decoder` token and interrupted [`SavedTurn`] during a custom
+    /// `decode` callback.
     callback: Option<(u64, SavedTurn)>,
 }
 
-impl DecodeWalk {
-    pub(crate) fn new(dict: VmValue) -> DecodeWalk {
-        DecodeWalk { walk: Walk::new(vec![dict]), unchecked: 0, frames: Vec::new(), depth: 0, pending: Some(dict), callback: None }
+impl DecodeWalker {
+    pub(crate) fn new(dict: VmValue) -> DecodeWalker {
+        DecodeWalker { state: WalkState::new(vec![dict]), unchecked: 0, frames: Vec::new(), depth: 0, pending: Some(dict), callback: None }
     }
 
-    /// Returns the decoded value of a walk that is done.
+    /// Returns the finished root value.
     pub(crate) fn result(&self) -> Result<VmValue, Fail> {
-        match self.walk.values[..] {
-            [_, v] => Ok(v),
+        match self.state.values[..] {
+            [_, value] => Ok(value),
             _ => Err(Fail::internal("decode: no result")),
         }
     }
 
-    /// Places decoded value `v` in the slot of the innermost frame that it
-    /// fills, or after the children of that frame.
-    fn place(&mut self, vm: &mut Vm, v: VmValue) -> CodecResult {
+    /// Stores decoded `value` into the innermost open frame or as the root.
+    fn place(&mut self, vm: &mut Vm, value: VmValue) -> CodecResult {
         let Some(frame) = self.frames.last_mut() else {
-            self.walk.values.push(v);
+            self.state.values.push(value);
             return Ok(());
         };
-        let at = frame.at;
+        let base = frame.base;
         match &mut frame.kind {
-            DecodeKind::Slots { next, .. } => self.walk.values[at + 1 + *next] = v,
+            DecodeKind::Slots { next, .. } => self.state.values[base + 1 + *next] = value,
             DecodeKind::Seq => {
-                let container = self.walk.values[at + 1];
+                let container = self.state.values[base + 1];
                 match vm.heap.get(container) {
-                    Obj::List(_) => vm.heap.list_push(container, v).map_err(Fail::limit)?,
-                    _ => _ = vm.set_add(container, v)?,
+                    Obj::List(_) => vm.heap.list_push(container, value).map_err(Fail::limit)?,
+                    _ => _ = vm.set_add(container, value)?,
                 }
             }
             DecodeKind::Map { key: key @ false } => {
                 *key = true;
-                self.walk.values[at + 2] = v;
+                self.state.values[base + 2] = value;
             }
             DecodeKind::Map { key } => {
                 *key = false;
-                let k = self.walk.values[at + 2];
-                vm.map_insert(self.walk.values[at + 1], k, v)?;
+                let key_val = self.state.values[base + 2];
+                vm.map_insert(self.state.values[base + 1], key_val, value)?;
             }
-            DecodeKind::Tuple | DecodeKind::Some => self.walk.values.push(v),
+            DecodeKind::Tuple | DecodeKind::Some => self.state.values.push(value),
         }
         Ok(())
     }
 
-    /// Sets slot `i` of the innermost frame.
-    fn set_slot(&mut self, i: usize, v: VmValue) -> CodecResult {
-        let at = self.frames.last().expect("an open frame").at;
-        self.walk.values[at + i] = v;
+    /// Writes `value` to slot `slot` of the innermost frame.
+    fn set_slot(&mut self, slot: usize, value: VmValue) -> CodecResult {
+        let base = self.frames.last().expect("an open frame").base;
+        self.state.values[base + slot] = value;
         Ok(())
     }
 
-    fn push_frame(&mut self, dict: VmValue, shape: u32, kind: DecodeKind, slots: usize) -> CodecResult {
+    fn push_frame(&mut self, dict: VmValue, shape: u32, kind: DecodeKind, slot_count: usize) -> CodecResult {
         if !matches!(kind, DecodeKind::Some) {
             if self.depth >= MAX_NESTING_DEPTH {
                 return too_deep();
             }
             self.depth += 1;
         }
-        let at = self.walk.values.len();
-        self.walk.values.push(dict);
-        self.walk.values.extend(std::iter::repeat_n(VmValue::Uninit, slots));
-        self.frames.push(DecodeFrame { at, shape, kind, ended: false });
+        let base = self.state.values.len();
+        self.state.values.push(dict);
+        self.state.values.extend(std::iter::repeat_n(VmValue::Uninit, slot_count));
+        self.frames.push(DecodeFrame { base, shape, kind, ended: false });
         Ok(())
     }
 
-    /// Reads the part of shape `s` with dictionary `dict`. Places a scalar,
-    /// or opens a frame for a container.
-    fn visit(&mut self, vm: &mut Vm, prog: &Program, source: &mut dyn DecodeSource, s: u32, dict: VmValue) -> CodecResult {
-        let shape = shape(prog, s)?;
+    /// Decodes a scalar or pushes a container frame for `shape_idx`.
+    fn visit(&mut self, vm: &mut Vm, prog: &Program, source: &mut dyn DecodeSource, shape_idx: u32, dict: VmValue) -> CodecResult {
+        let shape = shape(prog, shape_idx)?;
         let value = match &shape.kind {
             ShapeKind::Never => return parse_error(source, "cannot decode a value of type never"),
             ShapeKind::Unit => {
@@ -835,60 +851,60 @@ impl DecodeWalk {
                     }
                 }
             }
-            ShapeKind::ManualDecode(f) => f(vm, source)?,
+            ShapeKind::ManualDecode(decode_fn) => decode_fn(vm, source)?,
             ShapeKind::List | ShapeKind::Set => {
                 source.begin_list()?;
                 let container = match shape.kind {
                     ShapeKind::Set => vm.heap.alloc(Obj::Set(Box::<SetObj>::default())),
                     _ => vm.heap.new_list(Vec::new()),
                 };
-                self.push_frame(dict, s, DecodeKind::Seq, 1)?;
+                self.push_frame(dict, shape_idx, DecodeKind::Seq, 1)?;
                 return self.set_slot(1, container);
             }
             ShapeKind::Tuple => {
                 source.begin_tuple(shape.parts.len())?;
-                return self.push_frame(dict, s, DecodeKind::Tuple, 0);
+                return self.push_frame(dict, shape_idx, DecodeKind::Tuple, 0);
             }
             ShapeKind::Map => {
                 source.begin_map()?;
                 let map = vm.heap.alloc(Obj::Map(Box::<MapObj>::default()));
-                self.push_frame(dict, s, DecodeKind::Map { key: false }, 2)?;
+                self.push_frame(dict, shape_idx, DecodeKind::Map { key: false }, 2)?;
                 return self.set_slot(1, map);
             }
             ShapeKind::Option => match source.option()? {
                 false => VmValue::Tag(prog.ids.none),
                 true => {
-                    self.push_frame(dict, s, DecodeKind::Some, 0)?;
-                    self.pending = Some(self.walk.part_dict(vm, prog, s, 0, dict)?);
+                    self.push_frame(dict, shape_idx, DecodeKind::Some, 0)?;
+                    self.pending = Some(self.state.part_dict(vm, prog, shape_idx, 0, dict)?);
                     return Ok(());
                 }
             },
             ShapeKind::Struct(def) => {
                 let desc = prog.types[*def as usize].desc();
                 source.begin_struct(desc)?;
-                let (slots, n) = match &shape.init {
-                    Some(init) => (Slots::Init(init.names.clone()), init.names.len()),
-                    None => (Slots::Struct(*def, desc.clone()), desc.fields.len()),
+                let (target, slot_count) = match &shape.init {
+                    Some(init) => (SlotTarget::Init(init.names.clone()), init.names.len()),
+                    None => (SlotTarget::Struct(*def, desc.clone()), desc.fields.len()),
                 };
-                return self.push_frame(dict, s, DecodeKind::Slots { slots, seen: vec![false; n], next: 0 }, n);
+                return self.push_frame(dict, shape_idx, DecodeKind::Slots { target, seen: vec![false; slot_count], next: 0 }, slot_count);
             }
             ShapeKind::Enum { def, first } => {
                 let (def, first) = (*def, *first as usize);
-                let t = &prog.types[def as usize];
-                let name = source.begin_variant(&t.desc().type_name)?;
+                let struct_rt = &prog.types[def as usize];
+                let name = source.begin_variant(&struct_rt.desc().type_name)?;
                 let found = prog.variants[first..].iter().take_while(|v| v.def == def).position(|v| v.name == *name);
-                let Some(i) = found else {
+                let Some(variant_offset) = found else {
                     let name = crate::stdlib::truncate(&name, 64).to_string();
-                    return parse_error(source, format!("unknown variant `{name}` of {}", t.name));
+                    return parse_error(source, format!("unknown variant `{name}` of {}", struct_rt.name));
                 };
-                charge_scan(vm, i)?;
-                let id = (first + i) as u32;
+                charge_scan(vm, variant_offset)?;
+                let id = (first + variant_offset) as u32;
                 let variant = &prog.variants[id as usize];
                 let base = (first as u32..id).map(|v| prog.variants[v as usize].arity as u32).sum();
                 let form = match (variant.arity, &variant.field_names) {
                     (0, _) => PayloadForm::Unit,
                     (_, Some(_)) => PayloadForm::Named,
-                    (n, None) => PayloadForm::Positional(n),
+                    (arity, None) => PayloadForm::Positional(arity),
                 };
                 source.begin_payload(form)?;
                 if form == PayloadForm::Unit {
@@ -896,33 +912,31 @@ impl DecodeWalk {
                     self.place(vm, VmValue::Tag(id))?;
                     return Ok(());
                 }
-                let slots = Slots::Variant { id, base, named: form == PayloadForm::Named };
-                let n = variant.arity;
-                return self.push_frame(dict, s, DecodeKind::Slots { slots, seen: vec![false; n], next: 0 }, n);
+                let target = SlotTarget::Variant { id, base, named: form == PayloadForm::Named };
+                let slot_count = variant.arity;
+                return self.push_frame(dict, shape_idx, DecodeKind::Slots { target, seen: vec![false; slot_count], next: 0 }, slot_count);
             }
             ShapeKind::ManualEncode(_) => return Err(Fail::internal("decode: an encode shape").into()),
         };
         self.place(vm, value)
     }
 
-    /// Continues the innermost frame: requests its next part, fills a
-    /// missing slot, or ends the frame. Returns a callback for a computed
-    /// default or for `init`.
+    /// Advances the innermost open container by reading the next part, filling
+    /// an omitted slot, or assembling the finished value.
     fn advance(&mut self, vm: &mut Vm, prog: &Program, source: &mut dyn DecodeSource) -> CodecResult<Option<Step>> {
         let frame = self.frames.last_mut().expect("an open frame");
-        let (at, s) = (frame.at, frame.shape);
-        let dict = self.walk.values[at];
-        let children = self.walk.values.len() - at - 1;
-        let shape = shape(prog, s)?;
+        let (frame_base, shape_idx) = (frame.base, frame.shape);
+        let dict = self.state.values[frame_base];
+        let children = self.state.values.len() - frame_base - 1;
+        let shape = shape(prog, shape_idx)?;
         if !frame.ended {
             let part = match &mut frame.kind {
                 DecodeKind::Seq => {
-                    // A full list grows when the next element arrives, and holds its old
-                    // buffer and the new one at once. The check comes before the source
-                    // moves, so a collection can follow.
-                    if let Obj::List(items) = vm.heap.get(self.walk.values[at + 1])
+                    // Check memory for doubling a full list before advancing `source`
+                    // so garbage collection can run safely.
+                    if let Obj::List(items) = vm.heap.get(self.state.values[frame_base + 1])
                         && items.len() == items.capacity()
-                        && let Some(step) = self.walk.checked(vm.check_memory(2 * items.capacity() * size_of::<VmValue>()))
+                        && let Some(step) = self.state.checked(vm.check_memory(2 * items.capacity() * size_of::<VmValue>()))
                     {
                         return step.map(Some);
                     }
@@ -932,21 +946,21 @@ impl DecodeWalk {
                 DecodeKind::Map { key: true } => Some(1),
                 DecodeKind::Map { key: false } => source.next()?.then_some(0),
                 DecodeKind::Some => (children == 0).then_some(0),
-                DecodeKind::Slots { slots, seen, next } => {
-                    let base = slots.base();
-                    match slots.names(prog) {
+                DecodeKind::Slots { target, seen, next } => {
+                    let part_base = target.base();
+                    match target.names(prog) {
                         Some(names) => match source.next_field()? {
                             Some(name) => match match &shape.slot_index {
-                                Some(index) if !matches!(slots, Slots::Variant { .. }) => index.get(&*name).map(|&i| i as usize),
+                                Some(index) if !matches!(target, SlotTarget::Variant { .. }) => index.get(&*name).map(|&i| i as usize),
                                 _ => field_index(vm, names, &name, *next + usize::from(seen.get(*next) == Some(&true)))?,
                             } {
-                                Some(i) if seen[i] => {
+                                Some(slot) if seen[slot] => {
                                     let name = crate::stdlib::truncate(&name, 64).to_string();
                                     return parse_error(source, format!("duplicate field `{name}`"));
                                 }
-                                Some(i) => {
-                                    (seen[i], *next) = (true, i);
-                                    Some(base + i as u32)
+                                Some(slot) => {
+                                    (seen[slot], *next) = (true, slot);
+                                    Some(part_base + slot as u32)
                                 }
                                 None => {
                                     drop(name);
@@ -957,9 +971,9 @@ impl DecodeWalk {
                             None => None,
                         },
                         None => match charge_scan(vm, seen.len()).map(|()| seen.iter().position(|s| !s))? {
-                            Some(i) if source.next()? => {
-                                (seen[i], *next) = (true, i);
-                                Some(base + i as u32)
+                            Some(slot) if source.next()? => {
+                                (seen[slot], *next) = (true, slot);
+                                Some(part_base + slot as u32)
                             }
                             _ => None,
                         },
@@ -968,47 +982,49 @@ impl DecodeWalk {
             };
             match part {
                 Some(part) => {
-                    self.pending = Some(self.walk.part_dict(vm, prog, s, part, dict)?);
+                    self.pending = Some(self.state.part_dict(vm, prog, shape_idx, part, dict)?);
                     return Ok(None);
                 }
                 None => frame.ended = true,
             }
         }
-        if let DecodeKind::Slots { slots, seen, next } = &mut frame.kind
+        if let DecodeKind::Slots { target, seen, next } = &mut frame.kind
             && let Some(missing) = charge_scan(vm, seen.len()).map(|()| seen.iter().position(|s| !s))?
         {
-            let base = slots.base();
-            let names = slots.names(prog);
-            let value = match shape.fills.get(missing).cloned().unwrap_or(Fill::Required) {
-                Fill::Required => {
-                    let d = self.walk.part_dict(vm, prog, s, base + missing as u32, dict)?;
-                    match method(vm, d)? {
-                        Method::Structural(p) if matches!(shape_kind(vm, p)?, ShapeKind::Option) => VmValue::Tag(vm.prog.ids.none),
+            let part_base = target.base();
+            let names = target.names(prog);
+            let value = match shape.fills.get(missing).cloned().unwrap_or(DecodeFill::Required) {
+                DecodeFill::Required => {
+                    let part_dict = self.state.part_dict(vm, prog, shape_idx, part_base + missing as u32, dict)?;
+                    match method(vm, part_dict)? {
+                        Method::Structural(part_shape) if matches!(shape_kind(vm, part_shape)?, ShapeKind::Option) => {
+                            VmValue::Tag(vm.prog.ids.none)
+                        }
                         _ => match names {
                             Some(names) => return parse_error(source, format!("missing field `{}`", names[missing])),
                             None => return parse_error(source, format!("expected {} payload values", seen.len())),
                         },
                     }
                 }
-                Fill::Const(c) => constant(vm, &c)?,
-                Fill::Call(f, dicts) => {
-                    let mut args = dicts.iter().map(|t| eval_template(vm, t, dict)).collect::<Result<Vec<_>, _>>()?;
-                    // The default helper of an `init` parameter takes the parameters before it.
-                    if matches!(slots, Slots::Init(_)) {
-                        args.extend_from_slice(&self.walk.values[at + 1..at + 1 + missing]);
+                DecodeFill::Const(const_val) => constant(vm, &const_val)?,
+                DecodeFill::Call(helper_const, dicts) => {
+                    let mut args = dicts.iter().map(|tmpl| eval_template(vm, tmpl, dict)).collect::<Result<Vec<_>, _>>()?;
+                    // Pass preceding parameter values to an `init` parameter default helper.
+                    if matches!(target, SlotTarget::Init(_)) {
+                        args.extend_from_slice(&self.state.values[frame_base + 1..frame_base + 1 + missing]);
                     }
                     (seen[missing], *next) = (true, missing);
-                    return Ok(Some(Step::Call(Callback { callee: vm.consts[f as usize], args, purpose: Purpose::Fill })));
+                    return Ok(Some(Step::Call(Callback { callee: vm.consts[helper_const as usize], args, kind: CallbackKind::Default })));
                 }
             };
             let frame = self.frames.last_mut().expect("an open frame");
             if let DecodeKind::Slots { seen, next, .. } = &mut frame.kind {
                 (seen[missing], *next) = (true, missing);
             }
-            self.walk.values[at + 1 + missing] = value;
+            self.state.values[frame_base + 1 + missing] = value;
             return Ok(None);
         }
-        let children = &self.walk.values[at + 1..];
+        let children = &self.state.values[frame_base + 1..];
         let value = match &self.frames.last().expect("an open frame").kind {
             DecodeKind::Seq | DecodeKind::Map { .. } => children[0],
             DecodeKind::Tuple if children.len() != shape.parts.len() => {
@@ -1016,14 +1032,14 @@ impl DecodeWalk {
             }
             DecodeKind::Tuple => vm.heap.new_tuple(children),
             DecodeKind::Some => vm.some(children[0]),
-            DecodeKind::Slots { slots: Slots::Struct(def, _), .. } => vm.heap.alloc(Obj::Struct(*def, children.into())),
-            DecodeKind::Slots { slots: Slots::Variant { id, .. }, .. } => vm.heap.new_variant(*id, children),
-            DecodeKind::Slots { slots: Slots::Init(_), .. } => {
+            DecodeKind::Slots { target: SlotTarget::Struct(def, _), .. } => vm.heap.alloc(Obj::Struct(*def, children.into())),
+            DecodeKind::Slots { target: SlotTarget::Variant { id, .. }, .. } => vm.heap.new_variant(*id, children),
+            DecodeKind::Slots { target: SlotTarget::Init(_), .. } => {
                 let Some(init) = &shape.init else { return Err(Fail::internal("decode: an init shape without init").into()) };
-                let mut args = init.dicts.iter().map(|t| eval_template(vm, t, dict)).collect::<Result<Vec<_>, _>>()?;
+                let mut args = init.dicts.iter().map(|tmpl| eval_template(vm, tmpl, dict)).collect::<Result<Vec<_>, _>>()?;
                 args.extend_from_slice(children);
                 source.end()?;
-                return Ok(Some(Step::Call(Callback { callee: vm.consts[init.func as usize], args, purpose: Purpose::Init })));
+                return Ok(Some(Step::Call(Callback { callee: vm.consts[init.func as usize], args, kind: CallbackKind::Init })));
             }
         };
         source.end()?;
@@ -1032,69 +1048,69 @@ impl DecodeWalk {
         Ok(None)
     }
 
-    /// Ends the innermost frame and drops its heap values.
+    /// Pops the innermost frame and truncates its temporary stack slots.
     fn pop_frame(&mut self) {
         let frame = self.frames.pop().expect("an open frame");
         self.depth -= usize::from(!matches!(frame.kind, DecodeKind::Some));
-        self.walk.values.truncate(frame.at);
+        self.state.values.truncate(frame.base);
     }
 }
 
-impl Walker for DecodeWalk {
+impl Walker for DecodeWalker {
     type IO = dyn DecodeSource;
     type Output = VmValue;
-    /// Walks until the end or the next callback.
+    /// Advances until completion, a memory collection stop, or a callback.
     fn run(&mut self, vm: &mut Vm, shared: &DecodeCell) -> CodecResult<Step> {
         let prog = vm.prog.clone();
-        let mut state = shared.lock();
+        let mut shared_guard = shared.lock();
         loop {
-            if let Some(step) = self.walk.check_memory(vm, &mut self.unchecked) {
+            if let Some(step) = self.state.check_memory(vm, &mut self.unchecked) {
                 return step;
             }
-            vm.charge(1 + (state.io.work() / SLOW_BYTES_PER_UNIT) as u64)?;
+            vm.charge(1 + (shared_guard.io.work() / SLOW_BYTES_PER_UNIT) as u64)?;
             if let Some(dict) = self.pending.take() {
                 match method(vm, dict)? {
                     Method::Custom(callee) => {
-                        let token = state.turn.next_token;
-                        // The check before the part covers the handle.
+                        let token = shared_guard.turn.next_token;
+                        // Pre-step memory check covers allocating `Decoder`.
                         let decoder = vm.unchecked(|vm| (Decoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm))?;
-                        self.callback = Some(state.turn.begin());
-                        return Ok(Step::Call(Callback { callee, args: vec![dict, decoder], purpose: Purpose::Method }));
+                        self.callback = Some(shared_guard.turn.begin());
+                        return Ok(Step::Call(Callback { callee, args: vec![dict, decoder], kind: CallbackKind::Method }));
                     }
-                    Method::Structural(s) => self.visit(vm, &prog, &mut state.io, s, dict)?,
+                    Method::Structural(shape_idx) => self.visit(vm, &prog, &mut shared_guard.io, shape_idx, dict)?,
                 }
-                self.walk.collected = false;
+                self.state.collected = false;
                 continue;
             }
             if self.frames.is_empty() {
                 return Ok(Step::Done);
             }
-            if let Some(step) = self.advance(vm, &prog, &mut state.io)? {
+            if let Some(step) = self.advance(vm, &prog, &mut shared_guard.io)? {
                 return Ok(step);
             }
-            self.walk.collected = false;
+            self.state.collected = false;
         }
     }
 
-    /// Places the result of a callback.
-    fn apply(&mut self, vm: &mut Vm, shared: &DecodeCell, purpose: Purpose, result: VmValue) -> CodecResult {
-        let value = match purpose {
-            Purpose::Method => {
+    /// Stores the result of a completed [`Callback`].
+    fn apply(&mut self, vm: &mut Vm, shared: &DecodeCell, kind: CallbackKind, result: VmValue) -> CodecResult {
+        let value = match kind {
+            CallbackKind::Method => {
                 let Some((token, saved)) = self.callback.take() else { return Err(Fail::internal("decode: no callback").into()) };
-                let mut state = shared.lock();
-                let unread = state.turn.end(token, saved, "a `decode` method returned before its read ended")?;
-                if let Some(e) = err_payload(vm, result) {
-                    return Err(at_path(sand_error(vm, e)?, &state.io));
+                let mut shared_guard = shared.lock();
+                let unread = shared_guard.turn.end(token, saved, "a `decode` method returned before its read ended")?;
+                if let Some(err_val) = err_payload(vm, result) {
+                    return Err(at_path(sand_error(vm, err_val)?, &shared_guard.io));
                 }
                 if unread {
-                    state.io.skip()?;
+                    shared_guard.io.skip()?;
                 }
                 vm.heap.payload_if(&result, vm.prog.ids.ok)
             }
-            Purpose::Fill => result,
-            Purpose::Init => {
-                if let Some(e) = err_payload(vm, result) {
-                    return Err(at_path(sand_error(vm, e)?, &shared.lock().io));
+            CallbackKind::Default => result,
+            CallbackKind::Init => {
+                if let Some(err_val) = err_payload(vm, result) {
+                    return Err(at_path(sand_error(vm, err_val)?, &shared.lock().io));
                 }
                 match vm.heap.variant_id(result) {
                     id if id == vm.prog.ids.ok => vm.heap.payload_if(&result, id),
@@ -1102,7 +1118,7 @@ impl Walker for DecodeWalk {
                 }
             }
         };
-        if purpose == Purpose::Init {
+        if kind == CallbackKind::Init {
             self.pop_frame();
         }
         self.place(vm, value)
@@ -1111,45 +1127,46 @@ impl Walker for DecodeWalk {
     fn output(&self) -> Result<VmValue, Fail> {
         self.result()
     }
-    fn walk(&mut self) -> &mut Walk {
-        &mut self.walk
+
+    fn state(&mut self) -> &mut WalkState {
+        &mut self.state
     }
 }
 
-fn shape_kind(vm: &Vm, s: u32) -> Result<&ShapeKind, Fail> {
-    Ok(&shape(&vm.prog, s)?.kind)
+fn shape_kind(vm: &Vm, shape_idx: u32) -> Result<&ShapeKind, Fail> {
+    Ok(&shape(&vm.prog, shape_idx)?.kind)
 }
 
-/// Returns the shape of `dict` if it is the dictionary of a structural
-/// impl.
+/// Returns the [`ShapeKind`] of `dict` if `dict` is structural.
 pub(crate) fn structural_kind(vm: &Vm, dict: VmValue) -> Result<Option<&ShapeKind>, Fail> {
     match method(vm, dict)? {
-        Method::Structural(s) => Ok(Some(shape_kind(vm, s)?)),
+        Method::Structural(shape_idx) => Ok(Some(shape_kind(vm, shape_idx)?)),
         Method::Custom(_) => Ok(None),
     }
 }
 
-/// Charges fuel for a scan of `n` entries of a type, such as its fields or
-/// variants, so that fuel stays in proportion to work for wide types.
-fn charge_scan(vm: &Vm, n: usize) -> Result<(), Fail> {
-    vm.charge((n / 16) as u64)
+/// Charges fuel proportional to `count` for a linear scan of fields or
+/// variants.
+fn charge_scan(vm: &Vm, count: usize) -> Result<(), Fail> {
+    vm.charge((count / 16) as u64)
 }
 
-/// Returns the index of `name` in `names`. Tries `guess` first, and charges
-/// fuel for a scan if the guess misses.
+/// Finds `name` in `names`.
+///
+/// Checks `guess` first before charging fuel for a linear scan.
 fn field_index(vm: &Vm, names: &[String], name: &str, guess: usize) -> Result<Option<usize>, Fail> {
-    if names.get(guess).is_some_and(|n| n == name) {
+    if names.get(guess).is_some_and(|candidate| candidate == name) {
         return Ok(Some(guess));
     }
     charge_scan(vm, names.len())?;
-    Ok(names.iter().position(|n| n == name))
+    Ok(names.iter().position(|candidate| candidate == name))
 }
 
-/// Builds the heap value of constant `c`.
-pub(crate) fn constant(vm: &mut Vm, c: &ConstVal) -> Result<VmValue, Fail> {
+/// Allocates a runtime [`VmValue`] from compile-time `const_val`.
+pub(crate) fn constant(vm: &mut Vm, const_val: &ConstVal) -> Result<VmValue, Fail> {
     vm.charge(1)?;
-    let all = |vm: &mut Vm, xs: &[ConstVal]| xs.iter().map(|x| constant(vm, x)).collect::<Result<Vec<_>, _>>();
-    Ok(match c {
+    let all = |vm: &mut Vm, items: &[ConstVal]| items.iter().map(|item| constant(vm, item)).collect::<Result<Vec<_>, _>>();
+    Ok(match const_val {
         ConstVal::Unit => VmValue::Unit,
         ConstVal::Bool(b) => VmValue::Bool(*b),
         ConstVal::Int(i) => VmValue::Int(*i),
@@ -1175,8 +1192,8 @@ pub(crate) fn constant(vm: &mut Vm, c: &ConstVal) -> Result<VmValue, Fail> {
         ConstVal::Set(xs) => {
             let items = all(vm, xs)?;
             let set = vm.heap.alloc(Obj::Set(Box::<SetObj>::default()));
-            for x in items {
-                vm.set_add(set, x)?;
+            for item in items {
+                vm.set_add(set, item)?;
             }
             set
         }
@@ -1199,77 +1216,77 @@ pub(crate) fn constant(vm: &mut Vm, c: &ConstVal) -> Result<VmValue, Fail> {
     })
 }
 
-/// The error type of a native function that runs a walk: [`HostError`]
-/// for a Sand `Result`, or [`Fail`] to stop the run on error.
+/// Error conversion for native functions that drive a codec walk.
+///
+/// [`HostError`] converts recoverable errors into Sand `Err` values. [`Fail`]
+/// aborts execution.
 pub(crate) trait WalkError: NativeError {
-    fn from_walk(e: HostError<Fail>) -> Self;
-    fn from_future_walk(e: HostError<Fail>) -> Self::FutureError;
+    fn from_walk(err: HostError<Fail>) -> Self;
+    fn from_future_walk(err: HostError<Fail>) -> Self::FutureError;
 }
 
 impl WalkError for HostError {
-    fn from_walk(e: HostError<Fail>) -> Self {
-        e.into_ctl_error()
+    fn from_walk(err: HostError<Fail>) -> Self {
+        err.into_ctl_error()
     }
 
-    fn from_future_walk(e: HostError<Fail>) -> HostError<Fail> {
-        e
+    fn from_future_walk(err: HostError<Fail>) -> HostError<Fail> {
+        err
     }
 }
 
 impl WalkError for Fail {
-    fn from_walk(e: HostError<Fail>) -> Self {
-        abort(e)
+    fn from_walk(err: HostError<Fail>) -> Self {
+        abort(err)
     }
 
-    fn from_future_walk(e: HostError<Fail>) -> Fail {
-        abort(e)
+    fn from_future_walk(err: HostError<Fail>) -> Fail {
+        abort(err)
     }
 }
 
-/// What the drivers of a walk need from the encode walker or the decode
-/// walker.
+/// Common interface implemented by [`EncodeWalker`] and [`DecodeWalker`].
 trait Walker: Send + 'static {
-    /// The sink or the source of the walk.
+    /// Underlying sink or source trait object.
     type IO: ?Sized + Send;
-    /// The result of the walk: `()` for an encode, and the value for a decode.
+    /// Final output produced once the walk completes.
     type Output: Send;
     fn run(&mut self, vm: &mut Vm, shared: &Arc<Mutex<Shared<Self::IO>>>) -> CodecResult<Step>;
-    /// Uses the result of a callback.
-    fn apply(&mut self, vm: &mut Vm, shared: &Arc<Mutex<Shared<Self::IO>>>, purpose: Purpose, result: VmValue) -> CodecResult;
+    /// Applies the return value of a completed [`Callback`].
+    fn apply(&mut self, vm: &mut Vm, shared: &Arc<Mutex<Shared<Self::IO>>>, kind: CallbackKind, result: VmValue) -> CodecResult;
     fn output(&self) -> Result<Self::Output, Fail>;
-    fn walk(&mut self) -> &mut Walk;
+    fn state(&mut self) -> &mut WalkState;
 }
 
-/// Finishes a walk that waits for callbacks.
+/// Drives `walker` asynchronously across callbacks and garbage collections.
 async fn finish<W: Walker>(
-    walk: &mut W,
-    cx: &mut NativeContext,
+    walker: &mut W,
+    context: &mut NativeContext,
     shared: &Arc<Mutex<Shared<W::IO>>>,
     first: Step,
 ) -> CodecResult<W::Output> {
     let mut step = first;
     loop {
         match step {
-            Step::Done => return Ok(walk.output()?),
+            Step::Done => return Ok(walker.output()?),
             Step::Call(callback) => {
-                let result = cx.call_keeping(callback.callee, &callback.args, walk.walk().roots()).await;
-                cx.with_vm(|vm| walk.apply(vm, shared, callback.purpose, result))?;
-                walk.walk().collected = false;
+                let result = context.call_keeping(callback.callee, &callback.args, walker.state().roots()).await;
+                context.with_vm(|vm| walker.apply(vm, shared, callback.kind, result))?;
+                walker.state().collected = false;
             }
-            Step::Collect(_) => walk.walk().collect(cx).await,
+            Step::Collect(_) => walker.state().collect(context).await,
         }
-        step = cx.with_vm(|vm| walk.run(vm, shared))?;
+        step = context.with_vm(|vm| walker.run(vm, shared))?;
     }
 }
 
-/// Runs `walk` in a native call over the sink or source of `shared`, which
-/// `cell` also holds, and then runs `then` on the output and the sink or
-/// source. Waits for callbacks if the walk needs them.
+/// Runs `walker` synchronously if possible, or spawns an async continuation if
+/// a callback is needed.
 fn drive<W, S, T, E>(
     vm: &mut Vm,
     shared: Arc<Mutex<Shared<S>>>,
     cell: Arc<Mutex<Shared<W::IO>>>,
-    mut walk: W,
+    mut walker: W,
     then: impl FnOnce(&mut Vm, W::Output, &mut S) -> CodecResult<T> + Send + 'static,
 ) -> Result<Later<T, E>, E>
 where
@@ -1279,21 +1296,20 @@ where
     E: WalkError,
     Result<T, E::FutureError>: NativeReturn<Fail>,
 {
-    match walk.run(vm, &cell).map_err(E::from_walk)? {
+    match walker.run(vm, &cell).map_err(E::from_walk)? {
         Step::Done => {
-            let output = walk.output().map_err(|e| E::from_walk(e.into()))?;
+            let output = walker.output().map_err(|err| E::from_walk(err.into()))?;
             Ok(Later::ready(then(vm, output, &mut shared.lock().io).map_err(E::from_future_walk)))
         }
-        Step::Collect(e) => Err(E::from_walk(e.into())),
-        step => Ok(Later::new(WaitKind::Io, |mut cx| async move {
-            let output = finish(&mut walk, &mut cx, &cell, step).await.map_err(E::from_future_walk)?;
-            cx.with_vm(|vm| then(vm, output, &mut shared.lock().io)).map_err(E::from_future_walk)
+        Step::Collect(err) => Err(E::from_walk(err.into())),
+        step => Ok(Later::new(WaitKind::Io, |mut context| async move {
+            let output = finish(&mut walker, &mut context, &cell, step).await.map_err(E::from_future_walk)?;
+            context.with_vm(|vm| then(vm, output, &mut shared.lock().io)).map_err(E::from_future_walk)
         })),
     }
 }
 
-/// Encodes `value` with `dict` into the sink of `shared`, and then runs
-/// `then` on the sink.
+/// Encodes `value` with `dict` into `shared` and passes the sink to `then`.
 pub(crate) fn encode<S, T, E>(
     vm: &mut Vm,
     shared: Arc<Mutex<Shared<S>>>,
@@ -1308,11 +1324,10 @@ where
     Result<T, E::FutureError>: NativeReturn<Fail>,
 {
     let cell: EncodeCell = shared.clone();
-    drive(vm, shared, cell, EncodeWalk::new(value, dict), |vm, (), sink| then(vm, sink))
+    drive(vm, shared, cell, EncodeWalker::new(value, dict), |vm, (), sink| then(vm, sink))
 }
 
-/// Decodes a value with `dict` from the source of `shared`, and then runs
-/// `then` on the value and the source.
+/// Decodes a value with `dict` from `shared` and passes the result to `then`.
 pub(crate) fn decode<S, T, E>(
     vm: &mut Vm,
     shared: Arc<Mutex<Shared<S>>>,
@@ -1326,107 +1341,108 @@ where
     Result<T, E::FutureError>: NativeReturn<Fail>,
 {
     let cell: DecodeCell = shared.clone();
-    drive(vm, shared, cell, DecodeWalk::new(dict), then)
+    drive(vm, shared, cell, DecodeWalker::new(dict), then)
 }
 
-/// Runs `walk` over `shared` in the future of an async native, and returns
-/// its output.
-async fn run_async<W: Walker>(cx: &mut NativeContext, shared: &Arc<Mutex<Shared<W::IO>>>, mut walk: W) -> CodecResult<W::Output> {
-    let first = cx.with_vm(|vm| walk.run(vm, shared))?;
-    finish(&mut walk, cx, shared, first).await
+/// Runs `walker` to completion inside an async native call.
+async fn run_async<W: Walker>(context: &mut NativeContext, shared: &Arc<Mutex<Shared<W::IO>>>, mut walker: W) -> CodecResult<W::Output> {
+    let first = context.with_vm(|vm| walker.run(vm, shared))?;
+    finish(&mut walker, context, shared, first).await
 }
 
-/// Encodes `value` with `dict` as a [`Value`](crate::value::Value).
-pub(crate) async fn to_value(cx: &mut NativeContext, value: VmValue, dict: VmValue) -> CodecResult<crate::value::Value> {
-    let memory = cx.with_vm(|vm| vm.heap.io_memory.clone());
+/// Encodes `value` with `dict` into a host [`Value`](crate::value::Value).
+pub(crate) async fn to_value(context: &mut NativeContext, value: VmValue, dict: VmValue) -> CodecResult<crate::value::Value> {
+    let memory = context.with_vm(|vm| vm.heap.io_memory.clone());
     let shared = Shared::new(ValueSink::new(&memory));
     let cell: EncodeCell = shared.clone();
-    run_async(cx, &cell, EncodeWalk::new(value, dict)).await?;
+    run_async(context, &cell, EncodeWalker::new(value, dict)).await?;
     let root = shared.lock().io.take();
     root.map(|(value, _)| value).ok_or_else(|| Fail::internal("to_value: no value").into())
 }
 
-/// Decodes `value` with `dict`. Returns the decoded heap value, which is
-/// valid until the next wait.
-pub(crate) async fn from_value(cx: &mut NativeContext, value: crate::value::Value, dict: VmValue) -> CodecResult<VmValue> {
+/// Decodes host `value` with `dict` into a [`VmValue`] valid until the next
+/// wait.
+pub(crate) async fn from_value(context: &mut NativeContext, value: crate::value::Value, dict: VmValue) -> CodecResult<VmValue> {
     let shared: DecodeCell = Shared::new(crate::value::ValueSource::new(value));
-    run_async(cx, &shared, DecodeWalk::new(dict)).await
+    run_async(context, &shared, DecodeWalker::new(dict)).await
 }
 
-/// The misuse messages of an `Encoder`: a write outside its call, and a
-/// second write.
+/// Error messages for inactive or duplicate `Encoder` writes.
 const ENCODER_MISUSE: [&str; 2] =
     ["an `Encoder` accepts a value only during its `encode` call", "an `encode` method wrote a second value to its `Encoder`"];
 
-/// The misuse messages of a `Decoder`: a read outside its call, and a second
-/// read.
+/// Error messages for inactive or duplicate `Decoder` reads.
 const DECODER_MISUSE: [&str; 2] =
     ["a `Decoder` gives a value only during its `decode` call", "a `decode` method read a second value from its `Decoder`"];
 
-/// Claims the turn of the handle with `token` in `shared`, and then runs
-/// `walk` as its single value in the future of the native call, which the VM
-/// never runs again. Records an error of the walk, so that the outer walk
-/// fails even if the custom method ignores it.
+/// Claims `token` on `shared` and runs nested `walker` asynchronously.
+///
+/// Records any recoverable failure in `Turn` so the outer walk fails even if
+/// the custom method ignores the returned `Result`.
 fn nested<W: Walker, T: IntoVmValue + 'static>(
     shared: Option<Arc<Mutex<Shared<W::IO>>>>,
     token: u64,
     [inactive, second]: [&str; 2],
-    walk: W,
+    walker: W,
     output: impl FnOnce(W::Output) -> T + Send + 'static,
 ) -> Result<Later<T, HostError>, HostError> {
     let Some(shared) = shared else { return Err(HostError::new("invalid", inactive)) };
     shared.lock().turn.claim(token, inactive, second)?;
-    Ok(Later::new(WaitKind::Io, |mut cx| async move {
-        let r = run_async(&mut cx, &shared, walk).await;
-        let mut state = shared.lock();
-        state.turn.open -= 1;
-        if let Err(e) = &r {
-            state.turn.record(e);
+    Ok(Later::new(WaitKind::Io, |mut context| async move {
+        let result = run_async(&mut context, &shared, walker).await;
+        let mut shared_guard = shared.lock();
+        shared_guard.turn.open -= 1;
+        if let Err(err) = &result {
+            shared_guard.turn.record(err);
         }
-        drop(state);
-        r.map(output)
+        drop(shared_guard);
+        result.map(output)
     }))
 }
 
-/// Writes `value` as the single value of `encoder`.
+/// Encodes `value` through `encoder`.
 fn write(vm: &mut Vm, dict: VmValue, value: VmValue, encoder: VmVal<Encoder>) -> Result<Later<(), HostError>, HostError> {
-    let e = encoder.get(&vm.heap)?;
-    nested(e.shared.upgrade(), e.token, ENCODER_MISUSE, EncodeWalk::new(value, dict), |()| ())
+    let encoder_ref = encoder.get(&vm.heap)?;
+    nested(encoder_ref.shared.upgrade(), encoder_ref.token, ENCODER_MISUSE, EncodeWalker::new(value, dict), |()| ())
 }
 
-/// Reads the single value of `decoder`.
+/// Decodes a value from `decoder`.
 fn read(vm: &mut Vm, dict: VmValue, decoder: VmVal<Decoder>) -> Result<Later<Param<0>, HostError>, HostError> {
-    let d = decoder.get(&vm.heap)?;
-    nested(d.shared.upgrade(), d.token, DECODER_MISUSE, DecodeWalk::new(dict), Param::from_raw)
+    let decoder_ref = decoder.get(&vm.heap)?;
+    nested(decoder_ref.shared.upgrade(), decoder_ref.token, DECODER_MISUSE, DecodeWalker::new(dict), Param::from_raw)
 }
 
-/// Registers the prelude natives of `Encode` and `Decode`.
-pub(crate) fn register(m: &mut crate::native::NativeModule) {
-    m.bind::<Encoder>().bind::<Decoder>().bind::<InputKind>().bind::<EncodedArg>();
-    m.function("encode_arg", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>| {
+/// Registers prelude types and native functions for `Encode` and `Decode`.
+pub(crate) fn register(module: &mut crate::native::NativeModule) {
+    module.bind::<Encoder>().bind::<Decoder>().bind::<InputKind>().bind::<EncodedArg>();
+    module.function("encode_arg", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>| {
         encode::<_, _, Fail>(vm, Shared::new(ValueSink::new(&vm.heap.io_memory)), value.raw(), dict.raw(), |vm, sink| {
             let (value, reservation) = sink.take().ok_or_else(|| Fail::internal("encode_arg: no value"))?;
             Ok(VmVal::<EncodedArg>::from_raw(EncodedArg { value: Arc::new(value), _reservation: reservation }.into_vm_value(vm)?))
         })
     });
-    m.function("Encode.encode", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>, encoder: VmVal<Encoder>| {
+    module.function("Encode.encode", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>, encoder: VmVal<Encoder>| {
         write(vm, dict.raw(), value.raw(), encoder)
     });
-    m.function("Encoder.encode", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, encoder: VmVal<Encoder>, value: Param<0>| {
+    module.function("Encoder.encode", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, encoder: VmVal<Encoder>, value: Param<0>| {
         write(vm, dict.raw(), value.raw(), encoder)
     });
-    m.function("Decode.decode", |vm: &mut Vm, dict: TraitDict<0, traits::Decode>, decoder: VmVal<Decoder>| read(vm, dict.raw(), decoder));
-    m.function("Decoder.decode", |vm: &mut Vm, dict: TraitDict<0, traits::Decode>, decoder: VmVal<Decoder>| read(vm, dict.raw(), decoder));
-    m.function("Decoder.kind", |vm: &mut Vm, decoder: VmVal<Decoder>| -> Result<InputKind, HostError> {
-        let d = decoder.get(&vm.heap)?;
-        let Some(shared) = d.shared.upgrade() else { return Err(HostError::new("invalid", DECODER_MISUSE[0])) };
-        let mut state = shared.lock();
-        if state.turn.active != d.token {
-            return Err(state.turn.misuse(DECODER_MISUSE[0]));
+    module.function("Decode.decode", |vm: &mut Vm, dict: TraitDict<0, traits::Decode>, decoder: VmVal<Decoder>| {
+        read(vm, dict.raw(), decoder)
+    });
+    module.function("Decoder.decode", |vm: &mut Vm, dict: TraitDict<0, traits::Decode>, decoder: VmVal<Decoder>| {
+        read(vm, dict.raw(), decoder)
+    });
+    module.function("Decoder.kind", |vm: &mut Vm, decoder: VmVal<Decoder>| -> Result<InputKind, HostError> {
+        let decoder_ref = decoder.get(&vm.heap)?;
+        let Some(shared) = decoder_ref.shared.upgrade() else { return Err(HostError::new("invalid", DECODER_MISUSE[0])) };
+        let mut shared_guard = shared.lock();
+        if shared_guard.turn.active != decoder_ref.token {
+            return Err(shared_guard.turn.misuse(DECODER_MISUSE[0]));
         }
-        if state.turn.used {
-            return Err(state.turn.misuse("a `decode` method asked for the kind of a value that it read"));
+        if shared_guard.turn.used {
+            return Err(shared_guard.turn.misuse("a `decode` method asked for the kind of a value that it read"));
         }
-        state.io.kind().map_err(HostError::into_ctl_error)
+        shared_guard.io.kind().map_err(HostError::into_ctl_error)
     });
 }

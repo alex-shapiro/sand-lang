@@ -651,11 +651,11 @@ impl Checker {
             let mut params = Vec::new();
             let dicts = self.local_fn_dicts(self_local);
             for &(t, tr) in &dicts {
-                let l = self.declare_local_sym(Symbol::DICT, TypeId::UNIT, false, f.name.span, true);
-                self.fs.data[l as usize].used = true;
-                // The parameter types of a local function are unique to it, so its dictionaries stay valid evidence for the rest of the enclosing function.
-                self.fs.evidence.push((t, tr, mk(HKind::Local(l), TypeId::UNIT, f.name.span)));
-                params.push(l);
+                let dict_local = self.declare_local_sym(Symbol::DICT, TypeId::UNIT, false, f.name.span, true);
+                self.fs.data[dict_local as usize].used = true;
+                // Each local function owns distinct `ParamId`s. Its dictionary parameters can therefore stay in `fs.evidence` for the rest of the enclosing function.
+                self.fs.evidence.push((t, tr, mk(HKind::Local(dict_local), TypeId::UNIT, f.name.span)));
+                params.push(dict_local);
             }
             for (p, &t) in f.params.iter().zip(&ptys) {
                 params.push(self.declare_local(&p.name.name, t, false, p.name.span, true));
@@ -1005,34 +1005,38 @@ impl Checker {
     // ------------------------------------------------------------------
     // Names
 
-    /// Returns the trait bounds with dictionaries of local function `l`'s own
-    /// type parameters. The function takes these dictionaries as hidden
-    /// leading parameters.
-    fn local_fn_dicts(&mut self, l: LocalId) -> Vec<(TypeId, TraitRef)> {
+    /// Returns the dictionary-bearing trait bounds on local function
+    /// `local_id`'s own type parameters.
+    ///
+    /// The local function receives these dictionaries as hidden leading
+    /// parameters.
+    fn local_fn_dicts(&mut self, local_id: LocalId) -> Vec<(TypeId, TraitRef)> {
         let mut dicts = Vec::new();
-        for p in self.fs.data[l as usize].scheme.clone() {
+        for p in self.fs.data[local_id as usize].scheme.clone() {
             let pt = self.arena.param(p);
             dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
         }
         dicts
     }
 
-    /// Returns a use of local `l`. A local function with hidden dictionary
-    /// parameters becomes a closure that passes them.
-    fn local_value(&mut self, l: LocalId, span: Span) -> HExpr {
-        let t = self.fs.data[l as usize].ty;
-        if self.fs.data[l as usize].scheme.is_empty() {
-            return mk(HKind::Local(l), t, span);
+    /// Builds an expression that reads `local_id`.
+    ///
+    /// Wraps a local generic function in a closure if it takes hidden
+    /// dictionary parameters.
+    fn local_value(&mut self, local_id: LocalId, span: Span) -> HExpr {
+        let t = self.fs.data[local_id as usize].ty;
+        if self.fs.data[local_id as usize].scheme.is_empty() {
+            return mk(HKind::Local(local_id), t, span);
         }
-        let scheme = self.fs.data[l as usize].scheme.clone();
+        let scheme = self.fs.data[local_id as usize].scheme.clone();
         let fresh: Vec<TypeId> = scheme.iter().map(|_| self.fresh()).collect();
-        let dicts = self.local_fn_dicts(l);
+        let dicts = self.local_fn_dicts(local_id);
         self.require_traits(&scheme, &fresh, &dicts, span);
         let t = self.arena.instantiate(t, &scheme, &fresh);
         if dicts.is_empty() {
-            return mk(HKind::Local(l), t, span);
+            return mk(HKind::Local(local_id), t, span);
         }
-        let Ty::Fn(ps, _) = self.ty(t) else { return mk(HKind::Local(l), t, span) };
+        let Ty::Fn(ps, _) = self.ty(t) else { return mk(HKind::Local(local_id), t, span) };
         let ptys = self.elems(ps);
         let id = self.new_lambda();
         let mut args = Vec::new();
@@ -1052,9 +1056,9 @@ impl Checker {
             args.push(mk(HKind::Local(p), pt, span));
         }
         let Ty::Fn(_, ret) = self.ty(t) else { unreachable!() };
-        let callee = Box::new(mk(HKind::Local(l), t, span));
+        let callee = Box::new(mk(HKind::Local(local_id), t, span));
         let body = mk(HKind::CallValue { callee, args }, ret, span);
-        let name = self.name(self.fs.locals[l as usize].name).to_string();
+        let name = self.name(self.fs.locals[local_id as usize].name).to_string();
         mk(HKind::Lambda(Box::new(HLambda { id, name, params, dicts: vec![], body, self_local: None })), t, span)
     }
 
@@ -1064,9 +1068,9 @@ impl Checker {
             self.error(span, "`_` cannot be used as a value");
             return err(span);
         }
-        if let Some(l) = self.find_local(&id.name) {
-            self.use_local(l);
-            return self.local_value(l, span);
+        if let Some(local_id) = self.find_local(&id.name) {
+            self.use_local(local_id);
+            return self.local_value(local_id, span);
         }
         match self.lookup_global(&id.name) {
             Some(def) => self.def_value(def, &id.name, hint, span),
@@ -1158,14 +1162,14 @@ impl Checker {
         }
     }
 
-    fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
-        let fi = &self.fns[f as usize];
-        if !fi.dicts.is_empty() || self.takes_encoded(f) {
-            return self.wrapper_value(f, &[], span);
+    fn fn_value(&mut self, fn_id: FnId, span: Span) -> HExpr {
+        let fi = &self.fns[fn_id as usize];
+        if !fi.dicts.is_empty() || self.takes_encoded_arg(fn_id) {
+            return self.wrapper_value(fn_id, &[], span);
         }
-        let inst = self.instantiate_fn_with(f, span, &[]);
+        let inst = self.instantiate_fn_with(fn_id, span, &[]);
         let t = self.fn_ty(&inst.params, inst.ret);
-        mk(HKind::FnValue { func: f, targs: inst.fresh }, t, span)
+        mk(HKind::FnValue { func: fn_id, targs: inst.fresh }, t, span)
     }
 
     /// Returns the type arguments for constructing `d`, reusing `hint` if it is
@@ -1605,36 +1609,34 @@ impl Checker {
         mk(self.call_kind(f, fresh, hargs), ret, span)
     }
 
-    /// Returns `true` if the Rust function of native `f` takes an
-    /// [`Encoded`](crate::native::ty::Encoded) argument.
-    fn takes_encoded(&self, f: FnId) -> bool {
-        let FnKind::Native(n) = self.fns[f as usize].kind else { return false };
+    /// Returns `true` if native function `fn_id` accepts an
+    /// [`Encoded`](crate::native::ty::Encoded) parameter.
+    fn takes_encoded_arg(&self, fn_id: FnId) -> bool {
+        let FnKind::Native(n) = self.fns[fn_id as usize].kind else { return false };
         self.natives.fns.get(n as usize).is_some_and(|d| d.sig.params.iter().any(|t| matches!(t, Type::Encoded(_))))
     }
 
-    /// Wraps each argument of native `f` that its Rust function takes as
-    /// [`Encoded`](crate::native::ty::Encoded) in a call that encodes it as a
-    /// host value.
-    pub(crate) fn encode_native_args(&mut self, f: FnId, ptys: &[TypeId], args: &mut [HArg], span: Span) {
-        let FnKind::Native(n) = self.fns[f as usize].kind else { return };
+    /// Wraps each [`Encoded`](crate::native::ty::Encoded) argument of native
+    /// function `fn_id` in a `prelude.encode_arg` call.
+    pub(crate) fn encode_native_args(&mut self, fn_id: FnId, param_tys: &[TypeId], args: &mut [HArg], span: Span) {
+        let FnKind::Native(n) = self.fns[fn_id as usize].kind else { return };
         let Some(decl) = self.natives.fns.get(n as usize) else { return };
-        let script: Vec<bool> =
+        let is_encoded_param: Vec<bool> =
             decl.sig.params.iter().filter(|t| !matches!(t, Type::Dict(..))).map(|t| matches!(t, Type::Encoded(_))).collect();
-        if !script.contains(&true) {
+        if !is_encoded_param.contains(&true) {
             return;
         }
         let (Some(encode), Some(tr)) = (self.natives.id("prelude.encode_arg"), self.builtin_trait(Builtin::Encode)) else { return };
-        for ((a, &t), _) in args.iter_mut().zip(ptys).zip(&script).filter(|(_, e)| **e) {
-            let HArg::Expr(e) = a else { continue };
-            let value = std::mem::replace(e, mk(HKind::Unit, TypeId::UNIT, span));
-            let dict = self.evidence_hole(t, tr, false, span);
-            let call = HKind::CallNative { native: encode, targs: vec![t], args: vec![HArg::Expr(dict), HArg::Expr(value)] };
-            *e = mk(call, self.encoded_arg_ty(), span);
+        for ((arg, &param_ty), _) in args.iter_mut().zip(param_tys).zip(&is_encoded_param).filter(|(_, is_encoded)| **is_encoded) {
+            let HArg::Expr(expr) = arg else { continue };
+            let value = std::mem::replace(expr, mk(HKind::Unit, TypeId::UNIT, span));
+            let dict = self.evidence_hole(param_ty, tr, false, span);
+            let call = HKind::CallNative { native: encode, targs: vec![param_ty], args: vec![HArg::Expr(dict), HArg::Expr(value)] };
+            *expr = mk(call, self.encoded_arg_ty(), span);
         }
     }
 
-    /// Returns the type of an encoded native argument, the prelude
-    /// `EncodedArg`.
+    /// Returns the prelude `EncodedArg` type.
     fn encoded_arg_ty(&mut self) -> TypeId {
         match self.prelude.and_then(|p| self.scope_def(p, "EncodedArg")) {
             Some(Def::Type(TyRef::Def(d))) => self.arena.named(d, &[]),

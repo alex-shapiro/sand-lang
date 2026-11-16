@@ -383,8 +383,9 @@ impl Vm {
             return Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
         }
         if self.heap.stress {
-            // A collection may run before the arguments reach the stack, so
-            // GC stress runs one here to test that the caller roots them.
+            // Stack growth below can trigger garbage collection before copying
+            // `args`. Force a collection under GC stress to verify that the
+            // caller rooted them.
             self.collect_all_garbage(Some(fiber));
         }
         let base = fiber.live_top(&self.prog);
@@ -546,7 +547,8 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
             Some(VmRequest::Collect) => {
                 collected = true;
                 vm.collect_all_garbage(Some(fiber));
-                // A native that asks for collections in a loop still stops at the time limits.
+                // Enforce time and interrupt limits if a native future requests
+                // repeated collections.
                 if let Err(fail) = vm.meter.check() {
                     return Err(vm.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
                 }

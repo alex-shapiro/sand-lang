@@ -40,7 +40,7 @@ pub(crate) fn encode(data: &[u8], url: bool) -> String {
     out
 }
 
-/// Appends the encoding of `data` to `out`, as [`encode`] returns it.
+/// Appends the Base64 encoding of `data` to `out`.
 pub(crate) fn encode_into(out: &mut String, data: &[u8], url: bool) {
     let alphabet = if url { URL_SAFE } else { STANDARD };
     for chunk in data.chunks(3) {

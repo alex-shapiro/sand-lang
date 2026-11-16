@@ -1288,44 +1288,47 @@ pub struct VariantRt {
     pub desc: OnceLock<Arc<VariantDesc>>,
 }
 
-/// The slot of the shape index in the dictionary of a structural codec
-/// impl, after the one method of the trait. The bounds of the impl follow.
+/// Tuple slot that stores the shape index in a structural codec dictionary.
+///
+/// Slot 0 stores the trait method. Bound dictionaries follow this slot.
 pub const CODEC_SHAPE_SLOT: usize = 1;
 
-/// How the codec walker visits one level of a type for a structural
-/// `Encode` or `Decode` dictionary. Slot [`CODEC_SHAPE_SLOT`] of the dictionary holds the index
-/// of its shape in [`Program::codec_shapes`].
+/// Runtime layout for walking a type under a structural `Encode` or `Decode`
+/// implementation.
+///
+/// Slot [`CODEC_SHAPE_SLOT`] of a structural dictionary holds the index of its
+/// shape in [`Program::codec_shapes`].
 #[derive(Clone, Debug)]
 pub struct CodecShape {
     pub kind: ShapeKind,
-    /// The dictionary of each part, from the dictionary of the whole.
+    /// Dictionary templates for each part in walk order.
     pub parts: Vec<PartTemplate>,
-    /// For `Decode` of a struct: how to fill each field or `init` parameter
-    /// that the input omits.
-    pub fills: Vec<Fill>,
-    /// For `Decode` through `init`.
+    /// Fallback strategies for omitted struct fields or `init` parameters
+    /// during `Decode`.
+    pub fills: Vec<DecodeFill>,
+    /// Constructor descriptor if `Decode` builds a struct through `init`.
     pub init: Option<InitCall>,
-    /// For `Decode` of a struct with more than [`INDEXED_SLOTS`] fields or
-    /// `init` parameters: the slot of each name.
+    /// Name-to-slot map for structs or `init` constructors with more than
+    /// [`INDEXED_SLOTS`] slots.
     pub slot_index: Option<FxHashMap<String, u32>>,
 }
 
-/// The most struct fields or `init` parameters that the decode walker finds
-/// by a scan, not through [`CodecShape::slot_index`].
+/// Maximum slot count searched by linear scan during struct decoding before
+/// building [`CodecShape::slot_index`].
 pub const INDEXED_SLOTS: usize = 8;
 
-/// A call of `init` that ends the decode of a struct.
+/// Constructor metadata for decoding a struct through `init`.
 #[derive(Clone, Debug)]
 pub struct InitCall {
-    /// The constant of the `init` function.
+    /// Constant pool index of the `init` function.
     pub func: u32,
-    /// The dictionaries that `init` requires.
+    /// Dictionary templates required by `init`.
     pub dicts: Vec<PartTemplate>,
-    /// The parameter names of `init`.
+    /// Parameter names of `init` in declaration order.
     pub names: std::sync::Arc<[String]>,
 }
 
-/// The type constructor of a [`CodecShape`].
+/// Type constructor tag for a [`CodecShape`].
 #[derive(Clone, Debug)]
 pub enum ShapeKind {
     Never,
@@ -1337,54 +1340,53 @@ pub enum ShapeKind {
     Bytes,
     Duration,
     Range,
-    /// Part 0 is the element.
+    /// List whose element uses part 0.
     List,
-    /// Part 0 is the element.
+    /// Set whose element uses part 0.
     Set,
-    /// Part 0 is the key, and part 1 is the value.
+    /// Map whose key uses part 0 and whose value uses part 1.
     Map,
-    /// The parts are the elements.
+    /// Tuple whose elements match `parts` in order.
     Tuple,
-    /// The prelude `Option`. Part 0 is the payload of `Some`.
+    /// Prelude `Option` whose `Some` payload uses part 0.
     Option,
-    /// The parts are the fields of struct `def`, or for `Decode` of a
-    /// struct with `init` (see [`CodecShape::init`]), the parameters of
-    /// `init`.
+    /// Struct `def` whose parts match its fields or `init` parameters. See
+    /// [`CodecShape::init`].
     Struct(u32),
-    /// The parts are the payload values of the variants of enum `def`, in
-    /// order. `first` is the id of its first variant.
+    /// Enum `def` whose parts flatten all variant payloads in variant order.
     Enum {
         def: u32,
+        /// Runtime ID of the first variant of `def`.
         first: u32,
     },
-    /// A native value type `def`, encoded as its text.
+    /// Native value type `def` encoded and decoded via text.
     Native(u32, crate::vm::value::ParseValue),
     ManualEncode(crate::native::codec::EncodeFn),
     ManualDecode(crate::native::codec::DecodeFn),
 }
 
-/// Builds the dictionary of a part from the dictionary of the whole.
+/// Template that constructs a part dictionary from an outer codec dictionary.
 #[derive(Clone, Debug)]
 pub enum PartTemplate {
-    /// A constant dictionary.
+    /// Constant pool index of a static dictionary.
     Const(u32),
-    /// Slot `i` of the dictionary of the whole.
+    /// Tuple slot `i` of the outer dictionary.
     Bound(u32),
-    /// Slot `i` of the dictionary that the inner template builds.
+    /// Tuple slot `i` of the dictionary built by the inner template.
     Field(Box<PartTemplate>, u32),
-    /// A tuple of the slots that the inner templates build.
+    /// Tuple dictionary assembled from the inner templates.
     Dict(Vec<PartTemplate>),
 }
 
-/// How the decode walker fills a field or `init` parameter that the input
-/// omits.
+/// Fallback strategy for an omitted struct field or `init` parameter during
+/// decoding.
 #[derive(Clone, Debug)]
-pub enum Fill {
-    /// `None` for an `Option`, or else a missing field error.
+pub enum DecodeFill {
+    /// Uses `None` for `Option` slots or reports a missing field error.
     Required,
-    /// A constant default.
+    /// Allocates a compile-time constant default.
     Const(crate::types::ConstVal),
-    /// A call of the default helper function constant with dictionaries.
+    /// Calls the default helper at the given constant index with dictionaries.
     Call(u32, Vec<PartTemplate>),
 }
 
@@ -1424,7 +1426,7 @@ pub struct Program {
     pub native_argc: Arc<[u16]>,
     /// Templates for string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
-    /// The shapes of structural `Encode` and `Decode` dictionaries.
+    /// Shapes referenced by structural `Encode` and `Decode` dictionaries.
     pub codec_shapes: Vec<CodecShape>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,

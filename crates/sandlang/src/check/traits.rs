@@ -66,13 +66,14 @@ pub struct ImplDef {
     /// have runtime dictionaries are stored after supertrait dictionaries in
     /// the `impl` dictionary.
     pub evidence: Vec<(TypeId, TraitRef)>,
-    /// Indicates whether a later REPL input replaced this `impl`, or whether
-    /// the parts of a structural codec impl refuted it.
+    /// `true` if a later REPL input replaced this implementation or if
+    /// structural codec derivation rejected it.
     pub replaced: bool,
-    /// The parts of a structural codec impl (see [`Checker::is_structural_impl`]).
+    /// Resolved part dictionaries for a structural codec implementation. See
+    /// [`Checker::is_structural_impl`].
     pub codec: Option<Arc<super::codec::CodecImpl>>,
-    /// Indicates whether the checker derived this impl from the structure of
-    /// its target type, without an `impl` block.
+    /// `true` if the checker generated this implementation without an `impl`
+    /// block.
     pub derived: bool,
 }
 
@@ -132,8 +133,7 @@ pub(crate) fn impl_key(arena: &TypeArena, t: TypeId) -> Option<(Ctor, u32)> {
     }
 }
 
-/// The deepest nesting of type arguments through which the checker resolves
-/// a trait bound, such as `Encode` of `[[[int]]]`.
+/// Maximum recursion depth for resolving nested trait bounds.
 const MAX_EVIDENCE_DEPTH: u32 = 512;
 
 fn dict_expr(kind: HKind, span: Span) -> HExpr {
@@ -487,8 +487,10 @@ impl Checker {
         self.traits[id as usize].methods = methods;
     }
 
-    /// Declares the native default method `m` of trait `id`, whose signature
-    /// is `sig`. The Rust function takes the dictionary of `Self` first.
+    /// Declares native default method `m` for trait `id` using signature `sig`.
+    ///
+    /// The registered Rust function must accept only the `Self` dictionary
+    /// before its value parameters.
     fn native_default_method(&mut self, id: TraitId, sig: FnId, m: &ast::FnDecl) -> Option<FnId> {
         if !self.allows_native() {
             self.error(m.name.span, "native functions can only be declared by native modules");
@@ -501,10 +503,10 @@ impl Checker {
             return None;
         };
         let mut fi = self.fns[sig as usize].clone();
-        let taken = self.check_native_signature(m, &key, &decl.sig, &fi.generics, &fi.params, fi.ret);
+        let accepted_dicts = self.check_native_signature(m, &key, &decl.sig, &fi.generics, &fi.params, fi.ret);
         let self_index = self.traits[id as usize].generics.len() as u8;
         let builtin = self.traits[id as usize].builtin;
-        if fi.dicts.len() != 1 || taken.len() != 1 || Some(taken[0]) != builtin.map(|b| (self_index, b)) {
+        if fi.dicts.len() != 1 || accepted_dicts.len() != 1 || Some(accepted_dicts[0]) != builtin.map(|b| (self_index, b)) {
             self.error(m.name.span, format!("the Rust function of native `{key}` must take only the dictionary of `Self`"));
         }
         fi.kind = FnKind::Native(decl.id);
@@ -636,8 +638,9 @@ impl Checker {
             if self.traits[tid as usize].builtin == Some(Builtin::Num) && !m.is_native {
                 self.error(m.name.span, "the methods of a `Num` impl must be native");
             }
-            // Trait dispatch passes the impl dictionary as the first hidden
-            // argument, which conflicts with the dictionary slots of native functions.
+            // Trait dispatch occupies the leading hidden argument with the `Self`
+            // dictionary. Native `impl` methods therefore cannot take extra
+            // `TraitDict` parameters.
             if m.is_native && !self.fns[f as usize].dicts.is_empty() {
                 self.error(m.name.span, "the Rust function of a native impl method cannot take trait dictionaries");
             }
@@ -919,9 +922,8 @@ impl Checker {
         self.wrapper_value(sig, &bindings, span)
     }
 
-    /// Builds a closure that supplies hidden dictionary arguments
-    /// if generic function or trait method `f` is used as a first-class
-    /// function value.
+    /// Wraps generic or encoded-argument function `f` in a closure for use as a
+    /// first-class function value.
     pub(crate) fn wrapper_value(&mut self, f: FnId, pre: &[(ParamId, TypeId)], span: Span) -> HExpr {
         let inst = self.instantiate_fn_with(f, span, pre);
         let id = self.new_lambda();
@@ -945,7 +947,7 @@ impl Checker {
         mk(HKind::Lambda(Box::new(lam)), fty, span)
     }
 
-    /// Builds hidden call arguments for `f`: trait evidence placeholders.
+    /// Creates evidence placeholder arguments for `dicts`.
     pub(crate) fn hidden_args(&mut self, dicts: &[(TypeId, TraitRef)], lenient: &dyn Fn(&Self, TypeId) -> bool, span: Span) -> Vec<HArg> {
         let mut out = Vec::new();
         for &(t, tr) in dicts {
@@ -1075,10 +1077,8 @@ impl Checker {
         out
     }
 
-    /// Hoists non-constant dictionary expressions into entry-block local
-    /// bindings, deduplicating identical dictionaries.
-    /// Returns `true` if dictionary `e` reads a local that a lambda owns, such
-    /// as a dictionary parameter of a local generic function.
+    /// Returns `true` if dictionary expression `e` references a local owned by
+    /// a lambda.
     pub(crate) fn reads_lambda_local(&self, e: &HExpr) -> bool {
         match &e.kind {
             HKind::Dict { args, .. } => args.iter().any(|a| self.reads_lambda_local(a)),
@@ -1088,6 +1088,8 @@ impl Checker {
         }
     }
 
+    /// Hoists non-constant dictionary expressions into entry-block locals and
+    /// deduplicates identical dictionaries.
     pub(crate) fn hoist_dict(&mut self, e: &mut HExpr, hoisted: &mut Vec<(LocalId, HExpr)>) {
         if let HKind::Dict { args, .. } = &mut e.kind {
             for a in args.iter_mut() {
@@ -1138,11 +1140,11 @@ impl Checker {
                 return Err(m);
             }
             Ty::Param(p) => {
-                if let Some(reqs) = &mut self.codec_reqs
-                    && reqs.generics.contains(&p)
+                if let Some(collector) = &mut self.codec_bound_collector
+                    && collector.type_params.contains(&p)
                 {
-                    if !reqs.found.contains(&(ty, tr)) {
-                        reqs.found.push((ty, tr));
+                    if !collector.bounds.contains(&(ty, tr)) {
+                        collector.bounds.push((ty, tr));
                     }
                     return Ok(dict_expr(HKind::Error, span));
                 }
@@ -1300,7 +1302,7 @@ impl Checker {
         let not_impl = |c: &Checker| {
             let mut m = Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
             if let Ty::Named(d, _) = c.arena.get(ty) {
-                m.because = c.codec_refuted.get(&(tr.trait_id, d)).map(|r| r.to_string());
+                m.because = c.codec_failure_reasons.get(&(tr.trait_id, d)).map(|r| r.to_string());
             }
             m
         };
@@ -1309,7 +1311,7 @@ impl Checker {
             return self.resolve_derived(ty, tr, b, depth).map(|()| dict_expr(HKind::Unit, span));
         }
         if key.0 == Ctor::Tuple && self.is_codec_trait(tr.trait_id) {
-            self.tuple_codec_impl(tr, key.1);
+            self.ensure_tuple_codec_impl(tr, key.1);
         }
         let ids = self.impls_by.get(&(tr.trait_id, key.0, key.1)).map(|v| v.to_vec()).unwrap_or_default();
         let targs = self.elems(tr.args);

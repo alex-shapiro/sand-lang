@@ -52,7 +52,7 @@ pub trait NamedType: Sized + 'static {
 pub struct Binding<T>(BoundKind, codec::NativeCodecs, PhantomData<fn() -> T>);
 
 impl<T> Binding<T> {
-    /// Declares the codec traits that the type implements.
+    /// Sets the codec implementations for this type.
     pub fn codecs(self, codecs: codec::NativeCodecs) -> Binding<T> {
         Binding(self.0, codecs, PhantomData)
     }

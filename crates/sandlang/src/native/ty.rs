@@ -30,11 +30,13 @@ pub enum Type {
     /// type parameters before the function's own type parameters) and the
     /// built-in traits that the Rust function requires of it.
     Param(u8, Builtins),
-    /// Dictionary of a built-in trait for the type parameter at index `0..`
-    /// (see [`TraitDict`]).
+    /// Runtime dictionary of a built-in trait for the type parameter at index
+    /// `0..`. See [`TraitDict`].
     Dict(u8, Builtin),
-    /// An argument of the type parameter at index `0..`, which must implement
-    /// `Encode`, as a host [`Value`](crate::value::Value) (see [`Encoded`]).
+    /// Host [`Value`] encoded from an argument of the type parameter at index
+    /// `0..`.
+    ///
+    /// The type parameter must implement `Encode`. See [`Encoded`].
     Encoded(u8),
     /// Nominal type declared in a module.
     Named(Named),
@@ -354,17 +356,16 @@ impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
 /// Runtime dictionary of the built-in trait `B` for the `N`-th generic type
 /// parameter of a `native fn`.
 ///
-/// A Rust function can accept `TraitDict<N, B>` if the `native fn`
-/// declaration requires `B` of the type parameter, directly or through a
-/// supertrait, and `B` declares methods. Place `TraitDict` parameters in
-/// ascending order of `N`, before regular value parameters.
-pub struct TraitDict<const N: u8, B: traits::One>(VmValue, PhantomData<fn() -> B>, PhantomData<UnrootedVmHandle>);
+/// A Rust function can accept `TraitDict<N, B>` if `B` declares methods and
+/// the `native fn` declaration requires `B` on that type parameter directly or
+/// through a supertrait. Place `TraitDict` parameters in ascending order of
+/// `N` before value parameters.
+pub struct TraitDict<const N: u8, B: traits::Single>(VmValue, PhantomData<fn() -> B>, PhantomData<UnrootedVmHandle>);
 
-/// Runtime dictionary of `Num` for the `N`-th generic type parameter (`int`
-/// or `float`).
+/// Runtime dictionary of `Num` for the `N`-th generic type parameter.
 pub type Num<const N: u8> = TraitDict<N, traits::Num>;
 
-impl<const N: u8, B: traits::One> TraitDict<N, B> {
+impl<const N: u8, B: traits::Single> TraitDict<N, B> {
     pub fn raw(self) -> VmValue {
         self.0
     }
@@ -374,32 +375,32 @@ impl<const N: u8, B: traits::One> TraitDict<N, B> {
     }
 }
 
-impl<const N: u8, B: traits::One> Clone for TraitDict<N, B> {
+impl<const N: u8, B: traits::Single> Clone for TraitDict<N, B> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<const N: u8, B: traits::One> Copy for TraitDict<N, B> {}
+impl<const N: u8, B: traits::Single> Copy for TraitDict<N, B> {}
 
-impl<const N: u8, B: traits::One> fmt::Debug for TraitDict<N, B> {
+impl<const N: u8, B: traits::Single> fmt::Debug for TraitDict<N, B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TraitDict<{N}, {}>({:?})", B::BUILTIN.name(), self.0)
     }
 }
 
-impl<const N: u8, B: traits::One> SandType for TraitDict<N, B> {
+impl<const N: u8, B: traits::Single> SandType for TraitDict<N, B> {
     fn sand_type() -> Type {
         Type::Dict(N, B::BUILTIN)
     }
 }
 
-/// An argument of the `N`-th generic type parameter of a `native fn`,
-/// encoded as a host [`Value`](crate::value::Value) before the call.
+/// Argument of the `N`-th generic type parameter of a `native fn`, encoded as
+/// a host [`Value`] before the call.
 ///
 /// The `native fn` declaration must require `T: Encode`. The engine encodes
-/// the argument with the `Encode` impls of Sand code, so a synchronous
-/// Rust function can read the encoded value:
+/// the argument through Sand `Encode` implementations before invoking Rust. A
+/// synchronous Rust function can therefore read the encoded value:
 ///
 /// ```
 /// # use sandlang::native::NativeModule;
@@ -415,13 +416,12 @@ impl<const N: u8, B: traits::One> SandType for TraitDict<N, B> {
 pub struct Encoded<const N: u8>(Arc<Value>);
 
 impl<const N: u8> Encoded<N> {
-    /// Returns the encoded argument.
+    /// Borrows the encoded value.
     pub fn value(&self) -> &Value {
         &self.0
     }
 
-    /// Returns the encoded argument. The engine keeps its own reference, so
-    /// this copies the value.
+    /// Returns an owned copy of the encoded value.
     pub fn into_value(self) -> Value {
         Arc::unwrap_or_clone(self.0)
     }
@@ -439,13 +439,12 @@ impl<const N: u8> SandType for Encoded<N> {
     }
 }
 
-/// The encoded argument of an [`Encoded`] parameter, which the engine passes
-/// to the Rust function.
+/// Heap object that passes an [`Encoded`] argument to a native function.
 #[derive(crate::SandObject)]
 #[sand(module = "prelude", private)]
 pub(crate) struct EncodedArg {
     pub(crate) value: Arc<Value>,
-    /// The memory of `value`, which the memory limit counts.
+    /// Memory reservation for `value` counted against the memory limit.
     pub(crate) _reservation: crate::vm::iomem::Reservation,
 }
 
@@ -465,7 +464,7 @@ impl<const N: u8> crate::native::convert::FromVmValue for Encoded<N> {
 ///
 /// A `VmVal` is valid only until the call returns or suspends. Garbage
 /// collection during a wait can free an unrooted heap object. `VmVal`,
-/// [`Param`] and [`TraitDict`] are therefore `!Send`. The compiler
+/// [`Param`], and [`TraitDict`] are therefore `!Send`. The compiler
 /// rejects these VM handles in three places:
 ///
 /// - a [`NativeObject`](super::NativeObject)

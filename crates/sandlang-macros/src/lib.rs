@@ -1,21 +1,23 @@
 //! Derive macros that bind Rust types to Sand types.
 //!
-//! Each type requires a `#[sand(module = "<module>")]` attribute and accepts
-//! optional type attributes:
+//! Every derived type requires `#[sand(module = "<module>")]`. Optional type
+//! attributes customize the binding:
 //!
-//! - `#[sand(name = "<Name>")]`: overrides the Sand type name.
-//! - `#[sand(private)]`: makes the type private.
-//! - `#[sand(crate = <path>)]`: overrides the `::sandlang` crate path.
-//! - `#[sand(manual_conversion)]`: omits the `FromVmValue` and `IntoVmValue`
+//! - `#[sand(name = "<Name>")]` overrides the Sand type name.
+//! - `#[sand(private)]` marks the type private.
+//! - `#[sand(crate = <path>)]` overrides the `::sandlang` crate path.
+//! - `#[sand(manual_conversion)]` omits the `FromVmValue` and `IntoVmValue`
 //!   implementations.
-//! - `#[sand(no_value)]`: omits the `ToValue` implementation. Use this
-//!   attribute if a field type such as `VmVal` does not implement `ToValue`.
-//! - `#[sand(encode)]` and `#[sand(decode)]`: derive the Sand `Encode` and
-//!   `Decode` traits from the structure of the type. `#[sand(encode =
-//!   "manual")]` and `#[sand(decode = "manual")]` implement them with the Rust
-//!   traits `native::codec::Encode` and `native::codec::Decode`. A
-//!   `SandObject` supports only the manual forms, and a generic type supports
-//!   neither. A type without these attributes implements neither trait.
+//! - `#[sand(no_value)]` omits the `ToValue` implementation for types whose
+//!   fields do not implement `ToValue`, such as `VmVal`.
+//! - `#[sand(encode)]` and `#[sand(decode)]` derive the Sand `Encode` and
+//!   `Decode` traits from the type's structure.
+//! - `#[sand(encode = "manual")]` and `#[sand(decode = "manual")]` delegate to
+//!   the Rust traits `native::codec::Encode` and `native::codec::Decode`.
+//!
+//! A type without `encode` or `decode` implements neither Sand codec trait.
+//! `SandObject` types support only `"manual"` codecs. Generic native types
+//! cannot implement `Encode` or `Decode`.
 //!
 //! The macros copy Rust doc comments into Sand documentation.
 
@@ -32,15 +34,14 @@ use syn::{
 
 /// Binds a Rust enum to a Sand enum.
 ///
-/// Implements `NamedType`, `EnumType`, `SandType`, `FromVmValue`, `IntoVmValue`,
-/// and `ToValue`. Supports unit, tuple, and struct variants, as well as type
-/// parameters. Each payload type must implement `IntoVmValue` and owned
-/// `FromVmValue`. It must also implement `ToValue`, unless the enum uses
-/// `#[sand(no_value)]`.
+/// Implements `NamedType`, `EnumType`, `SandType`, `FromVmValue`,
+/// `IntoVmValue`, and `ToValue`. Supports unit, tuple, and struct variants on
+/// concrete and generic enums. Every payload type must implement `IntoVmValue`
+/// and owned `FromVmValue`. Payload types must also implement `ToValue` unless
+/// the enum has `#[sand(no_value)]`.
 ///
-/// Optional attributes:
-///
-/// - `#[sand(name = "<name>")]` on a struct variant field overrides its Sand field name.
+/// Place `#[sand(name = "<name>")]` on a struct variant field to override its
+/// Sand field name.
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     expand(input, sand_enum)
@@ -48,21 +49,25 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 
 /// Binds a Rust struct to a Sand struct.
 ///
-/// Implements `NamedType`, `StructType`, `SandType`, `FromVmValue`, `IntoVmValue`,
-/// and `ToValue`. Each field type must implement `IntoVmValue` and owned
-/// `FromVmValue`. It must also implement `ToValue`, unless the struct uses
-/// `#[sand(no_value)]`. Rust type parameters define Sand type parameters.
+/// Implements `NamedType`, `StructType`, `SandType`, `FromVmValue`,
+/// `IntoVmValue`, and `ToValue`. Rust type parameters become Sand type
+/// parameters. Every field type must implement `IntoVmValue` and owned
+/// `FromVmValue`. Field types must also implement `ToValue` unless the struct
+/// has `#[sand(no_value)]`.
 ///
-/// Optional field attributes:
+/// Optional field attributes customize each field:
 ///
-/// - `#[sand(name = "<name>")]`: overrides the Sand field name.
-/// - `#[sand(private)]`: makes the field private.
-/// - `#[sand(var)]`: makes the field mutable.
-/// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets a default value
-///   from `Default::default()` or `Into::into(<expr>)`. The default uses the
-///   `ToValue` form of the value and must be a Sand constant of the field type.
-///   Native value types cannot be field defaults. `HostModules::new` returns a
-///   compile error if a default is not a valid constant.
+/// - `#[sand(name = "<name>")]` overrides the Sand field name.
+/// - `#[sand(private)]` marks the field private.
+/// - `#[sand(var)]` marks the field mutable.
+/// - `#[sand(default)]` sets the field default from `Default::default()`.
+/// - `#[sand(default = <expr>)]` sets the field default from
+///   `Into::into(<expr>)`.
+///
+/// Each field default converts to a `Value` through `ToValue` and must form a
+/// valid Sand constant of the field type. Native value types cannot appear in
+/// field defaults. `HostModules::new` reports a compile error if a default is
+/// not a valid constant.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
@@ -80,7 +85,7 @@ pub fn derive_sand_object(input: TokenStream) -> TokenStream {
 /// Binds a Rust type to an opaque Sand value type.
 ///
 /// Implements `NamedType`, `SandType`, `FromVmValue`, `IntoVmValue`, and
-/// `ToValue`. The type must implement `ValueType`.
+/// `ToValue`. The Rust type must implement `ValueType`.
 #[proc_macro_derive(SandValue, attributes(sand))]
 pub fn derive_sand_value(input: TokenStream) -> TokenStream {
     expand(input, sand_value)
@@ -99,13 +104,13 @@ struct TypeAttrs {
     doc: Tokens,
     manual_conversion: bool,
     no_value: bool,
-    /// For `Encode` and `Decode`: `None` if the type does not implement the
-    /// trait, or whether a Rust impl implements it.
+    /// `None` if unimplemented, `Some(false)` if structural, or `Some(true)` if
+    /// manual.
     encode: Option<bool>,
     decode: Option<bool>,
 }
 
-/// Parses `encode`, `encode = "manual"`, `decode`, or `decode = "manual"`.
+/// Parses `encode` or `decode` and returns `true` for `= "manual"`.
 fn parse_codec(meta: &syn::meta::ParseNestedMeta, derive: &str) -> syn::Result<bool> {
     if meta.input.peek(syn::Token![=]) {
         let v: LitStr = meta.value()?.parse()?;
@@ -339,14 +344,15 @@ fn expand_sand_type(input: &DeriveInput, krate: &Path, type_params: &TypeParams)
     }
 }
 
-/// The generics of the type and conversion impls of a derived type.
+/// Generic parameter lists and `where` clauses for generated trait
+/// implementations.
 struct ConversionGenerics {
-    /// The parameters of each impl.
+    /// Generic parameters on each `impl` block.
     params: Tokens,
-    /// The type arguments of the derived type.
+    /// Type arguments on the target type.
     args: Tokens,
-    /// The where clause of the `NamedType`, `SandType`, `EnumType`, and
-    /// `StructType` impls.
+    /// `where` clause for `NamedType`, `SandType`, `EnumType`, and
+    /// `StructType`.
     type_where: Tokens,
     from_vm_value_where: Tokens,
     into_vm_value_where: Tokens,

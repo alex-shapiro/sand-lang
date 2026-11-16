@@ -268,9 +268,9 @@ A trailing `where` clause (`fn sum(self) -> T where T: Num`) also specifies trai
 can constrain the type parameters of an enclosing generic `extend` block,
 struct, or enum for that method.
 
-A function may be declared inside a block; such a function may capture enclosing variables and
-and may call itself recursively. Local functions declared consecutively in the same block
-may call each other.
+A block can declare local functions. A local function can capture enclosing
+variables and call itself recursively. Consecutive local functions in the same
+block can call each other.
 
 ### 4.2 Structs
 
@@ -305,11 +305,11 @@ pub struct Port {
 
 Structs are reference types; variable assignment shares a struct value without copying it.
 
-Struct fields are separated by newlines or commas. A field is immutable unless
-declared `var`. If a field defines a default and the type construction omits
-that field, it is evaluated with its default expression. A field default can
-use the traits that the struct requires of its type parameters, such as
-`n: T = T.zero()` with `T: Num`.
+Newlines or commas separate struct fields. Each field is immutable unless
+declared `var`. If a struct construction omits a field that declares a default,
+the engine evaluates that default expression. A field default can use traits
+from the struct's type parameter bounds, such as `n: T = T.zero()` under
+`T: Num`.
 
 Fields and methods are private unless marked `pub` (§3.3).
 
@@ -563,8 +563,9 @@ For example, given `struct Bag<T: Hash>`, `struct Outer<U> { b: Bag<U> }` infers
 and `help(Outer)` displays `struct Outer<U: Hash>`. Because `Set` elements and map keys require
 `Hash`, a field of type `Set<[int]>` is rejected at declaration time.
 
-The type checker verifies type constructor bounds on constructions, enum variants, method calls,
-struct fields, and enum payloads. Other type annotations are not checked.
+The type checker verifies type constructor bounds on struct constructions, enum
+variants, method calls, struct fields, and enum payloads. It skips bound checks
+on other type annotations.
 
 A trait that does not declare methods in itself or its supertraits, for example `trait Marker {}`,
 does not pass a runtime method dictionary to generic functions.
@@ -624,14 +625,13 @@ enum to store values of different concrete types in a single collection.
 | `()`       | unit, the single value `()`                         |
 | `never`    | the type of expressions that do not produce a value |
 
-`never` is a subtype of every type: an expression of type `never` (`return`,
-`break`, `continue`, `fail(...)`) may appear where any type is expected.
-Inside other types it is ordinary: `[never]` and `fn() -> never` are distinct
-types, so `let xs: [never] = [1]` and passing `() => 5` where a
-`fn() -> never` is expected are type errors. `never` implements the traits that
-do not declare methods (§4.9), such as `Eq` and `Hash`, and `Encode` and
-`Decode` (§5.7). It implements no other trait with methods, because a trait
-method such as `T.zero()` can be called without a value of type `T`.
+`never` is a subtype of every type. Diverging expressions such as `return`,
+`break`, `continue`, and `fail(...)` have type `never` and fit any expected
+type. Inside composite types, `never` does not coerce. `[never]` and
+`fn() -> never` are distinct from `[int]` and `fn() -> int`. `never` implements
+`Encode` and `Decode` (§5.7) and every trait without methods (§4.9), such as
+`Eq` and `Hash`. Other traits with methods exclude `never` because static trait
+methods such as `T.zero()` can run without a value of type `T`.
 
 ### 5.2 Composite types
 
@@ -688,19 +688,32 @@ error. Use `x.to_float()` or `f.to_int()`.
 
 The prelude declares six built-in traits:
 
-| Trait    | Supertraits    | Implemented by                                                                                                                                                                             |
-| -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Eq`     |                | every type except function types, and types containing them                                                                                                                                |
-| `Ord`    | `Eq`           | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`                     |
-| `Hash`   | `Eq`           | `int`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs without `var` fields where all components implement `Hash` |
-| `Encode` |                | the built-in data types, `never`, native types that opt in (§16.3), and tuples, structs, and enums whose components implement `Encode`, except structs whose `init` parameters differ from their fields |
-| `Decode` |                | the built-in data types, `never`, native types that opt in (§16.3), and tuples, structs, and enums whose components implement `Decode`; `Set` elements and map keys also require `Hash`    |
-| `Num`    | `Ord + Encode` | `int`, `float`                                                                                                                                                                             |
+- **`Eq`.** Implemented by every type except function types and composite types
+  that contain a function type.
+- **`Ord`.** Requires `Eq`. Implemented by:
+  - `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, and `never`
+  - ordered native value types (§5.4)
+  - tuples, lists, `Option`, structs, and enums whose components implement `Ord`
+- **`Hash`.** Requires `Eq`. Implemented by:
+  - `int`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, and `never`
+  - native value types (§5.4)
+  - tuples, `Option`, `Result`, enums, and immutable structs whose components
+    implement `Hash`
+- **`Encode`.** Implemented by built-in data types, `never`, native types that
+  opt in (§16.2), and tuples, structs, and enums whose components implement
+  `Encode`. If a struct declares `init` (§4.2), the compiler derives `Encode`
+  only if `init`'s parameters match the struct's fields.
+- **`Decode`.** Implemented by built-in data types, `never`, native types that
+  opt in (§16.2), and tuples, structs, and enums whose components implement
+  `Decode`. `Set` elements and map keys also require `Hash`.
+- **`Num`.** Requires `Ord + Encode`. Implemented by `int` and `float`.
 
-The compiler automatically derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode` from a type's components.
-A struct or enum implements a derived trait if every field and variant payload implements it, and a generic
-type requires the trait on each type parameter used by those components. An `impl` of `Encode` or `Decode`
-replaces the derived implementation for its type constructor (§5.7).
+The compiler derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode` from a type's
+components. A struct or enum implements a derived trait if every field and
+variant payload implements that trait. On a generic type, the derived
+implementation requires the trait on each type parameter that appears in those
+components. A custom `impl` block for `Encode` or `Decode` overrides the
+derived implementation for its type constructor (§5.7).
 
 Example: `struct Pair<A, B> { a: A, b: B }` implements `Hash` if `A` and `B` implement `Hash`,
 and `help(Pair)` displays `Hash where A: Hash, B: Hash`.
@@ -714,10 +727,10 @@ Built-in traits may be used as bounds on type parameters, supertraits, and `impl
 
 ### 5.7 Encode and Decode
 
-`Encode` writes a value to an external format, such as JSON text, through an
-`Encoder`. `Decode` reads a value through a `Decoder`. The native default
-methods of the two traits walk the parts of a value. An `impl` with custom
-methods replaces the derived implementation:
+`Encode` writes a value to an external format such as JSON text through an
+`Encoder`. `Decode` reads a value through a `Decoder`. Each trait provides a
+native default method that walks the parts of a value. A custom `impl` block
+overrides the derived implementation:
 
 ```sand
 struct Celsius { degrees: float }
@@ -731,29 +744,35 @@ impl Decode for Celsius {
 }
 ```
 
-An `encode` method must write exactly one value to its `Encoder`. A second
-write, or a write after the method returns, fails with kind `"invalid"`. An
-`encode` method that writes no value also fails with kind `"invalid"`.
+An `encode` method must write a single value to its `Encoder`. The engine
+returns an `"invalid"` error if `encode` omits the write, writes a second
+value, or writes after returning.
 
-A `decode` method reads at most one value from its `Decoder`. If the method
-reads no value, the decoder skips the input value. `decoder.kind()` returns
-the `InputKind` of the input value without reading it: `Null`, `Bool`, `Int`,
-`Float`, `Duration`, `Str`, `Bytes`, `List`, `Map`, `Tuple`, `Struct`, `Range`,
-`Native`, or `Variant`. JSON text gives only `Null`, `Bool`, `Int`, `Float`,
-`Str`, `List`, and `Map`, and a JSON object key has kind `Str`.
+A `decode` method reads at most a single value from its `Decoder`. If `decode`
+returns without reading, the decoder skips the input value. Before reading,
+`decoder.kind()` inspects the `InputKind` of the unread input value:
 
-A struct that declares `init` (§4.2) decodes the parameters of `init` and
-calls `init`. A missing `Option` parameter is `None`, and a missing parameter
-with a default gets its default. The input can give every parameter, including
-a parameter with a default, such as a limit that `init` checks. An `init`
-error that is not an `Error` fails with kind `"invalid"` and its text. If the names or types of the `init`
-parameters differ from the fields, the struct does not derive `Encode`.
+- Scalars: `Null`, `Bool`, `Int`, `Float`, `Duration`, `Str`, `Bytes`
+- Composites: `List`, `Map`, `Tuple`, `Struct`, `Range`, `Variant`
+- Opaque values: `Native`
 
-A derived `Decode` gives a missing struct field its default. A duplicate struct
-field or `init` parameter in the input fails with kind `"parse"`. A duplicate map
-key replaces the earlier value. Encoding or decoding a value nested more than
-512 levels deep fails with kind `"limit"`. JSON text nested more than 512
-levels deep fails to parse, with kind `"parse"`.
+JSON text produces only `Null`, `Bool`, `Int`, `Float`, `Str`, `List`, and
+`Map`. Every JSON object key has kind `Str`.
+
+For a struct that declares `init` (§4.2), derived `Decode` decodes each
+parameter of `init` and calls `init`. An omitted `Option` parameter defaults to
+`None`. Any other omitted parameter with a default evaluates that default. The
+input may supply any `init` parameter, even if that parameter declares a
+default. If `init` returns `Err(e)` for a non-`Error` value `e`, decoding fails
+with kind `"invalid"` and the display text of `e`. If `init`'s parameter names
+or types differ from the struct's fields, the compiler omits derived `Encode`.
+
+For structs without `init`, derived `Decode` evaluates declared defaults for
+omitted fields. The decoder rejects a duplicate struct field or `init`
+parameter with kind `"parse"`. In a map, a duplicate key overwrites the earlier
+entry. Encoding or decoding a value nested more than 512 levels deep fails with
+kind `"limit"`. The JSON parser rejects input nested more than 512 levels deep
+with kind `"parse"`.
 
 ## 6. Expressions
 
@@ -1978,16 +1997,21 @@ to compile`. `None` means unlimited.
   host interrupts the engine. The standard library is compiled once per
   process. `HostModules::new` compiles host modules (§16.3). Neither
   compilation counts toward a program's budget.
-- **Local limits**, reported at the offending construct: nesting of
-  expressions, types, patterns and blocks to 256 levels (`nesting too
-deep`); strings nested inside string interpolations to 32 levels
-  (`strings nested too deeply inside string interpolations`); types to
-  10,000 components (`type too large`); the exhaustiveness check of one
-  `match` to a fixed amount of work (`pattern too complex to check for
-exhaustiveness`); copies of deferred code (§7.1) in one function to about
-  a million instructions (`too much deferred code`); the trait
-  implementations that one trait bound requires to 512 levels (`overflow
-  while checking that ...`).
+- **Local limits.** The compiler reports construct-level limit errors at the
+  offending syntax:
+  - Expressions, types, patterns, and blocks nest at most 256 levels deep.
+    Deeper nesting fails with `nesting too deep`.
+  - Strings inside string interpolations nest at most 32 levels deep. Deeper
+    nesting fails with `strings nested too deeply inside string interpolations`.
+  - A single type contains at most 10,000 components. Larger types fail with
+    `type too large`.
+  - Each `match` exhaustiveness check runs within a fixed work budget. Exceeding
+    that budget fails with `pattern too complex to check for exhaustiveness`.
+  - Deferred code copies (§7.1) in a single function emit at most about a
+    million instructions. Exceeding that limit fails with
+    `too much deferred code`.
+  - Resolving a single trait bound recurses at most 512 levels deep. Deeper
+    recursion fails with `overflow while checking that ...`.
 - **Diagnostics.** At most 50 syntax errors per module, and 50 type errors,
   are reported.
 - **Memory.** Compilation is not counted against `max_memory`; it uses
@@ -2247,14 +2271,14 @@ optional type attributes:
 - `#[sand(name = "<Name>")]`: overrides the Sand type name.
 - `#[sand(private)]`: keeps the type private to its module.
 - `#[sand(crate = <path>)]`: specifies a renamed `sandlang` dependency.
-- `#[sand(encode)]` and `#[sand(decode)]`: the Sand type implements `Encode`
-  or `Decode` with the derived walker (§5.7). A native type without these
-  attributes implements neither trait.
-- `#[sand(encode = "manual")]` and `#[sand(decode = "manual")]`: the Sand type
-  implements `Encode` or `Decode` with the Rust impl of
-  `native::codec::Encode` or `native::codec::Decode`. These impls write to an
-  `EncodeSink` and read from a `DecodeSource`. A `SandObject` accepts only
-  these forms. A generic type cannot implement `Encode` or `Decode`.
+- `#[sand(encode)]` and `#[sand(decode)]`: implement `Encode` or `Decode` for
+  the Sand type with the derived walker (§5.7). A native type implements
+  `Encode` or `Decode` only if its `#[sand(...)]` attribute declares the trait.
+- `#[sand(encode = "manual")]` and `#[sand(decode = "manual")]`: implement
+  `Encode` or `Decode` with the Rust traits `native::codec::Encode` or
+  `native::codec::Decode`. Manual implementations write to an `EncodeSink` and
+  read from a `DecodeSource`. `SandObject` types accept only the manual forms.
+  Generic native types cannot implement `Encode` or `Decode`.
 - `#[sand(manual_conversion)]`: on `SandEnum` and `SandStruct`, omits the
   derived `FromVmValue` and `IntoVmValue` implementations.
 - `#[sand(no_value)]`: on `SandEnum` and `SandStruct`, omits the derived
@@ -2369,24 +2393,24 @@ enforcing the limit.
 | `Num<N>`                          | `TraitDict<N, traits::Num>`                           |
 
 `Param<N, B>` specifies the built-in traits `B` required on the `N`-th type
-parameter: `traits::Eq`, `traits::Ord`, `traits::Hash`, `traits::Num`,
-`traits::Encode`, `traits::Decode`, or a tuple such as `(traits::Ord, traits::Hash)`, defaulting
-to `()`. The `native fn` declaration must declare these traits for that type
-parameter, directly or through traits that have them as supertraits. Native
-functions can only require built-in traits.
+parameter. `B` defaults to `()` and accepts a marker from `sandlang::types::traits`
+or a tuple of markers such as `(traits::Ord, traits::Hash)`. Available trait
+markers are `Eq`, `Ord`, `Hash`, `Num`, `Encode`, and `Decode`. The `native fn`
+declaration must require those traits on that type parameter directly or through
+supertraits. Native functions can require only built-in traits.
 
-If a `native fn` declaration requires a trait `B` with methods of its `N`-th
+If a `native fn` declaration requires a trait `B` with methods on its `N`-th
 type parameter, the Rust function can accept a `TraitDict<N, B>` argument.
-`TraitDict` arguments come before the value arguments, in type-parameter
-order. A `Num<N>` argument provides `Num::zero` and `Num::one`. An async
-native function passes an `Encode` or `Decode` dictionary to
-`NativeContext::to_value` or `NativeContext::from_value` (§16.7). Native
-`impl` methods cannot take `TraitDict` arguments.
+`TraitDict` arguments precede value arguments in ascending type-parameter
+order. `Num<N>` provides `Num::zero` and `Num::one`. Async native functions
+pass `Encode` and `Decode` dictionaries to `NativeContext::to_value` and
+`NativeContext::from_value` (§16.7). Native `impl` methods cannot accept
+`TraitDict` arguments.
 
-If a `native fn` declaration requires `Encode` of its `N`-th type parameter,
+If a `native fn` declaration requires `Encode` on its `N`-th type parameter,
 the Rust function can accept an `Encoded<N>` argument in place of the value.
-The engine encodes the value as a `Value` before the call. If the encode
-fails, for example in a custom `encode` method, the run stops with its error.
+The engine encodes the argument into a `Value` before calling the Rust
+function. If encoding fails, the engine stops the run with that error.
 
 The engine automatically generates Sand declarations for registered types and
 functions that are not declared in `NativeModule::source`. Registered types use
@@ -2549,7 +2573,7 @@ is independent of the VM and remains valid after a run ends. `Value` has
 `StructValue` holds an `Arc<StructDesc>` and the field values in declaration
 order. `StructDesc` stores the type name and field names. `VariantValue` holds
 an `Arc<VariantDesc>` and the payload values. `VariantDesc` stores the enum type
-name, the variant name, and the optional field names. One conversion shares a
+name, the variant name, and the optional field names. Each conversion shares a
 single descriptor across all instances of a struct or variant.
 `StructValue::field` and `VariantValue::field` look up a field value by name.
 `StructValue::new` and `VariantValue::with_fields` build values from named
@@ -2568,27 +2592,26 @@ prefix distinguishes script types from host types with the same base name.
 `Value::native::<T>()` parses the value as the native value type `T`, or returns
 `None` if the type or text does not match.
 
-A native function converts a Sand value to a `Value` with the `Encode`
-implementation of its type, and converts a `Value` to a Sand value with the
-`Decode` implementation (§5.7). A synchronous native function takes an
-`Encoded<N>` argument. An async native function calls `NativeContext::to_value`
-or `NativeContext::from_value`. Both conversions run the custom methods, `init`
-constructors, and computed field defaults of Sand code. Each `Some` becomes a
-`Some` variant, whereas `json.encode` flattens `Some`. `from_value` requires the
-exact form of each type: for example, `bytes` accepts only `Value::Bytes`.
+A native function converts a Sand value into a `Value` with its `Encode`
+implementation (§5.7). It converts a `Value` into a Sand value with its `Decode`
+implementation. Synchronous native functions accept `Encoded<N>` arguments.
+Async native functions call `NativeContext::to_value` and
+`NativeContext::from_value`. Both conversions execute custom Sand methods,
+`init` constructors, and computed field defaults. `to_value` encodes `Some` as a
+`Value::Variant`, unlike `json.encode`. `from_value` requires exact `Value`
+variants for each Sand type. For example, `bytes` accepts only `Value::Bytes`.
 
-A conversion charges fuel and memory against the run limits. It fails with kind
-`"limit"` if nesting exceeds 512 levels, which includes cyclic values. Each
-`Some` adds a nesting level. If a conversion before a side effect exceeds the
-memory limit, the engine collects garbage and reruns the native function from
-the start (§16.3).
+Each conversion charges fuel and memory against the run limits. If nesting
+exceeds 512 levels, including on cyclic values, conversion fails with kind
+`"limit"`. Each `Some` wrapper adds a nesting level. If a conversion before a
+side effect hits `max_memory`, the engine collects garbage and restarts the
+native function (§16.3).
 
-`value::ToValue` converts a Rust value into a `Value` constant, such as a
-native struct field default. Standard Rust primitives, collections, tuples,
-`Value`, and every `ValueType` implement `ToValue`. `to_value` sorts the
-entries of a `HashMap` and the elements of a `HashSet`. A derived `to_value`
-returns the structure of the Rust value and does not run Sand `Encode`
-implementations.
+`value::ToValue` converts a Rust value into a `Value` constant, such as a native
+struct field default. Standard Rust primitives, collections, tuples, `Value`,
+and every `ValueType` implement `ToValue`. `to_value` sorts `HashMap` entries by
+key and `HashSet` elements by value. Derived `ToValue` implementations copy the
+Rust value structure directly without running Sand `Encode` methods.
 
 ## 17. Tooling
 

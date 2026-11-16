@@ -2192,18 +2192,18 @@ fn async_natives_encode_and_decode_host_values() {
     let mut m = NativeModule::new("store");
     m.source("pub native fn save<T: Encode>(x: T) -> Result<str>\npub native fn load<T: Decode>(n: int) -> Result<T>");
     m.function("save", |encode: TraitDict<0, traits::Encode>, x: Param<0>| -> Result<Later<String, HostError>, HostError> {
-        Ok(Later::new(WaitKind::Io, |mut cx| {
-            let (x, encode) = (cx.root(x.raw()), cx.root(encode.raw()));
-            async move { Ok(format!("{:?}", cx.to_value(x, encode).await?)) }
+        Ok(Later::new(WaitKind::Io, |mut context| {
+            let (x, encode) = (context.root(x.raw()), context.root(encode.raw()));
+            async move { Ok(format!("{:?}", context.to_value(x, encode).await?)) }
         }))
     });
     m.function("load", |decode: TraitDict<0, traits::Decode>, n: i64| -> Result<Later<Param<0>, HostError>, HostError> {
-        Ok(Later::new(WaitKind::Io, move |mut cx| {
-            let decode = cx.root(decode.raw());
+        Ok(Later::new(WaitKind::Io, move |mut context| {
+            let decode = context.root(decode.raw());
             async move {
                 let value = Value::List(vec![Value::Str("a".into()), Value::Int(n)]);
-                let decoded = cx.from_value(value, decode).await?;
-                Ok(Param::from_raw(cx.value(decoded)))
+                let decoded = context.from_value(value, decode).await?;
+                Ok(Param::from_raw(context.value(decoded)))
             }
         }))
     });
@@ -2232,8 +2232,8 @@ fn a_decoder_reports_the_kind_of_each_host_value() {
     let mut m = NativeModule::new("host");
     m.source("pub native fn kinds<T: Decode>() -> Result<T>");
     m.function("kinds", |decode: TraitDict<0, traits::Decode>| -> Result<Later<Param<0>, HostError>, HostError> {
-        Ok(Later::new(WaitKind::Io, move |mut cx| {
-            let decode = cx.root(decode.raw());
+        Ok(Later::new(WaitKind::Io, move |mut context| {
+            let decode = context.root(decode.raw());
             async move {
                 let value = Value::List(vec![
                     Value::Tuple(vec![Value::Int(1)]),
@@ -2243,8 +2243,8 @@ fn a_decoder_reports_the_kind_of_each_host_value() {
                     Value::List(vec![]),
                     Value::Map(vec![]),
                 ]);
-                let decoded = cx.from_value(value, decode).await?;
-                Ok(Param::from_raw(cx.value(decoded)))
+                let decoded = context.from_value(value, decode).await?;
+                Ok(Param::from_raw(context.value(decoded)))
             }
         }))
     });
@@ -3148,7 +3148,7 @@ fn memory_limit() {
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
 }
 
-/// Garbage that makes a walk near the memory limit wait for a collection.
+/// Allocates unreachable strings so a subsequent codec walk triggers garbage collection.
 const CODEC_GARBAGE: &str = r#"
 import json
 fn garbage() -> int {
@@ -3162,7 +3162,7 @@ print(garbage())
 "#;
 
 #[test]
-fn codec_walks_near_the_memory_limit_give_the_whole_value_or_a_memory_error() {
+fn codec_walks_near_the_memory_limit_return_complete_values_or_memory_errors() {
     let cases = [
         (
             r#"
@@ -4389,8 +4389,8 @@ fn run_and_copy_values(
     (r, values)
 }
 
-/// Builds the `host` module with `host.copy`, which records its argument as
-/// an encoded host value.
+/// Builds the `host` test module and the vector that collects values passed
+/// to `host.copy`.
 fn copy_module() -> (NativeModule, Arc<Mutex<Vec<Value>>>) {
     use sandlang::native::ty::Encoded;
     let copies = Arc::new(Mutex::new(Vec::new()));
@@ -4515,9 +4515,8 @@ fn encode_deep_and_cyclic_values_on_a_small_stack() {
             .to_string());
     r.unwrap();
     assert_eq!(copies, 1);
-    // In a host value, each `Link` after the first adds both a struct level
-    // and a `Some` level, so `[chain(256)]` reaches 512 levels.
-    // `json.encode` returns the error, which `?` raises.
+    // Encoding to `Value` counts a nesting level for each `Link` struct and each
+    // `Some` wrapper. `[chain(256)]` therefore reaches the 512-level limit.
     for (operation, too_deep_expr) in [("json.encode", "chain(513)"), ("json.to_json", "chain(513)"), ("host.copy", "[[chain(256)]]")] {
         let message = "limit: value too deeply nested to encode or decode";
         let raise = if operation == "json.encode" { "?" } else { "" };
@@ -4542,7 +4541,7 @@ fn to_value_counts_its_memory_against_the_memory_limit() {
     }
 }
 
-/// The state of a delivery, with each kind of variant payload.
+/// Delivery state covering unit, tuple, and struct variants.
 #[derive(Clone, sandlang::SandEnum)]
 #[sand(module = "shop", encode, decode)]
 enum Delivery {
@@ -4551,7 +4550,7 @@ enum Delivery {
     Held { reason: String, days: i64 },
 }
 
-/// An order with a field of each kind that `Encode` covers.
+/// Sample order containing each field kind supported by derived `Encode`.
 #[derive(Clone, sandlang::SandStruct)]
 #[sand(module = "shop", encode, decode)]
 struct Purchase {

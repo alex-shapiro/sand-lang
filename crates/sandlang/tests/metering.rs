@@ -779,8 +779,8 @@ fn iterating_maps_and_sets_copies_nothing() {
 
 #[test]
 fn dictionaries_of_polymorphic_recursion_share_their_parts() {
-    // Each call doubles the type, but its dictionary holds the two smaller
-    // dictionaries, so each call adds one tuple until a limit stops the run.
+    // Each recursive call pairs two existing dictionaries in a single new tuple
+    // instead of copying the exponentially growing type tree.
     let doubling = "struct P<A, B> { a: A, b: B }\nfn grow<A: Decode, B: Decode>(n: int, a: A?, b: B?) -> int {\n    \
                     let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))";
     expect_stop(limits(|l| l.max_memory = Some(64 << 20)), doubling, is_limit(LimitKind::Memory), Duration::from_secs(10));
@@ -799,7 +799,7 @@ fn dictionaries_of_polymorphic_recursion_share_their_parts() {
 }
 
 #[test]
-fn dictionaries_count_the_parts_they_share_once() {
+fn shared_dictionary_parts_are_counted_once() {
     let src = "import json\nstruct P<A, B> { a: A, b: B }\nfn deep<A: Decode, B: Decode>(n: int, x: [A], y: [B]) -> int {\n    \
                if n == 0 {\n        let r: Result<[(A, B)]> = json.decode(\"[]\")\n        return if r.is_ok() { 0 } else { -1 }\n    }\n    \
                let w: [P<A, B>] = []\n    deep(n - 1, w, w) + 1\n}\nlet w: [int] = []\nprint(deep(200, w, w))";

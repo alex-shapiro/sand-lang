@@ -1694,8 +1694,8 @@ impl Vm {
             }
             self.heap.stats.record(start.elapsed(), true);
         }
-        // Reservations check against the published size, so a reservation
-        // right after a collection must see the freed memory.
+        // Publish the post-collection heap size so immediate I/O reservations
+        // observe the freed bytes.
         self.heap.io_memory.publish_heap(self.heap.used());
     }
 

@@ -1,13 +1,13 @@
 //! Benchmarks for the `json` module and host value conversion.
 //!
 //! `cargo bench --bench codec` reports the fastest time per operation across
-//! `BENCH_RUNS` engine runs. The default is 3 runs. Each operation runs in its
-//! own engine instance. Each run executes the operation `BENCH_REPS` times and
-//! keeps the fastest repetition. The default is 5 repetitions. The test
-//! document contains `BENCH_USERS` users, which defaults to 5000. Set
-//! `BENCH_OPS=encode,decode` to filter operations.
+//! `BENCH_RUNS` engine runs. The default is 3 runs. The harness runs each
+//! operation in a fresh `Engine`. Each run executes the operation `BENCH_REPS`
+//! times and keeps the fastest repetition. The default is 5 repetitions. The
+//! test document contains `BENCH_USERS` users. The default user count is 5000.
+//! Set `BENCH_OPS=encode,decode` to run a subset of operations.
 //!
-//! `cargo test --benches` runs each benchmark once and verifies its output.
+//! `cargo test --benches` runs each benchmark once and checks its output.
 
 use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
 use sandlang::native::NativeModule;

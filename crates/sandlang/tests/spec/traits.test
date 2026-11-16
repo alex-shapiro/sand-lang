@@ -584,7 +584,7 @@ print(Box(item: 1).show())
 --- error
 8: int does not implement `Describe`
 
-=== json natives alongside dictionaries
+=== json.encode and json.decode alongside user trait dictionaries
 import json
 trait Describe {
     fn describe(self) -> str
@@ -1454,7 +1454,7 @@ fn main() {
 --- error
 20: float does not implement `Hash` (required for [float] to implement `Marker`)
 
-=== a local function checks the traits that it requires at each call
+=== the checker verifies trait bounds at each call to a local function
 trait Describe {
     fn describe(self) -> str
 }
@@ -1470,7 +1470,7 @@ fn outer() {
 --- error
 11: str does not implement `Describe`
 
-=== a local function takes the dictionaries of the traits that it requires
+=== local generic functions receive trait dictionaries at each call
 trait Describe {
     fn describe(self) -> str
 }
@@ -1620,7 +1620,7 @@ enum E { Keyed([float: int]) }
 6: str does not implement `Describe` (required for Wrap<str>)
 7: float does not implement `Hash` (required for the keys of [float: int])
 
-=== field defaults use the traits with methods of the type's parameters
+=== struct field defaults can call trait methods on type parameters
 import json
 trait Make { fn make() -> Self }
 impl Make for int { fn make() -> int { 7 } }

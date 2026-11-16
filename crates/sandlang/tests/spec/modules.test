@@ -205,7 +205,7 @@ pub fn open() -> Account { Account(count: 0) }
 --- error
 3: field `count` of `account.Account` is private
 
-=== decoding fills the private fields of types of other modules
+=== json.decode populates private fields of structs from other modules
 import "./account.sand"
 import json
 print(json.encode(account.open())?)

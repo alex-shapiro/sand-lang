@@ -724,10 +724,10 @@ impl Checker {
         section(out, "Implements", &traits);
     }
 
-    /// Formats the bounds of impl `i` (`T: Encode`), except the bounds that its
-    /// target type declares.
-    fn impl_wheres(&self, i: ImplId) -> Vec<String> {
-        let imp = &self.impls[i as usize];
+    /// Formats the `where` bounds of implementation `impl_id` that are not
+    /// already declared on its target type.
+    fn impl_wheres(&self, impl_id: ImplId) -> Vec<String> {
+        let imp = &self.impls[impl_id as usize];
         let hash = self.builtin_trait(Builtin::Hash);
         let declared = |t: TypeId, tr: &TraitRef| match self.arena.get(imp.target) {
             Ty::Named(d, args) => self.arena.list(args).iter().position(|&a| a == t).is_some_and(|k| {

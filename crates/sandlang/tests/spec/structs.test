@@ -444,7 +444,7 @@ let l = List()
 4: `int` does not declare `init`
 5: `List` does not declare `init`
 
-=== a struct that declares init decodes through init
+=== structs that declare init are decoded through init
 import json
 struct Port {
     n: int
@@ -469,29 +469,29 @@ Config(port: Port(n: 8080), backup: None)
 Err(Error(message: "$.port: negative port", kind: "invalid"))
 Err(Error(message: "$.port: missing field `n`", kind: "parse"))
 
-=== init decodes its parameters, fills their defaults, and keeps its bounds
+=== decoding through init with parameter defaults and trait bounds
 import json
 trait Unit { fn unit() -> Self }
 impl Unit for str { fn unit() -> str { "u" } }
 fn count() -> int { 3 }
-struct Range2<T: Unit> {
+struct Interval<T: Unit> {
     lo: int
     hi: int
     label: T
-    fn init(lo: int, note: str?, span: int = count(), label: T = T.unit()) -> Range2<T> {
+    fn init(lo: int, note: str?, span: int = count(), label: T = T.unit()) -> Interval<T> {
         Self(lo: lo, hi: lo + span, label: label)
     }
 }
-let r: Range2<str> = json.decode("{\"lo\": 1}")?
+let r: Interval<str> = json.decode("{\"lo\": 1}")?
 print(r)
-let s: Range2<str> = json.decode("{\"lo\": 1, \"span\": 9, \"label\": \"x\", \"note\": \"n\"}")?
+let s: Interval<str> = json.decode("{\"lo\": 1, \"span\": 9, \"label\": \"x\", \"note\": \"n\"}")?
 print(s)
 print(json.encode(r))
 --- stdout
-Range2(lo: 1, hi: 4, label: "u")
-Range2(lo: 1, hi: 10, label: "x")
+Interval(lo: 1, hi: 4, label: "u")
+Interval(lo: 1, hi: 10, label: "x")
 --- error
-17: Range2<str> does not implement `Encode`
+17: Interval<str> does not implement `Encode`
 
 === `..base` and `..` must come last
 struct P { x: int, y: int }

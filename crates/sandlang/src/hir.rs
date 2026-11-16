@@ -144,8 +144,8 @@ pub struct HLambda {
     pub id: u32,
     pub name: String,
     pub params: Vec<LocalId>,
-    /// The `(type, trait)` pair of each leading dictionary parameter of a
-    /// generic local function.
+    /// Target type and trait for each leading dictionary parameter of a generic
+    /// local function.
     pub dicts: Vec<(TypeId, TraitRef)>,
     pub body: HExpr,
     /// If this lambda is a local function bound to a cell local, that local.

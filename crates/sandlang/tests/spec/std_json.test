@@ -293,7 +293,7 @@ let a: Result<App> = json.decode("{}")
 2: fn() -> int does not implement `Decode` (required for [fn() -> int] to implement `Decode`)
 5: App does not implement `Decode` because field `on` of `Hooks` has type `[str: fn() -> int]`
 
-=== ranges encode as objects with their bounds
+=== Range values are encoded as bound objects
 import json
 print(json.encode(1..4)?)
 print(json.encode(-2..=5, indent: 2)?)
@@ -316,7 +316,7 @@ print(bad)
 Obj(["start": Int(0), "end": Int(2)])
 Err(Error(message: "$: missing field `end`", kind: "parse"))
 
-=== map keys are strings, numbers, bools, variant names, or value types
+=== encoding and decoding supported map key types
 import json
 import time
 enum Mode { Read, Write }
@@ -338,7 +338,7 @@ print(d)
 [Write: 2]
 [2024-02-29: 1]
 
-=== other map keys fail when encoded or decoded
+=== encoding and decoding reject unsupported map keys
 import json
 let empty: [(int, int): str] = json.decode("{}")?
 print(empty)
@@ -552,7 +552,7 @@ print(bounded(() => 1))
 3: type parameter `T` does not implement `Encode`; add `T: Encode`
 8: fn() -> int does not implement `Encode`
 
-=== data implements Encode, and Num implies it
+=== built-in data types and Num supertrait bound for Encode
 import json
 struct P<T> { x: T, tags: Set<str> }
 fn dump<T: Encode>(x: T) -> str {
@@ -632,7 +632,7 @@ print(c == Config(size: (1, 2)))
 Config(server: Server(host: "localhost", port: 80, routes: ["a": [1, 2]]), backup: Server(host: "localhost", port: 81, routes: ["a": [1, 2]]), shapes: [Rect(w: 1.0, h: 2.0), Dot], size: (1, 2), late: Late(n: 3, m: Some(("x", true))), tags: Set(["b", "a"]))
 true
 
-=== decode runs the defaults that are not constants, as a construction does
+=== json.decode evaluates computed defaults in construction order
 import json
 var calls: [str] = []
 fn note(what: str, n: int) -> int {
@@ -681,7 +681,7 @@ print(s)
 --- stdout
 [S(a: 4, b: [5]), S(a: 1, b: [5])]
 
-=== functions pass Decode type parameters on to json.decode
+=== generic functions forward Decode bounds to json.decode
 import json
 struct P { x: int, y: int = 7 }
 fn load<T: Decode>(text: str) -> Result<T> { json.decode(text) }
@@ -700,7 +700,7 @@ P(x: 1, y: 7)
 (P(x: 3, y: 7), P(x: 2, y: 7))
 Ok((2, 1))
 
-=== Decode dictionaries build on the dictionaries of type parameters
+=== Decode dictionaries are built from type parameter dictionaries
 import json
 struct P { x: int, tag: str = "t\(1 + 1)" }
 struct Page<T> { items: [T], next: str? = None }
@@ -739,7 +739,7 @@ Tree(value: "a", kids: [Tree(value: "b", kids: [Tree(value: "c", kids: [])])])
 Ok(Some(P(x: 7, tag: "t2")))
 Err(Error(message: "$.items[0].items[0].x: expected int", kind: "parse"))
 
-=== recursion that nests Decode dictionaries builds each level
+=== nested Decode dictionaries across deep recursive calls
 import json
 fn deep<T: Decode>(n: int, witness: [T]) -> int {
     if n == 0 {
@@ -762,7 +762,7 @@ false
 false
 1000
 
-=== functions with Decode type parameters are values
+=== generic functions with Decode bounds as first-class values
 import json
 fn load<T: Decode>(text: str) -> Result<[T]> { json.decode(text) }
 fn loader<T: Decode>(x: T?) -> fn(str) -> Result<[T]> { load }
@@ -777,13 +777,13 @@ Ok([1, 2])
 Ok("a")
 Ok([true])
 
-=== a function value needs the type argument of its dictionary
+=== taking a Decode-bounded function as a value requires a known type argument
 fn size<T: Decode>(x: int) -> int { x }
 let f = size
 --- error
 2: cannot infer the type that must implement `Decode`; add a type annotation
 
-=== decode cannot build sets, maps or types whose type arguments lack required traits
+=== json.decode requires Hash on decoded sets, map keys, and bounded types
 import json
 struct Bag<T: Hash> { items: Set<T> }
 struct Outer<U> { b: Bag<U> }

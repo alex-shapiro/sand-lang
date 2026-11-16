@@ -2,9 +2,9 @@
 //!
 //! A constructed type implements a derived trait if its required type arguments
 //! implement that trait. [`Checker::derived_required_params`] returns the
-//! required type parameter indices for each type constructor: all type
-//! parameters for tuples and collections, and the type parameters used by
-//! fields or variant payloads for structs and enums.
+//! required type parameter indices for each type constructor. Tuples and
+//! collections require every type parameter. Structs and enums require only the
+//! type parameters that appear in fields or variant payloads.
 
 use super::traits::Unmet;
 use super::{Checker, Ctor, ctor_of};

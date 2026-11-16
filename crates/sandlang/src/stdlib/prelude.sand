@@ -308,24 +308,27 @@ pub trait Ord: Eq {}
 /// implement `Hash`.
 pub trait Hash: Eq {}
 
-/// Converts a value into an external format, such as JSON text.
+/// Encodes values into an external format such as JSON.
 ///
-/// The compiler derives `Encode` for the built-in data types, `never`, and
-/// each struct and enum whose parts implement `Encode`. A struct whose `init`
-/// parameters differ from its fields does not derive `Encode`. An `impl`
-/// replaces the derived implementation for its type.
+/// The compiler derives `Encode` for `never` and for tuples, structs, and
+/// enums whose components implement `Encode`. For a struct that declares
+/// `init`, the compiler derives `Encode` only if the `init` parameters match
+/// the struct fields. Write an `impl` block to override the derived
+/// implementation.
 pub trait Encode {
     /// Writes `self` to `encoder` as a single value.
-    /// Returns an error if `self` cannot be encoded.
+    ///
+    /// Fails if `self` cannot be encoded.
     native fn encode(self, encoder: Encoder) -> Result<()>
 }
 
-/// Builds a value from an external format, such as JSON text.
+/// Decodes values from an external format such as JSON.
 ///
-/// The compiler derives `Decode` for the built-in data types, `never`, and
-/// each struct and enum whose parts implement `Decode`. A struct that
-/// declares `init` decodes the parameters of `init` and calls it. An `impl`
-/// replaces the derived implementation for its type.
+/// The compiler derives `Decode` for `never` and for tuples, structs, and
+/// enums whose components implement `Decode`. If a struct declares `init`, the
+/// derived implementation decodes the `init` parameters. It then calls `init`
+/// to construct the struct. Write an `impl` block to override the derived
+/// implementation.
 pub trait Decode {
     /// Reads a value of type `Self` from `decoder`.
     native fn decode(decoder: Decoder) -> Result<Self>
@@ -354,24 +357,29 @@ impl<T: Decode> Decode for [T] {}
 impl<T: Decode + Hash> Decode for Set<T> {}
 impl<K: Decode + Hash, V: Decode> Decode for [K: V] {}
 
-/// Encodes an argument of a native function that takes a host `Value`.
+/// Encodes `value` as a host `Value` for a native function call.
 native fn encode_arg<T: Encode>(value: T) -> EncodedArg
 
 extend Encoder {
-    /// Writes `value` as the single value of this encoder. Fails with kind
-    /// `"invalid"` if the encoder already has a value, or if its `encode`
-    /// call has returned.
+    /// Writes `value` as the output of `self`.
+    ///
+    /// An `Encoder` accepts a single value during its `encode` call. Fails
+    /// with kind `"invalid"` if called again or after that call returns.
     pub native fn encode<T: Encode>(self, value: T) -> Result<()>
 }
 
 extend Decoder {
-    /// Reads the single value of this decoder as a `T`. Fails with kind
-    /// `"invalid"` if the decoder already gave its value, or if its `decode`
-    /// call has returned.
+    /// Reads the input of `self` as a value of type `T`.
+    ///
+    /// A `Decoder` reads a single value during its `decode` call. Fails with
+    /// kind `"invalid"` if called again or after that call returns.
     pub native fn decode<T: Decode>(self) -> Result<T>
 
-    /// Returns the kind of the value that `decode` would read, without
-    /// reading it. A JSON object key has kind `Str`.
+    /// Returns the kind of the next input value without consuming it.
+    ///
+    /// Returns `InputKind.Str` for a JSON object key. Fails with kind
+    /// `"invalid"` after `decode` consumes the value or after the `decode`
+    /// call returns.
     pub native fn kind(self) -> Result<InputKind>
 }
 

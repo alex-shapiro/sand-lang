@@ -15,7 +15,7 @@ enum Ty {
     UnitEnum,
     Rec,
     Keyed,
-    /// `struct Valid { a: int }` with an `init` method, which decoding calls.
+    /// `struct Valid { a: int }` with an `init` constructor called during decoding.
     Valid,
     Fn,
     Task,
@@ -27,7 +27,7 @@ enum Ty {
     Tuple(Vec<Ty>),
     Wrap(Box<Ty>),
     Tree(Box<Ty>),
-    /// `struct Bag<T> { s: Set<T> }`, which requires `T: Hash`.
+    /// `struct Bag<T> { s: Set<T> }` requiring `T: Hash`.
     Bag(Box<Ty>),
     Param,
 }
@@ -142,8 +142,8 @@ fn ty() -> impl Strategy<Value = Ty> {
     ty_with(0, 1)
 }
 
-/// Generates types with type parameter `T` weighted by `param`, and non-`Hash`
-/// or non-`Decode` types weighted by `bad`.
+/// Generates types with type parameter `T` weighted by `param` and invalid leaf
+/// or container types weighted by `bad`.
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
@@ -219,8 +219,8 @@ proptest! {
                     else { None }
                 };
                 prop_assert!(ds.iter().all(|d| trait_of(d).is_some()), "{ds:?}\n{src}");
-                // The checker reports the first missing bound of an impl, so a missing `Hash` can
-                // hide a missing `Decode`, and the reverse.
+                // The checker stops at the first unsatisfied bound on an `impl` block.
+                // Either missing trait diagnostic can therefore suppress the other.
                 let (decode, hash) = (ds.iter().any(|d| trait_of(d) == Some(true)), ds.iter().any(|d| trait_of(d) == Some(false)));
                 if t.well_formed() {
                     prop_assert!(decode && !hash, "{:?}\n{}", ds, src);
@@ -309,7 +309,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn decode_dictionaries_build_on_the_dictionaries_of_type_parameters(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
+    fn decode_dictionaries_are_built_from_type_parameter_dictionaries(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
         let full = ctx.subst(&arg);
         let mut rng = Rng(seed);
         let texts: Vec<String> = (0..8).map(|i| format!("{:?}", json_text(&full, &mut rng, 0, [1000, 12][i % 2]))).collect();
