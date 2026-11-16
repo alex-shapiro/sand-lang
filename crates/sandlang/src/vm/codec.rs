@@ -2,7 +2,7 @@
 //!
 //! Each walker processes a value part by part. For a structural
 //! implementation, the walker derives each part's dictionary from the outer
-//! dictionary and its [`CodecShape`]. It then processes the part in Rust. If a
+//! dictionary and its [`Shape`]. It then processes the part in Rust. If a
 //! part uses a custom trait method, an `init` constructor, or a computed
 //! default, the walker yields a [`Callback`] to the scheduler.
 //!
@@ -14,7 +14,7 @@
 //! Only an initial synchronous pass before any suspension can return a
 //! retryable limit error to the VM.
 
-use super::bytecode::{CODEC_SHAPE_SLOT, CodecShape, DecodeFill, PartTemplate, Program, ShapeKind};
+use super::bytecode::{PartFill, PartTemplate, Program, SHAPE_SLOT, Shape, ShapeKind};
 use super::meter::SLOW_BYTES_PER_UNIT;
 use super::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
 use super::{Fail, Vm, WaitKind};
@@ -184,7 +184,7 @@ fn eval_template(vm: &mut Vm, template: &PartTemplate, outer_dict: VmValue) -> R
 
 /// Dispatch target extracted from a codec dictionary.
 enum CodecDispatch {
-    /// Structural walk for the [`CodecShape`] at this index.
+    /// Structural walk for the [`Shape`] at this index.
     Structural(u32),
     /// Custom Sand method closure or native function.
     Custom(VmValue),
@@ -192,7 +192,7 @@ enum CodecDispatch {
 
 fn codec_dispatch(vm: &Vm, dict: VmValue) -> Result<CodecDispatch, Fail> {
     match vm.heap.get(dict) {
-        Obj::Tuple(items) => match (items.first(), items.get(CODEC_SHAPE_SLOT)) {
+        Obj::Tuple(items) => match (items.first(), items.get(SHAPE_SLOT)) {
             (_, Some(&VmValue::Int(shape_idx))) => Ok(CodecDispatch::Structural(shape_idx as u32)),
             (Some(&callee), _) => Ok(CodecDispatch::Custom(callee)),
             (None, _) => Err(Fail::internal("a codec dictionary is empty")),
@@ -201,12 +201,12 @@ fn codec_dispatch(vm: &Vm, dict: VmValue) -> Result<CodecDispatch, Fail> {
     }
 }
 
-/// Looks up `shape_idx` in `prog.codec_shapes`.
+/// Looks up `shape_idx` in `prog.shapes`.
 ///
 /// Validates the index because host callers can supply arbitrary dictionary
 /// tuples.
-fn shape(prog: &Program, shape_idx: u32) -> Result<&CodecShape, Fail> {
-    prog.codec_shapes.get(shape_idx as usize).ok_or_else(|| Fail::internal("unknown codec shape"))
+fn shape(prog: &Program, shape_idx: u32) -> Result<&Shape, Fail> {
+    prog.shapes.get(shape_idx as usize).ok_or_else(|| Fail::internal("unknown codec shape"))
 }
 
 /// Returns a `"limit"` error for values nested deeper than
@@ -425,7 +425,7 @@ enum EncodeKind {
     /// Map entries. Even indices visit keys. Odd indices visit values.
     Map,
     /// Variant payload fields. Their parts start at `part_base` in
-    /// `CodecShape::parts`.
+    /// `Shape::parts`.
     Payload { part_base: u32 },
     /// Payload of `Option.Some`.
     Some,
@@ -721,7 +721,7 @@ enum SlotTarget {
     /// Parameters of a struct `init` constructor.
     Init(Arc<[String]>),
     /// Variant `id`. Its payload parts start at `part_base` in
-    /// `CodecShape::parts`.
+    /// `Shape::parts`.
     Variant { id: u32, part_base: u32, named: bool },
 }
 
@@ -737,7 +737,7 @@ impl SlotTarget {
         }
     }
 
-    /// Returns the starting index in `CodecShape::parts` for slot 0.
+    /// Returns the starting index in `Shape::parts` for slot 0.
     fn part_base(&self) -> u32 {
         match self {
             SlotTarget::Variant { part_base, .. } => *part_base,
@@ -1031,8 +1031,8 @@ impl DecodeWalker {
         {
             let part_base = target.part_base();
             let names = target.names(prog);
-            let value = match shape.fills.get(missing).cloned().unwrap_or(DecodeFill::Required) {
-                DecodeFill::Required => {
+            let value = match shape.fills.get(missing).cloned().unwrap_or(PartFill::Required) {
+                PartFill::Required => {
                     let part_dict = self.state.part_dict(vm, prog, shape_idx, part_base + missing as u32, dict)?;
                     match codec_dispatch(vm, part_dict)? {
                         CodecDispatch::Structural(part_shape) if matches!(shape_kind(vm, part_shape)?, ShapeKind::Option) => {
@@ -1044,8 +1044,8 @@ impl DecodeWalker {
                         },
                     }
                 }
-                DecodeFill::Const(const_val) => constant(vm, &const_val)?,
-                DecodeFill::Call(helper_const, dicts) => {
+                PartFill::Const(const_val) => constant(vm, &const_val)?,
+                PartFill::Call(helper_const, dicts) => {
                     let mut args = dicts.iter().map(|template| eval_template(vm, template, dict)).collect::<Result<Vec<_>, _>>()?;
                     // Pass preceding parameter values to an `init` parameter default helper.
                     if matches!(target, SlotTarget::Init(_)) {

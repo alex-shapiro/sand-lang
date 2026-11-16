@@ -9,14 +9,14 @@ mod init_order;
 mod inline;
 
 use crate::check::budget::CompileBudget;
-use crate::check::codec::{CodecFill, CodecImpl};
 use crate::check::persist::{PMap, PVec};
+use crate::check::structural::{StructView, StructuralFill, StructuralImpl};
 use crate::check::{CheckedProgram, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
 use crate::native::codec::{NativeCodec, NativeCodecs};
-use crate::types::{Builtin, FnId, ImplId, Opaque, Ty, TypeArena, TypeDefId, TypeDefKind, TypeId};
+use crate::types::{FnId, ImplId, Opaque, Ty, TypeArena, TypeDefId, TypeDefKind, TypeId};
 use crate::vm::bytecode::*;
 use crate::vm::value::FxHashMap;
 use init_order::{InitOrder, Time};
@@ -61,12 +61,11 @@ struct Compiler<'a> {
     ctor_wrappers: PMap<CtorTarget, u32>,
     /// Constant trait dictionaries by their elements.
     dict_consts: PMap<Vec<u32>, u32>,
-    /// Index in `Program::codec_shapes` for each structural codec
-    /// implementation.
-    codec_shapes: PMap<ImplId, u32>,
-    /// Structural codec `(impl_id, shape_idx)` pairs queued for
-    /// [`Compiler::lower_codec_shapes`].
-    pending_codec_shapes: Vec<(ImplId, u32)>,
+    /// Index in `Program::shapes` for each structural implementation.
+    shapes: PMap<ImplId, u32>,
+    /// Structural `(impl_id, shape_idx)` pairs queued for
+    /// [`Compiler::lower_shapes`].
+    pending_shapes: Vec<(ImplId, u32)>,
     errors: Vec<Diag>,
     recv_native: Option<u32>,
     /// Natives compiled to dedicated instructions.
@@ -260,7 +259,7 @@ pub(crate) struct Incremental {
     consts: ConstTable,
     ctor_wrappers: PMap<CtorTarget, u32>,
     dict_consts: PMap<Vec<u32>, u32>,
-    codec_shapes: PMap<ImplId, u32>,
+    shapes: PMap<ImplId, u32>,
     /// Number of tests compiled.
     tests: usize,
     /// The bodies of the functions whose calls are inlined.
@@ -274,7 +273,7 @@ pub(crate) struct ProgramMark {
     types: usize,
     variants: usize,
     templates: usize,
-    codec_shapes: usize,
+    shapes: usize,
     switches: usize,
     tests: usize,
     nglobals: usize,
@@ -290,7 +289,7 @@ impl ProgramMark {
             types: p.types.len(),
             variants: p.variants.len(),
             templates: p.templates.len(),
-            codec_shapes: p.codec_shapes.len(),
+            shapes: p.shapes.len(),
             switches: p.switches.len(),
             tests: p.tests.len(),
             nglobals: p.nglobals,
@@ -308,7 +307,7 @@ impl ProgramMark {
         p.enum_types.retain(|_, &mut first| first < self.variants as u32);
         p.struct_types.retain(|_, &mut def| def < self.types as u32);
         p.templates.truncate(self.templates);
-        p.codec_shapes.truncate(self.codec_shapes);
+        p.shapes.truncate(self.shapes);
         p.switches.truncate(self.switches);
         p.tests.truncate(self.tests);
         p.nglobals = self.nglobals;
@@ -356,8 +355,8 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         consts: std::mem::take(&mut inc.consts),
         ctor_wrappers: std::mem::take(&mut inc.ctor_wrappers),
         dict_consts: std::mem::take(&mut inc.dict_consts),
-        codec_shapes: std::mem::take(&mut inc.codec_shapes),
-        pending_codec_shapes: Vec::new(),
+        shapes: std::mem::take(&mut inc.shapes),
+        pending_shapes: Vec::new(),
         errors: Vec::new(),
         recv_native: input.natives.id("prelude.Channel.recv"),
         inline: HashMap::new(),
@@ -369,7 +368,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
     inc.consts = c.consts;
     inc.ctor_wrappers = c.ctor_wrappers;
     inc.dict_consts = c.dict_consts;
-    inc.codec_shapes = c.codec_shapes;
+    inc.shapes = c.shapes;
     if c.errors.is_empty() { Ok(entry) } else { Err(c.errors) }
 }
 
@@ -478,7 +477,7 @@ impl<'a> Compiler<'a> {
                 self.compile_fn(i as FnId, p, body);
             }
         }
-        self.lower_codec_shapes();
+        self.lower_shapes();
         // Entry: run the module initializers in order.
         let mut code = Vec::new();
         for &init in inits {
@@ -2721,62 +2720,56 @@ impl<'a> Compiler<'a> {
     /// Returns the leading constant-pool indices for the dictionary of
     /// `impl_id`.
     ///
-    /// Includes each method function constant, followed by the codec shape
-    /// index if `impl_id` is structural.
+    /// Includes each method function constant, followed by the shape index if
+    /// `impl_id` is structural.
     fn dict_header_consts(&mut self, impl_id: ImplId) -> Vec<u32> {
         let slots = self.cp.impls[impl_id as usize].slots.clone();
         let mut header_consts: Vec<u32> = slots.iter().map(|&fid| self.fn_const(fid)).collect();
-        if self.cp.is_structural_codec_impl(impl_id) {
-            debug_assert_eq!(header_consts.len(), crate::vm::bytecode::CODEC_SHAPE_SLOT);
-            let shape_idx = self.codec_shape_idx(impl_id);
+        if self.cp.is_structural_impl(impl_id) {
+            debug_assert_eq!(header_consts.len(), crate::vm::bytecode::SHAPE_SLOT);
+            let shape_idx = self.shape_idx_of(impl_id);
             header_consts.push(self.const_idx(Const::Int(i64::from(shape_idx))));
         }
         header_consts
     }
 
-    /// Returns the `Program::codec_shapes` index for structural implementation
+    /// Returns the `Program::shapes` index for structural implementation
     /// `impl_id`.
     ///
     /// Reserves a placeholder slot on first access to break cycles across
-    /// recursive types. [`Compiler::lower_codec_shapes`] populates the slot
+    /// recursive types. [`Compiler::lower_shapes`] populates the slot
     /// afterward.
-    fn codec_shape_idx(&mut self, impl_id: ImplId) -> u32 {
-        if let Some(&shape_idx) = self.codec_shapes.get(&impl_id) {
+    fn shape_idx_of(&mut self, impl_id: ImplId) -> u32 {
+        if let Some(&shape_idx) = self.shapes.get(&impl_id) {
             return shape_idx;
         }
-        let shape_idx = self.prog.codec_shapes.len() as u32;
-        self.prog.codec_shapes.push(CodecShape {
-            kind: ShapeKind::Never,
-            parts: Vec::new(),
-            fills: Vec::new(),
-            init: None,
-            slot_index: None,
-        });
-        self.codec_shapes.insert(impl_id, shape_idx);
-        self.pending_codec_shapes.push((impl_id, shape_idx));
+        let shape_idx = self.prog.shapes.len() as u32;
+        self.prog.shapes.push(Shape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None, slot_index: None });
+        self.shapes.insert(impl_id, shape_idx);
+        self.pending_shapes.push((impl_id, shape_idx));
         shape_idx
     }
 
-    /// Populates every pending shape queued by [`Compiler::codec_shape_idx`].
-    fn lower_codec_shapes(&mut self) {
-        while let Some((impl_id, shape_idx)) = self.pending_codec_shapes.pop() {
-            let shape = self.lower_codec_shape(impl_id);
-            self.prog.codec_shapes[shape_idx as usize] = shape;
+    /// Populates every pending shape queued by [`Compiler::shape_idx_of`].
+    fn lower_shapes(&mut self) {
+        while let Some((impl_id, shape_idx)) = self.pending_shapes.pop() {
+            let shape = self.lower_shape(impl_id);
+            self.prog.shapes[shape_idx as usize] = shape;
         }
     }
 
-    fn lower_codec_shape(&mut self, impl_id: ImplId) -> CodecShape {
+    fn lower_shape(&mut self, impl_id: ImplId) -> Shape {
         let cp = self.cp;
         let imp = &cp.impls[impl_id as usize];
-        let is_decode = cp.traits[imp.trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
-        let codec: &'a CodecImpl = match imp.codec.as_deref() {
+        let builds_values = cp.traits[imp.trait_ref.trait_id as usize].structural == Some(StructView::Constructor);
+        let structural: &'a StructuralImpl = match imp.structural.as_deref() {
             Some(c) => c,
             None => {
                 self.errors.push(Diag::error(imp.span, "internal error: a structural impl has no parts"));
-                return CodecShape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None, slot_index: None };
+                return Shape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None, slot_index: None };
             }
         };
-        let parts = codec.parts.iter().map(|dict_expr| self.part_template(dict_expr)).collect();
+        let parts = structural.parts.iter().map(|dict_expr| self.part_template(dict_expr)).collect();
         let kind = match cp.arena.get(imp.target) {
             Ty::Never => ShapeKind::Never,
             Ty::Unit => ShapeKind::Unit,
@@ -2794,8 +2787,8 @@ impl<'a> Compiler<'a> {
             Ty::Named(def_id, _) => {
                 let def = &cp.types[def_id as usize];
                 match (def.native_codecs, &def.kind) {
-                    (Some(NativeCodecs { encode: Some(NativeCodec::Manual(f)), .. }), _) if !is_decode => ShapeKind::ManualEncode(f),
-                    (Some(NativeCodecs { decode: Some(NativeCodec::Manual(f)), .. }), _) if is_decode => ShapeKind::ManualDecode(f),
+                    (Some(NativeCodecs { encode: Some(NativeCodec::Manual(f)), .. }), _) if !builds_values => ShapeKind::ManualEncode(f),
+                    (Some(NativeCodecs { decode: Some(NativeCodec::Manual(f)), .. }), _) if builds_values => ShapeKind::ManualDecode(f),
                     _ if def_id == cp.wk.option => ShapeKind::Option,
                     (_, TypeDefKind::Opaque(Opaque::Value(info))) => ShapeKind::Native(def_id, info.parse),
                     (_, TypeDefKind::Enum { .. }) => {
@@ -2811,42 +2804,42 @@ impl<'a> Compiler<'a> {
             }
         };
         let field_consts: Vec<Option<&crate::types::ConstVal>> = match &kind {
-            ShapeKind::Struct(def_id) if codec.init.is_none() => {
+            ShapeKind::Struct(def_id) if structural.init.is_none() => {
                 cp.types[*def_id as usize].fields().iter().map(|f| f.const_default.as_deref()).collect()
             }
             _ => Vec::new(),
         };
-        let fills = codec
+        let fills = structural
             .fills
             .iter()
             .enumerate()
             .map(|(i, fill)| match (field_consts.get(i).copied().flatten(), fill) {
-                (Some(c), _) | (None, CodecFill::Const(c)) => DecodeFill::Const(c.clone()),
-                (None, CodecFill::Helper(helper, dicts)) => {
+                (Some(c), _) | (None, StructuralFill::Const(c)) => PartFill::Const(c.clone()),
+                (None, StructuralFill::Helper(helper, dicts)) => {
                     let dicts = dicts.iter().map(|dict_expr| self.part_template(dict_expr)).collect();
-                    DecodeFill::Call(self.fn_const(*helper), dicts)
+                    PartFill::Call(self.fn_const(*helper), dicts)
                 }
-                (None, CodecFill::Required) => DecodeFill::Required,
+                (None, StructuralFill::Required) => PartFill::Required,
             })
             .collect();
-        let init = codec.init.as_ref().map(|(func, dicts)| {
+        let init = structural.init.as_ref().map(|(func, dicts)| {
             let dicts = dicts.iter().map(|dict_expr| self.part_template(dict_expr)).collect();
             let names = cp.fns[*func as usize].params.iter().map(|p| cp.name(p.name).to_string()).collect();
             InitCall { func: self.fn_const(*func), dicts, names }
         });
         let slot_names: Vec<String> = match (&kind, &init) {
             (ShapeKind::Struct(_), Some(init)) => init.names.to_vec(),
-            (ShapeKind::Struct(def_id), None) if is_decode => {
+            (ShapeKind::Struct(def_id), None) if builds_values => {
                 cp.types[*def_id as usize].fields().iter().map(|f| cp.name(f.name).to_string()).collect()
             }
             _ => Vec::new(),
         };
         let slot_index =
             (slot_names.len() > MAX_SCANNED_SLOTS).then(|| slot_names.into_iter().enumerate().map(|(i, n)| (n, i as u32)).collect());
-        CodecShape { kind, parts, fills, init, slot_index }
+        Shape { kind, parts, fills, init, slot_index }
     }
 
-    /// Lowers `dict_expr` into a [`PartTemplate`] relative to the outer codec
+    /// Lowers `dict_expr` into a [`PartTemplate`] relative to the outer
     /// dictionary.
     fn part_template(&mut self, dict_expr: &'a HExpr) -> PartTemplate {
         if let Some(k) = self.const_dict(dict_expr) {
@@ -2863,7 +2856,7 @@ impl<'a> Compiler<'a> {
                 _ => PartTemplate::Field(Box::new(self.part_template(obj)), *index),
             },
             _ => {
-                self.errors.push(Diag::error(dict_expr.span, "internal error: a codec part has no dictionary"));
+                self.errors.push(Diag::error(dict_expr.span, "internal error: a structural part has no dictionary"));
                 PartTemplate::Const(0)
             }
         }

@@ -1,7 +1,6 @@
 //! Name resolution and type checking: AST to typed HIR.
 
 pub mod budget;
-pub mod codec;
 mod derive;
 mod docs;
 mod expr;
@@ -10,6 +9,7 @@ pub(crate) mod help;
 mod pat;
 pub mod persist;
 mod resources;
+pub mod structural;
 pub mod traits;
 mod unify;
 pub(crate) mod verify;
@@ -401,8 +401,8 @@ impl CheckedProgram {
 
     /// Returns `true` if implementation `impl_id` implements `Encode` or
     /// `Decode` with the trait's native default method.
-    pub fn is_structural_codec_impl(&self, impl_id: ImplId) -> bool {
-        codec::is_structural_codec_impl(&self.traits, &self.impls[impl_id as usize])
+    pub fn is_structural_impl(&self, impl_id: ImplId) -> bool {
+        structural::is_structural_impl(&self.traits, &self.impls[impl_id as usize])
     }
 
     /// Returns the Rust `TypeId` bound to type definition `d`, if any.
@@ -636,15 +636,14 @@ pub struct Checker {
     /// Set while checking an expression for `Session::type_of`.
     pub(crate) type_query: Option<TypeQuery>,
     pub(crate) builtins: [Option<TraitId>; Builtin::ALL.len()],
-    /// Cached structural codec implementations for `never`, indexed by
-    /// [`Builtin`].
-    pub(crate) never_codec_impls: [Option<ImplId>; Builtin::ALL.len()],
-    /// Diagnostic reason why a type definition lacks a structural codec
-    /// implementation.
-    pub(crate) codec_failure_reasons: PMap<(TraitId, TypeDefId), Arc<str>>,
-    /// Active collector for type parameter bounds during structural codec
+    /// Cached structural implementations for `never`, by trait.
+    pub(crate) never_structural_impls: PMap<TraitId, ImplId>,
+    /// Diagnostic reason why a type definition lacks a structural
+    /// implementation of a trait.
+    pub(crate) structural_failure_reasons: PMap<(TraitId, TypeDefId), Arc<str>>,
+    /// Active collector for type parameter bounds during structural
     /// derivation.
-    pub(crate) codec_bound_collector: Option<codec::CodecBoundCollector>,
+    pub(crate) structural_bound_collector: Option<structural::StructuralBoundCollector>,
     /// The prelude's `Iterator` trait and `Iter` struct, which `for` loops use.
     pub(crate) iter_trait: Option<TraitId>,
     /// The prelude's `Close` trait, which `use` bindings call.
@@ -708,9 +707,9 @@ impl Default for Checker {
             type_query: None,
             budget: Arc::new(CompileBudget::default()),
             builtins: [None; Builtin::ALL.len()],
-            never_codec_impls: [None; Builtin::ALL.len()],
-            codec_failure_reasons: PMap::new(),
-            codec_bound_collector: None,
+            never_structural_impls: PMap::new(),
+            structural_failure_reasons: PMap::new(),
+            structural_bound_collector: None,
             iter_trait: None,
             close_trait: None,
             flows: PMap::new(),
@@ -1386,7 +1385,7 @@ impl Checker {
         if self.allows_native() {
             self.declare_undeclared_natives(first_fn);
         }
-        self.derive_codec_impls(first_type, first_impl);
+        self.derive_structural_impls(first_type, first_impl);
         for id in impl_ids {
             self.check_impl_supertraits(id);
         }

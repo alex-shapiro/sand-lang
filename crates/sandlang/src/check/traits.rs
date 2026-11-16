@@ -21,6 +21,7 @@
 //! projection from a parameter dictionary, or an [`HKind::Dict`] constructor.
 
 use super::expr::mk;
+use super::structural::StructView;
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -45,6 +46,9 @@ pub struct TraitDef {
     pub builtin: Option<Builtin>,
     /// Indicates whether this trait or any of its supertraits declares methods.
     pub has_dict: bool,
+    /// The parts that a structural implementation visits in a struct, if the
+    /// trait has a native default method. See [`StructView`].
+    pub structural: Option<StructView>,
 }
 
 impl TraitDef {
@@ -67,11 +71,11 @@ pub struct ImplDef {
     /// the `impl` dictionary.
     pub evidence: Vec<(TypeId, TraitRef)>,
     /// Indicates whether a later REPL input replaced this implementation or
-    /// structural codec derivation removed it.
+    /// structural derivation removed it.
     pub replaced: bool,
-    /// Resolved codec metadata for a structural implementation. See
-    /// [`Checker::is_structural_codec_impl`].
-    pub codec: Option<Arc<super::codec::CodecImpl>>,
+    /// Resolved parts of a structural implementation. See
+    /// [`Checker::is_structural_impl`].
+    pub structural: Option<Arc<super::structural::StructuralImpl>>,
     /// Indicates whether the checker generated this implementation.
     pub derived: bool,
 }
@@ -389,6 +393,7 @@ impl Checker {
             methods: Vec::new(),
             builtin: builtin.filter(|_| in_prelude),
             has_dict: !t.methods.is_empty(),
+            structural: None,
         });
         let id = (self.traits.len() - 1) as TraitId;
         if let Some(b) = builtin.filter(|_| in_prelude) {
@@ -483,7 +488,31 @@ impl Checker {
                 format!("the `Num` trait must declare the methods {names} in this order, because `native::Num` reads them by position"),
             );
         }
+        self.traits[id as usize].structural = self.structural_view(id, d, &methods);
         self.traits[id as usize].methods = methods;
+    }
+
+    /// Returns the [`StructView`] of trait `id` if its method has a native
+    /// default.
+    ///
+    /// A structural dictionary stores its shape index in the slot after the
+    /// method, and the checker derives implementations without trait
+    /// arguments. The trait must therefore declare a single method, take no
+    /// type parameters, and have no supertraits with methods.
+    fn structural_view(&mut self, id: TraitId, d: &ast::TraitDecl, methods: &[TraitMethod]) -> Option<StructView> {
+        let is_native = |m: &TraitMethod| m.default.is_some_and(|f| matches!(self.fns[f as usize].kind, FnKind::Native(_)));
+        if !methods.iter().any(is_native) {
+            return None;
+        }
+        if methods.len() != 1 || !self.traits[id as usize].generics.is_empty() || self.supertraits_with_dicts(id).next().is_some() {
+            let msg = "a trait with a native default method must declare a single method, take no type parameters, and have no supertraits with methods";
+            self.error(d.name.span, msg);
+            return None;
+        }
+        let sig = &self.fns[methods[0].sig as usize];
+        let self_param = self.traits[id as usize].self_param;
+        let returns_self = self.arena.any(sig.ret, &mut |t| matches!(t, Ty::Param(p) if p == self_param));
+        Some(if !sig.has_self && returns_self { StructView::Constructor } else { StructView::Fields })
     }
 
     /// Declares native default method `method` for trait `trait_id` with
@@ -606,7 +635,7 @@ impl Checker {
             slots: Vec::new(),
             evidence,
             replaced: false,
-            codec: None,
+            structural: None,
             derived: false,
         });
         add_impl(&mut self.impls_by, key, id);
@@ -1133,8 +1162,8 @@ impl Checker {
         match self.ty(ty) {
             Ty::Error => return Ok(dict_expr(HKind::Error, span)),
             Ty::Never if !self.has_dict(&tr) => return Ok(dict_expr(HKind::Unit, span)),
-            Ty::Never if self.is_codec_trait(tr.trait_id) => {
-                return Ok(dict_expr(HKind::Dict { impl_id: self.never_codec_impl(tr), args: Vec::new() }, span));
+            Ty::Never if self.is_structural_trait(tr.trait_id) => {
+                return Ok(dict_expr(HKind::Dict { impl_id: self.never_structural_impl(tr), args: Vec::new() }, span));
             }
             Ty::Var(_) => {
                 let mut m = Unmet::new(format!("cannot infer the type that must implement `{}`", self.show_trait(&tr)));
@@ -1143,7 +1172,7 @@ impl Checker {
                 return Err(m);
             }
             Ty::Param(p) => {
-                if let Some(collector) = &mut self.codec_bound_collector
+                if let Some(collector) = &mut self.structural_bound_collector
                     && collector.type_params.contains(&p)
                 {
                     if !collector.bounds.contains(&(ty, tr)) {
@@ -1305,7 +1334,7 @@ impl Checker {
         let not_impl = |c: &Checker| {
             let mut m = Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
             if let Ty::Named(d, _) = c.arena.get(ty) {
-                m.because = c.codec_failure_reasons.get(&(tr.trait_id, d)).map(|r| r.to_string());
+                m.because = c.structural_failure_reasons.get(&(tr.trait_id, d)).map(|r| r.to_string());
             }
             m
         };
@@ -1313,8 +1342,8 @@ impl Checker {
         if let Some(b) = self.traits[tr.trait_id as usize].builtin.filter(|b| b.is_derived()) {
             return self.resolve_derived(ty, tr, b, depth).map(|()| dict_expr(HKind::Unit, span));
         }
-        if key.0 == Ctor::Tuple && self.is_codec_trait(tr.trait_id) {
-            self.ensure_tuple_codec_impl(tr, key.1);
+        if key.0 == Ctor::Tuple && self.is_structural_trait(tr.trait_id) {
+            self.ensure_tuple_structural_impl(tr, key.1);
         }
         let ids = self.impls_by.get(&(tr.trait_id, key.0, key.1)).map(|v| v.to_vec()).unwrap_or_default();
         let targs = self.elems(tr.args);

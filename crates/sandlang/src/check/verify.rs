@@ -214,7 +214,7 @@ impl<'a> Verifier<'a> {
         }
         match self.arena.get(ty) {
             Ty::Error => Err(fail(self)),
-            Ty::Never if matches!(self.cp.traits[tr.trait_id as usize].builtin, Some(Builtin::Encode | Builtin::Decode)) => Ok(()),
+            Ty::Never if self.cp.traits[tr.trait_id as usize].structural.is_some() => Ok(()),
             Ty::Never if self.has_dict(tr) => Err(fail(self)),
             Ty::Never => Ok(()),
             Ty::Param(p) if self.param_traits(cx, p, ty).contains(&tr) => Ok(()),
@@ -586,8 +586,8 @@ fn builtin_parts(arena: &TypeArena, ty: Ty, b: Builtin) -> Option<Vec<TypeId>> {
         Ty::Float if b != Hash => Vec::new(),
         Ty::Range if b != Ord => Vec::new(),
         Ty::List(x) if b != Hash => vec![x],
-        Ty::Set(x) if matches!(b, Eq | Encode | Decode) => vec![x],
-        Ty::Map(k, v) if matches!(b, Eq | Encode | Decode) => vec![k, v],
+        Ty::Set(x) if b == Eq => vec![x],
+        Ty::Map(k, v) if b == Eq => vec![k, v],
         Ty::Tuple(l) => arena.list(l).to_vec(),
         _ => return None,
     })
