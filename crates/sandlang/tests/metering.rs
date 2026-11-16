@@ -1208,21 +1208,21 @@ tuple: [1,"a",2.5]
 pair of ints: [1,2]
     encode 4, indent 4 for 12 bytes, to_json 7, Json parameter 5, to_value 3
 set: [3,1,2]
-    encode 5, indent 5 for 17 bytes, to_json 9, Json parameter 7, to_value 4
+    encode 6, indent 6 for 17 bytes, to_json 10, Json parameter 7, to_value 5
 map with str keys: {"k":[1],"j":[]}
-    encode 7, indent 7 for 33 bytes, to_json 11, Json parameter 7, to_value 6
+    encode 8, indent 8 for 33 bytes, to_json 12, Json parameter 7, to_value 7
 map with int keys: {"2":"two","1":"one"}
-    encode 6, indent 6 for 30 bytes, to_json 10, Json parameter 5, to_value 5
+    encode 7, indent 7 for 30 bytes, to_json 11, Json parameter 5, to_value 6
 map with bool keys: {"true":1,"false":2}
-    encode 6, indent 6 for 29 bytes, to_json 11, Json parameter 5, to_value 5
+    encode 7, indent 7 for 29 bytes, to_json 12, Json parameter 5, to_value 6
 map with duration keys: {"5000000":"d"}
-    encode 4, indent 4 for 20 bytes, to_json 7, Json parameter 3, to_value 3
+    encode 5, indent 5 for 20 bytes, to_json 8, Json parameter 3, to_value 4
 map with variant keys: {"Right":1.5,"Left":2.5}
-    encode 6, indent 6 for 33 bytes, to_json 11, Json parameter 5, to_value 5
+    encode 7, indent 7 for 33 bytes, to_json 12, Json parameter 5, to_value 6
 map with date keys: {"2024-03-10":1}
-    encode 4, indent 4 for 21 bytes, to_json 7, Json parameter 3, to_value 3
+    encode 5, indent 5 for 21 bytes, to_json 8, Json parameter 3, to_value 4
 map with a key of 3000 bytes: 3006 bytes
-    encode 50, indent 50 for 3011 bytes, to_json 473, Json parameter 49, to_value 49
+    encode 51, indent 51 for 3011 bytes, to_json 474, Json parameter 49, to_value 50
 range: {"start":0,"end":3}
     encode 2, indent 2 for 28 bytes, to_json 7, Json parameter 5, to_value 1
 inclusive range: {"start":-1,"end":1,"inclusive":true}
