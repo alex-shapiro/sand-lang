@@ -160,12 +160,6 @@ impl<C: From<Fail>> HostError<C> {
 }
 
 impl HostError<Fail> {
-    /// Returns `true` if `self` stops the call at the memory limit, which a
-    /// collection can lift.
-    pub(crate) fn is_memory_limit(&self) -> bool {
-        matches!(&*self.0, HostErrorKind::Abort(f) if f.as_limit() == Some(crate::engine::LimitKind::Memory))
-    }
-
     /// Converts `self` into the error of a native function that runs before a
     /// wait.
     pub(crate) fn into_ctl_error(self) -> HostError<Ctl> {

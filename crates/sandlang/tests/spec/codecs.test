@@ -1,0 +1,203 @@
+=== custom impls nest inside custom impls and derived types
+import json
+struct Celsius { degrees: float }
+impl Encode for Celsius {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.degrees) }
+}
+impl Decode for Celsius {
+    fn decode(decoder: Decoder) -> Result<Celsius> { Ok(Celsius(degrees: decoder.decode()?)) }
+}
+struct Secret<T> { v: T }
+impl<T: Encode> Encode for Secret<T> {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(["secret": self.v]) }
+}
+impl<T: Decode> Decode for Secret<T> {
+    fn decode(decoder: Decoder) -> Result<Secret<T>> {
+        let m: [str: T] = decoder.decode()?
+        Ok(Secret(v: m["secret"]))
+    }
+}
+struct Chain { n: int, next: Chain? }
+impl Encode for Chain {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode((self.n, self.next)) }
+}
+impl Decode for Chain {
+    fn decode(decoder: Decoder) -> Result<Chain> {
+        let (n, next): (int, Chain?) = decoder.decode()?
+        Ok(Chain(n: n, next: next))
+    }
+}
+let s = Secret(v: [Celsius(degrees: 1.5), Celsius(degrees: 2.5)])
+let text = json.encode(s)?
+print(text)
+let back: Secret<[Celsius]> = json.decode(text)?
+print(back)
+let c = Chain(n: 1, next: Some(Chain(n: 2, next: Some(Chain(n: 3, next: None)))))
+let ctext = json.encode(c)?
+print(ctext)
+let cback: Chain = json.decode(ctext)?
+print(cback == c)
+--- stdout
+{"secret":[1.5,2.5]}
+Secret(v: [Celsius(degrees: 1.5), Celsius(degrees: 2.5)])
+[1,[2,[3,null]]]
+true
+
+=== an Encoder takes exactly one value during its call
+import json
+struct Twice { a: int }
+impl Encode for Twice {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        encoder.encode(1)?
+        encoder.encode(2)
+    }
+}
+struct Ignored { a: int }
+impl Encode for Ignored {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        encoder.encode(1)?
+        let _ = encoder.encode(2)
+        Ok(())
+    }
+}
+struct Nothing { a: int }
+impl Encode for Nothing {
+    fn encode(self, encoder: Encoder) -> Result<()> { Ok(()) }
+}
+var kept: Encoder? = None
+struct Keep { a: int }
+impl Encode for Keep {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        kept = Some(encoder)
+        encoder.encode(self.a)
+    }
+}
+struct Fails { a: int }
+impl Encode for Fails {
+    fn encode(self, encoder: Encoder) -> Result<()> { Err(Error(message: "no", kind: "denied")) }
+}
+print(json.encode(Twice(a: 1)))
+print(json.encode(Ignored(a: 1)))
+print(json.encode(Nothing(a: 1)))
+print(json.encode([Keep(a: 1)]))
+print(kept.unwrap().encode(5))
+print(json.encode(["x": [Fails(a: 1)]]))
+--- stdout
+Err(Error(message: "an `encode` method wrote a second value to its `Encoder`", kind: "invalid"))
+Err(Error(message: "an `encode` method wrote a second value to its `Encoder`", kind: "invalid"))
+Err(Error(message: "an `encode` method wrote no value to its `Encoder`", kind: "invalid"))
+Ok("[1]")
+Err(Error(message: "an `Encoder` accepts a value only during its `encode` call", kind: "invalid"))
+Err(Error(message: "no", kind: "denied"))
+
+=== a Decoder gives at most one value, and skips the input that a method does not read
+import json
+struct Twice { a: int }
+impl Decode for Twice {
+    fn decode(decoder: Decoder) -> Result<Twice> {
+        let a: int = decoder.decode()?
+        let b: int = decoder.decode()?
+        Ok(Twice(a: a + b))
+    }
+}
+struct Skip {}
+impl Decode for Skip {
+    fn decode(decoder: Decoder) -> Result<Skip> { Ok(Skip()) }
+}
+struct Ignored { a: int }
+impl Decode for Ignored {
+    fn decode(decoder: Decoder) -> Result<Ignored> {
+        let r: Result<str> = decoder.decode()
+        Ok(Ignored(a: 0))
+    }
+}
+struct Row { skip: Skip, n: int }
+enum Id { Num(int), Name(str) }
+impl Decode for Id {
+    fn decode(decoder: Decoder) -> Result<Id> {
+        match decoder.kind()? {
+            InputKind.Int => Ok(Id.Num(decoder.decode()?))
+            InputKind.Str => Ok(Id.Name(decoder.decode()?))
+            other => Err(Error(message: "unexpected \(other)", kind: "parse"))
+        }
+    }
+}
+struct Late { a: int }
+impl Decode for Late {
+    fn decode(decoder: Decoder) -> Result<Late> {
+        let a: int = decoder.decode()?
+        let _ = decoder.kind()?
+        Ok(Late(a: a))
+    }
+}
+let t: Result<Twice> = json.decode("1")
+print(t)
+let rows: [Row] = json.decode(r#"[{"skip": {"deep": [1, {"x": null}]}, "n": 1}, {"n": 2, "skip": "s"}]"#)?
+print(rows)
+let i: Result<Ignored> = json.decode("5")
+print(i)
+let ids: Result<[Id]> = json.decode(r#"[1, "a", 2]"#)
+print(ids)
+let bad: Result<[Id]> = json.decode("[true]")
+print(bad)
+let kinds = ["null", "true", "1", "1.5", "\"s\"", "[]", "{}"]
+struct K { k: str }
+impl Decode for K {
+    fn decode(decoder: Decoder) -> Result<K> { Ok(K(k: "\(decoder.kind()?)")) }
+}
+for text in kinds {
+    let k: K = json.decode(text)?
+    print(k.k)
+}
+let l: Result<Late> = json.decode("1")
+print(l)
+--- stdout
+Err(Error(message: "a `decode` method read a second value from its `Decoder`", kind: "invalid"))
+[Row(skip: Skip(), n: 1), Row(skip: Skip(), n: 2)]
+Err(Error(message: "$: expected str", kind: "parse"))
+Ok([Num(1), Name("a"), Num(2)])
+Err(Error(message: "$[0]: unexpected Bool", kind: "parse"))
+Null
+Bool
+Int
+Float
+Str
+List
+Map
+Err(Error(message: "a `decode` method asked for the kind of a value that it read", kind: "invalid"))
+
+=== an impl for one instantiation and the impls of never
+import json
+struct Wrapper<T> { v: T }
+impl Encode for Wrapper<int> {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.v * 100) }
+}
+print(json.encode(Wrapper(v: 2))?)
+let none: [never] = []
+print(json.encode(none)?)
+let n: Result<[never]> = json.decode("[1]")
+print(n)
+let ok: Result<int, never> = Ok(3)
+print(json.encode(ok)?)
+--- stdout
+200
+[]
+Err(Error(message: "$[0]: cannot decode a value of type never", kind: "parse"))
+{"Ok":[3]}
+
+=== a type without its own Encode impl explains why it does not derive Encode
+import json
+struct Wrapper<T> { v: T }
+impl Encode for Wrapper<int> {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.v * 100) }
+}
+struct Email {
+    addr: str
+    fn init(raw: str) -> Email { Email(addr: raw.to_lower()) }
+}
+print(json.encode(Wrapper(v: "a")))
+print(json.encode(Email("A")))
+let e: Email = json.decode("{\"raw\": \"B\"}").unwrap()
+--- error
+10: Wrapper<str> does not implement `Encode`
+11: Email does not implement `Encode` because the parameters of `Email.init` differ from its fields

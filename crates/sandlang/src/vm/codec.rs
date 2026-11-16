@@ -7,14 +7,18 @@
 //! it stops and returns a [`Callback`] for its caller to run.
 //!
 //! A walker keeps every heap value that it holds in [`Walk::values`], so that
-//! its caller can root them during a callback. Each pass of a walker checks
-//! the memory limit before it changes the walk, so that
-//! [`NativeContext::step`] can run the pass again after a collection.
+//! its caller can root them during a callback. A pass of a walker checks the
+//! memory limit before each part. If the check fails, the pass stops with
+//! [`Step::Collect`], and the walk continues after a collection. A failure
+//! inside a part ends the walk, because the part can have changed the sink or
+//! the source. Only the first pass of a native call, which the VM can run
+//! again from the start, returns that failure as a retryable error.
 
 use super::bytecode::{CodecShape, Fill, PartTemplate, Program, ShapeKind};
 use super::meter::{SLOW_BYTES_PER_UNIT, Scratch};
 use super::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
 use super::{Fail, Vm, WaitKind};
+use crate::engine::LimitKind;
 use crate::native::codec::{CodecResult, DecodeSource, EncodeSink, InputKind, PayloadForm};
 use crate::native::context::NativeContext;
 use crate::native::convert::{HostError, IntoVmValue};
@@ -59,6 +63,9 @@ pub(crate) enum Purpose {
 pub(crate) enum Step {
     Done,
     Call(Callback),
+    /// A memory check failed before the next part. The walk can continue
+    /// after a collection.
+    Collect(Fail),
 }
 
 /// The heap values of a walker.
@@ -66,6 +73,8 @@ pub(crate) enum Step {
 pub(crate) struct Walk {
     /// Every heap value that the walk holds, except `cached`.
     values: Vec<VmValue>,
+    /// Whether the walk collected garbage after its last memory check.
+    collected: bool,
     /// Part dictionaries built from templates, by shape, part, and the heap
     /// handle of the dictionary of the whole.
     cache: FxHashMap<(u32, u32, u32), VmValue>,
@@ -75,6 +84,19 @@ pub(crate) struct Walk {
 impl Walk {
     fn new(values: Vec<VmValue>) -> Walk {
         Walk { values, ..Walk::default() }
+    }
+
+    /// Returns the step after the memory check before the next part, if the
+    /// check failed.
+    fn checked(&mut self, check: Result<(), Fail>) -> Option<CodecResult<Step>> {
+        match check {
+            Ok(()) => {
+                self.collected = false;
+                None
+            }
+            Err(e) if !self.collected && e.as_limit() == Some(LimitKind::Memory) => Some(Ok(Step::Collect(e))),
+            Err(e) => Some(Err(e.into())),
+        }
     }
 
     /// Returns the dictionary of part `part` of shape `s`, from `whole`.
@@ -103,6 +125,12 @@ impl Walk {
     /// Returns the lists of every heap value that the walk holds.
     fn roots(&mut self) -> [&mut Vec<VmValue>; 2] {
         [&mut self.values, &mut self.cached]
+    }
+
+    /// Collects garbage and keeps the values of the walk rooted.
+    async fn collect(&mut self, cx: &mut NativeContext) {
+        cx.collect_keeping(self.roots()).await;
+        self.collected = true;
     }
 }
 
@@ -163,6 +191,15 @@ fn shape(vm: &Vm, s: u32) -> Result<&CodecShape, Fail> {
 
 fn too_deep<T>() -> CodecResult<T> {
     Err(Fail::runtime_error("limit", "value too deeply nested to encode or decode").into())
+}
+
+/// Adds the path of the current part of `source` to `e`, the error of a
+/// callback.
+fn at_path(e: HostError<Fail>, source: &dyn DecodeSource) -> HostError<Fail> {
+    match e.sand_error() {
+        Some((kind, message)) => HostError::new(kind, format!("{}: {message}", source.path())),
+        None => e,
+    }
 }
 
 fn parse_error<T>(source: &dyn DecodeSource, msg: impl std::fmt::Display) -> CodecResult<T> {
@@ -310,7 +347,9 @@ impl EncodeWalk {
         let prog = vm.prog.clone();
         let mut state = shared.lock();
         loop {
-            self.scratch.check(&vm.heap, NODE_BYTES + state.sink.allocated())?;
+            if let Some(step) = self.walk.checked(self.scratch.check(&vm.heap, NODE_BYTES + state.sink.allocated())) {
+                return step;
+            }
             let (value, dict) = match self.pending {
                 Some(part) => part,
                 None => match self.next_part(vm, &prog, &mut state.sink)? {
@@ -322,7 +361,10 @@ impl EncodeWalk {
             match method(vm, dict)? {
                 Method::Custom(callee) => {
                     let token = state.next_token;
-                    let encoder = Encoder { shared: shared.clone(), token }.into_vm_value(vm)?;
+                    let encoder = match (Encoder { shared: shared.clone(), token }).into_vm_value(vm) {
+                        Ok(e) => e,
+                        Err(e) => return self.walk.checked(Err(e)).expect("an error"),
+                    };
                     state.next_token += 1;
                     self.callback = Some((token, state.active, state.written));
                     (state.active, state.written) = (token, false);
@@ -357,12 +399,17 @@ impl EncodeWalk {
     /// Finishes a walk that waits for callbacks.
     async fn finish(&mut self, cx: &mut NativeContext, shared: &EncodeCell, first: Step) -> CodecResult {
         let mut step = first;
-        while let Step::Call(callback) = step {
-            let result = cx.call_keeping(callback.callee, &callback.args, self.walk.roots()).await;
-            cx.with_vm(|vm| self.apply(vm, shared, result))?;
-            step = cx.step_keeping(self, |w| w.walk.roots(), |vm, w| w.run(vm, shared)).await?;
+        loop {
+            match step {
+                Step::Done => return Ok(()),
+                Step::Call(callback) => {
+                    let result = cx.call_keeping(callback.callee, &callback.args, self.walk.roots()).await;
+                    cx.with_vm(|vm| self.apply(vm, shared, result))?;
+                }
+                Step::Collect(_) => self.walk.collect(cx).await,
+            }
+            step = cx.with_vm(|vm| self.run(vm, shared))?;
         }
-        Ok(())
     }
 
     fn push_frame(&mut self, value: VmValue, dict: VmValue, shape: u32, kind: EncodeKind) -> CodecResult {
@@ -602,8 +649,14 @@ impl DecodeWalk {
         let prog = vm.prog.clone();
         let mut state = shared.lock();
         loop {
-            if self.unchecked == 0 || vm.heap.fail_next_check.get() {
-                vm.check_memory(CHECKED_VALUES as usize * NODE_BYTES + state.source.allocated())?;
+            let check = if self.unchecked == 0 || vm.heap.fail_next_check.get() {
+                let held = self.walk.values.capacity() * size_of::<VmValue>();
+                vm.check_memory(CHECKED_VALUES as usize * NODE_BYTES + held + state.source.allocated())
+            } else {
+                Ok(())
+            };
+            if let Some(step) = self.walk.checked(check) {
+                return step;
             }
             self.unchecked = (self.unchecked + 1) % CHECKED_VALUES;
             vm.charge(1 + (state.source.work() / SLOW_BYTES_PER_UNIT) as u64)?;
@@ -615,7 +668,7 @@ impl DecodeWalk {
                             Ok(d) => d,
                             Err(e) => {
                                 self.pending = Some(dict);
-                                return Err(e.into());
+                                return self.walk.checked(Err(e)).expect("an error");
                             }
                         };
                         state.next_token += 1;
@@ -654,7 +707,7 @@ impl DecodeWalk {
                     return Err(HostError::new(kind, message));
                 }
                 if let Some(e) = err_payload(vm, result) {
-                    return Err(sand_error(vm, e)?);
+                    return Err(at_path(sand_error(vm, e)?, &state.source));
                 }
                 let unread = state.active == token && !state.read;
                 (state.active, state.read) = (active, read);
@@ -666,9 +719,7 @@ impl DecodeWalk {
             Purpose::Fill => result,
             Purpose::Init => {
                 if let Some(e) = err_payload(vm, result) {
-                    let e = sand_error(vm, e)?;
-                    let (kind, message) = e.sand_error().unwrap_or(("invalid", ""));
-                    return Err(HostError::new(kind, format!("{}: {message}", shared.lock().source.path())));
+                    return Err(at_path(sand_error(vm, e)?, &shared.lock().source));
                 }
                 match vm.heap.variant_id(result) {
                     id if id == vm.prog.ids.ok => vm.heap.payload_if(&result, id),
@@ -686,12 +737,17 @@ impl DecodeWalk {
     /// Finishes a walk that waits for callbacks.
     async fn finish(&mut self, cx: &mut NativeContext, shared: &DecodeCell, first: Step) -> CodecResult<VmValue> {
         let mut step = first;
-        while let Step::Call(callback) = step {
-            let result = cx.call_keeping(callback.callee, &callback.args, self.walk.roots()).await;
-            cx.with_vm(|vm| self.apply(vm, shared, callback.purpose, result))?;
-            step = cx.step_keeping(self, |w| w.walk.roots(), |vm, w| w.run(vm, shared)).await?;
+        loop {
+            match step {
+                Step::Done => return Ok(self.result()?),
+                Step::Call(callback) => {
+                    let result = cx.call_keeping(callback.callee, &callback.args, self.walk.roots()).await;
+                    cx.with_vm(|vm| self.apply(vm, shared, callback.purpose, result))?;
+                }
+                Step::Collect(_) => self.walk.collect(cx).await,
+            }
+            step = cx.with_vm(|vm| self.run(vm, shared))?;
         }
-        Ok(self.result()?)
     }
 
     /// Places decoded value `v` in the slot of the innermost frame that it
@@ -1077,6 +1133,7 @@ where
     let mut walk = EncodeWalk::new(value, dict);
     match walk.run(vm, &cell).map_err(E::from_walk)? {
         Step::Done => Ok(Later::ready(finish(vm, &mut shared.lock().sink).map_err(E::from_future_walk))),
+        Step::Collect(e) => Err(E::from_walk(e.into())),
         step => Ok(Later::new(WaitKind::Io, |mut cx| async move {
             walk.finish(&mut cx, &cell, step).await.map_err(E::from_future_walk)?;
             cx.with_vm(|vm| finish(vm, &mut shared.lock().sink)).map_err(E::from_future_walk)
@@ -1106,6 +1163,7 @@ where
             let v = walk.result().map_err(|e| E::from_walk(e.into()))?;
             Ok(Later::ready(finish(vm, v, &mut shared.lock().source).map_err(E::from_future_walk)))
         }
+        Step::Collect(e) => Err(E::from_walk(e.into())),
         step => Ok(Later::new(WaitKind::Io, |mut cx| async move {
             let v = walk.finish(&mut cx, &cell, step).await.map_err(E::from_future_walk)?;
             cx.with_vm(|vm| finish(vm, v, &mut shared.lock().source)).map_err(E::from_future_walk)
@@ -1118,7 +1176,7 @@ pub(crate) async fn to_value(cx: &mut NativeContext, value: VmValue, dict: VmVal
     let shared = EncodeShared::new(crate::value::ValueSink::default());
     let cell: EncodeCell = shared.clone();
     let mut walk = EncodeWalk::new(value, dict);
-    let first = cx.step_keeping(&mut walk, |w| w.walk.roots(), |vm, w| w.run(vm, &cell)).await?;
+    let first = cx.with_vm(|vm| walk.run(vm, &cell))?;
     walk.finish(cx, &cell, first).await?;
     let root = shared.lock().sink.root.take();
     root.ok_or_else(|| Fail::internal("to_value: no value").into())
@@ -1129,7 +1187,7 @@ pub(crate) async fn to_value(cx: &mut NativeContext, value: VmValue, dict: VmVal
 pub(crate) async fn from_value(cx: &mut NativeContext, value: crate::value::Value, dict: VmValue) -> CodecResult<VmValue> {
     let shared: DecodeCell = DecodeShared::new(crate::value::ValueSource::new(value));
     let mut walk = DecodeWalk::new(dict);
-    let first = cx.step_keeping(&mut walk, |w| w.walk.roots(), |vm, w| w.run(vm, &shared)).await?;
+    let first = cx.with_vm(|vm| walk.run(vm, &shared))?;
     walk.finish(cx, &shared, first).await
 }
 
@@ -1141,42 +1199,39 @@ fn record(failed: &mut Option<(String, String)>, e: &HostError<Fail>) {
     }
 }
 
+/// Returns an `"invalid"` error for a misused `Encoder` or `Decoder`, and
+/// records it so that the walk fails.
+fn misuse(failed: &mut Option<(String, String)>, message: &str) -> HostError {
+    *failed = Some(("invalid".to_string(), message.to_string()));
+    HostError::new("invalid", message)
+}
+
 /// Writes `value` as the single value of `encoder`.
 fn write(vm: &mut Vm, dict: VmValue, value: VmValue, encoder: VmVal<Encoder>) -> Result<Later<(), HostError>, HostError> {
     let e = encoder.get(&vm.heap)?;
     let (shared, token) = (e.shared.clone(), e.token);
     {
-        let state = shared.lock();
+        let mut state = shared.lock();
         if state.active != token {
-            return Err(HostError::new("invalid", "an `Encoder` accepts a value only during its `encode` call"));
+            return Err(misuse(&mut state.failed, "an `Encoder` accepts a value only during its `encode` call"));
         }
         if state.written {
-            return Err(HostError::new("invalid", "an `encode` method wrote a second value to its `Encoder`"));
+            return Err(misuse(&mut state.failed, "an `encode` method wrote a second value to its `Encoder`"));
         }
+        state.written = true;
     }
     let mut walk = EncodeWalk::new(value, dict);
-    let first = walk.run(vm, &shared);
-    let mut state = shared.lock();
-    match first {
-        Err(e) => {
-            record(&mut state.failed, &e);
-            Err(e.into_ctl_error())
+    Ok(Later::new(WaitKind::Io, |mut cx| async move {
+        let first = cx.with_vm(|vm| walk.run(vm, &shared));
+        let r = match first {
+            Ok(step) => walk.finish(&mut cx, &shared, step).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = &r {
+            record(&mut shared.lock().failed, e);
         }
-        Ok(step) => {
-            state.written = true;
-            drop(state);
-            match step {
-                Step::Done => Ok(Later::ready(Ok(()))),
-                step => Ok(Later::new(WaitKind::Io, |mut cx| async move {
-                    let r = walk.finish(&mut cx, &shared, step).await;
-                    if let Err(e) = &r {
-                        record(&mut shared.lock().failed, e);
-                    }
-                    r
-                })),
-            }
-        }
-    }
+        r
+    }))
 }
 
 /// Reads the single value of `decoder`.
@@ -1184,37 +1239,27 @@ fn read(vm: &mut Vm, dict: VmValue, decoder: VmVal<Decoder>) -> Result<Later<Par
     let d = decoder.get(&vm.heap)?;
     let (shared, token) = (d.shared.clone(), d.token);
     {
-        let state = shared.lock();
+        let mut state = shared.lock();
         if state.active != token {
-            return Err(HostError::new("invalid", "a `Decoder` gives a value only during its `decode` call"));
+            return Err(misuse(&mut state.failed, "a `Decoder` gives a value only during its `decode` call"));
         }
         if state.read {
-            return Err(HostError::new("invalid", "a `decode` method read a second value from its `Decoder`"));
+            return Err(misuse(&mut state.failed, "a `decode` method read a second value from its `Decoder`"));
         }
+        state.read = true;
     }
     let mut walk = DecodeWalk::new(dict);
-    let first = walk.run(vm, &shared);
-    let mut state = shared.lock();
-    match first {
-        Err(e) => {
-            record(&mut state.failed, &e);
-            Err(e.into_ctl_error())
+    Ok(Later::new(WaitKind::Io, |mut cx| async move {
+        let first = cx.with_vm(|vm| walk.run(vm, &shared));
+        let r = match first {
+            Ok(step) => walk.finish(&mut cx, &shared, step).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = &r {
+            record(&mut shared.lock().failed, e);
         }
-        Ok(step) => {
-            state.read = true;
-            drop(state);
-            match step {
-                Step::Done => Ok(Later::ready(Ok(Param::from_raw(walk.result()?)))),
-                step => Ok(Later::new(WaitKind::Io, |mut cx| async move {
-                    let r = walk.finish(&mut cx, &shared, step).await;
-                    if let Err(e) = &r {
-                        record(&mut shared.lock().failed, e);
-                    }
-                    r.map(Param::from_raw)
-                })),
-            }
-        }
-    }
+        r.map(Param::from_raw)
+    }))
 }
 
 /// Registers the prelude natives of `Encode` and `Decode`.
@@ -1237,8 +1282,11 @@ pub(crate) fn register(m: &mut crate::native::NativeModule) {
     m.function("Decoder.kind", |vm: &mut Vm, decoder: VmVal<Decoder>| -> Result<InputKind, HostError> {
         let d = decoder.get(&vm.heap)?;
         let mut state = d.shared.lock();
-        if state.active != d.token || state.read {
-            return Err(HostError::new("invalid", "a `Decoder` gives a value only during its `decode` call"));
+        if state.active != d.token {
+            return Err(misuse(&mut state.failed, "a `Decoder` gives a value only during its `decode` call"));
+        }
+        if state.read {
+            return Err(misuse(&mut state.failed, "a `decode` method asked for the kind of a value that it read"));
         }
         state.source.kind().map_err(HostError::into_ctl_error)
     });

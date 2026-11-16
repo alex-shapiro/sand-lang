@@ -73,11 +73,21 @@ impl Checker {
             for d in first_type..self.types.len() {
                 let d = d as TypeDefId;
                 let declared = self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0)).is_some_and(|ids| !ids.is_empty());
-                if !declared && let Some(derived) = self.codec_form(d, b) {
-                    let id = self.add_codec_impl(tr, d);
-                    if derived {
-                        candidates.push(id);
+                if declared {
+                    continue;
+                }
+                match self.codec_form(d, b) {
+                    Some(derived) => {
+                        let id = self.add_codec_impl(tr, d);
+                        if derived {
+                            candidates.push(id);
+                        }
                     }
+                    None if matches!(self.types[d as usize].kind, TypeDefKind::Struct { .. }) => {
+                        let reason = format!("the parameters of `{}.init` differ from its fields", self.name(self.types[d as usize].name));
+                        self.codec_refuted.insert((tr.trait_id, d), reason.into());
+                    }
+                    None => {}
                 }
             }
             self.find_codec_bounds(&candidates);

@@ -3108,6 +3108,81 @@ fn memory_limit() {
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
 }
 
+/// Garbage that makes a walk near the memory limit wait for a collection.
+const CODEC_GARBAGE: &str = r#"
+import json
+fn garbage() -> int {
+    var xs: [str] = []
+    for i in 0..40000 {
+        xs.push("garbage-string-\(i)-padding-padding-padding")
+    }
+    xs.len()
+}
+print(garbage())
+"#;
+
+#[test]
+fn codec_walks_near_the_memory_limit_give_the_whole_value_or_a_memory_error() {
+    let cases = [
+        (
+            r#"
+struct Wrap { items: [str] }
+impl Encode for Wrap {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.items) }
+}
+let w = Wrap(items: ["value-\(i)-padding-padding" for i in 0..40000])
+let text = json.encode(w)?
+let back: [str] = json.decode(text)?
+print(back == w.items)
+"#,
+            "true",
+        ),
+        (
+            r#"
+struct Wrap { items: [str] }
+impl Decode for Wrap {
+    fn decode(decoder: Decoder) -> Result<Wrap> { Ok(Wrap(items: decoder.decode()?)) }
+}
+let items = ["value-\(i)-padding-padding" for i in 0..20000]
+let w: Wrap = json.decode(json.encode(items)?)?
+print(w.items == items)
+"#,
+            "true",
+        ),
+        (
+            r#"
+fn compute() -> int { 7 }
+struct Meta { n: int = compute() }
+struct Req { meta: Meta, body: json.Json }
+let rows = ["k\(i)": i for i in 0..20000]
+let text = "{\"meta\": {}, \"body\": " + json.encode(rows)? + "}"
+let r: Req = json.decode(text)?
+print(r.body == json.to_json(rows))
+"#,
+            "true",
+        ),
+    ];
+    for (src, want) in cases {
+        let src = format!("{CODEC_GARBAGE}{src}");
+        let (mut done, mut stopped) = (0, 0);
+        for mib in [8, 9, 10, 12, 16, 32] {
+            let config = Config::new().limits(Limits { max_memory: Some(mib << 20), ..Limits::default() });
+            let (r, out, err) = run_src(config, &src);
+            match r {
+                Ok(_) => {
+                    assert_eq!(out, format!("40000\n{want}\n"), "{mib} MiB: {err}\n{src}");
+                    done += 1;
+                }
+                Err(e) => {
+                    assert!(matches!(e, Error::Limit(LimitKind::Memory)), "{mib} MiB: {e}\n{src}");
+                    stopped += 1;
+                }
+            }
+        }
+        assert!(done > 0 && stopped > 0, "{done} done, {stopped} stopped\n{src}");
+    }
+}
+
 #[test]
 fn a_native_runs_once_when_its_result_needs_a_collection() {
     let pops = Arc::new(AtomicUsize::new(0));

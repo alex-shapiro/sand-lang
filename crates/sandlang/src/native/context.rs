@@ -197,31 +197,9 @@ impl NativeContext {
         result
     }
 
-    /// Runs `f` as [`NativeContext::step`] does, and keeps the heap values of
-    /// `walk` rooted during the collection before a retry. `kept` returns
-    /// the heap values of `walk`. Permission requests are not supported.
-    pub(crate) async fn step_keeping<W, R>(
-        &mut self,
-        walk: &mut W,
-        kept: impl Fn(&mut W) -> [&mut Vec<VmValue>; 2],
-        mut f: impl FnMut(&mut Vm, &mut W) -> Result<R, HostError<Fail>>,
-    ) -> Result<R, HostError<Fail>> {
-        let mut collected = false;
-        loop {
-            let result = self.with_vm(|vm| {
-                vm.collected = collected;
-                let result = f(vm, walk);
-                vm.collected = false;
-                result
-            });
-            match result {
-                Err(e) if !collected && e.is_memory_limit() => {
-                    collected = true;
-                    self.wait_keeping(VmRequest::Collect, kept(walk)).await;
-                }
-                result => return result,
-            }
-        }
+    /// Collects garbage and keeps `kept` rooted during the collection.
+    pub(crate) async fn collect_keeping(&mut self, kept: [&mut Vec<VmValue>; 2]) {
+        self.wait_keeping(VmRequest::Collect, kept).await;
     }
 
     /// Submits `request` and keeps `kept` rooted until the scheduler answers.
