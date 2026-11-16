@@ -234,7 +234,7 @@ Name(name: "ab", label: "AB")
 Range2(lo: 1.5, hi: 2.5)
 true
 
-=== the encode walker copies a container when it begins it, as a for loop does
+=== the encode walker reads a container only to its length when it begins it, and reads each map value with its key
 import json
 struct Key { s: str }
 impl Encode for Key {
@@ -249,7 +249,7 @@ var names = ["x"]
 struct Doc { m: [Key: int], names: [str] }
 print(json.encode([Doc(m: items, names: names)]))
 --- stdout
-Ok("[{\"m\":{\"a\":1,\"b\":2},\"names\":[\"x\",\"late\",\"late\"]}]")
+Ok("[{\"m\":{\"a\":1},\"names\":[\"x\",\"late\"]}]")
 
 === json.encode returns an error for a value nested too deeply
 import json

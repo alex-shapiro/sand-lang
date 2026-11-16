@@ -357,20 +357,19 @@ impl crate::native::NativeObject for Decoder {}
 /// An open container of the encode walker.
 struct EncodeFrame {
     /// The index of the container in [`Walk::values`]. Its dictionary
-    /// follows it, and then the children that the frame copied.
+    /// follows it, and for a map, the value of the current entry.
     at: usize,
     shape: u32,
     kind: EncodeKind,
     /// The position of the next child.
     next: usize,
-    /// The number of copied children.
-    len: usize,
+    /// For a list, a set, or a map: the length of its slots when the walker
+    /// began it. The walker reads no slot past it, as a `for` loop does, so a
+    /// callback that adds parts does not change what the walker writes.
+    bound: usize,
 }
 
-/// An open container of the encode walker. The walker copies the children of
-/// a list, set, map, tuple, or struct when it begins the container, as a
-/// `for` loop does, so that a callback that changes the container does not
-/// change what the walker writes.
+/// An open container of the encode walker.
 #[derive(Clone, Copy)]
 enum EncodeKind {
     /// The elements of a list or a set, which share one part.
@@ -378,6 +377,8 @@ enum EncodeKind {
     /// The elements of a tuple or the fields of a struct, one part each.
     Fields,
     /// A map: its even children are keys and its odd children are values.
+    /// The walker reads each value with its key, so a callback of the key
+    /// that removes the entry does not leave the key without a value.
     Map,
     /// The payload of a variant whose parts start at `base`.
     Payload { base: u32 },
@@ -482,9 +483,8 @@ impl EncodeWalk {
         }
     }
 
-    /// Opens a frame for `value`, and returns the number of children that it
-    /// copies.
-    fn push_frame(&mut self, vm: &Vm, value: VmValue, dict: VmValue, shape: u32, kind: EncodeKind) -> CodecResult<usize> {
+    #[inline(always)]
+    fn push_frame(&mut self, value: VmValue, dict: VmValue, shape: u32, kind: EncodeKind, bound: usize) -> CodecResult {
         if !matches!(kind, EncodeKind::Some) {
             if self.depth >= MAX_NESTING_DEPTH {
                 return too_deep();
@@ -493,12 +493,11 @@ impl EncodeWalk {
         }
         let at = self.walk.values.len();
         self.walk.values.extend([value, dict]);
-        if !matches!(kind, EncodeKind::Some | EncodeKind::Payload { .. }) {
-            copy_children(vm, value, &mut self.walk.values)?;
+        if matches!(kind, EncodeKind::Map) {
+            self.walk.values.push(VmValue::Unit);
         }
-        let len = self.walk.values.len() - at - 2;
-        self.frames.push(EncodeFrame { at, shape, kind, next: 0, len });
-        Ok(len)
+        self.frames.push(EncodeFrame { at, shape, kind, next: 0, bound });
+        Ok(())
     }
 
     fn visit(&mut self, vm: &mut Vm, prog: &Program, sink: &mut dyn EncodeSink, s: u32, value: VmValue, dict: VmValue) -> CodecResult {
@@ -531,29 +530,34 @@ impl EncodeWalk {
             }
             (ShapeKind::ManualEncode(f), _) => f(vm, value, sink)?,
             (ShapeKind::List, _) => {
-                let len = self.push_frame(vm, value, dict, s, EncodeKind::Seq)?;
+                let len = vm.heap.list(value).len();
+                self.push_frame(value, dict, s, EncodeKind::Seq, len)?;
                 sink.begin_list(len)?;
             }
             (ShapeKind::Set, _) => {
-                let len = self.push_frame(vm, value, dict, s, EncodeKind::Seq)?;
-                sink.begin_set(len)?;
+                let Obj::Set(set) = vm.heap.get(value) else { return wrong() };
+                let (live, bound) = (set.live, set.entries.len());
+                self.push_frame(value, dict, s, EncodeKind::Seq, bound)?;
+                sink.begin_set(live)?;
             }
             (ShapeKind::Map, _) => {
-                let len = self.push_frame(vm, value, dict, s, EncodeKind::Map)?;
-                sink.begin_map(len / 2)?;
+                let Obj::Map(map) = vm.heap.get(value) else { return wrong() };
+                let (live, bound) = (map.live, map.entries.len());
+                self.push_frame(value, dict, s, EncodeKind::Map, bound)?;
+                sink.begin_map(live)?;
             }
             (ShapeKind::Tuple, _) => {
-                self.push_frame(vm, value, dict, s, EncodeKind::Fields)?;
+                self.push_frame(value, dict, s, EncodeKind::Fields, 0)?;
                 sink.begin_tuple(shape.parts.len())?;
             }
             (ShapeKind::Struct(def) | ShapeKind::Init(def), _) => {
-                self.push_frame(vm, value, dict, s, EncodeKind::Fields)?;
+                self.push_frame(value, dict, s, EncodeKind::Fields, 0)?;
                 sink.begin_struct(prog.types[*def as usize].desc())?;
             }
             (ShapeKind::Option, _) if vm.heap.variant_id(value) == prog.ids.none => sink.none()?,
             (ShapeKind::Option, _) => {
                 sink.begin_some()?;
-                self.push_frame(vm, value, dict, s, EncodeKind::Some)?;
+                self.push_frame(value, dict, s, EncodeKind::Some, 0)?;
             }
             (ShapeKind::Enum(_), _) => {
                 let id = vm.heap.variant_id(value);
@@ -564,7 +568,7 @@ impl EncodeWalk {
                     return sink.end();
                 }
                 let base = (id - variant.index..id).map(|v| prog.variants[v as usize].arity as u32).sum();
-                self.push_frame(vm, value, dict, s, EncodeKind::Payload { base })?;
+                self.push_frame(value, dict, s, EncodeKind::Payload { base }, 0)?;
             }
             _ => wrong()?,
         }
@@ -577,11 +581,17 @@ impl EncodeWalk {
         loop {
             let Some(frame) = self.frames.last() else { return Ok(None) };
             let (container, dict, shape) = (self.walk.values[frame.at], self.walk.values[frame.at + 1], frame.shape);
-            let copied = || (frame.next < frame.len).then(|| self.walk.values[frame.at + 2 + frame.next]);
             let child = match frame.kind {
-                EncodeKind::Seq => copied().map(|v| (v, 0, frame.next + 1)),
-                EncodeKind::Fields => copied().map(|v| (v, frame.next as u32, frame.next + 1)),
-                EncodeKind::Map => copied().map(|v| (v, (frame.next % 2) as u32, frame.next + 1)),
+                EncodeKind::Seq => seq_child(vm, container, frame.next, frame.bound)?,
+                EncodeKind::Fields => field(vm, container, frame.next)?.map(|v| (v, frame.next as u32, frame.next + 1)),
+                EncodeKind::Map if frame.next % 2 == 1 => Some((self.walk.values[frame.at + 2], 1, frame.next + 1)),
+                EncodeKind::Map => match map_entry(vm, container, frame.next / 2, frame.bound) {
+                    Some((key, value, entry)) => {
+                        self.walk.values[frame.at + 2] = value;
+                        Some((key, 0, 2 * entry + 1))
+                    }
+                    None => None,
+                },
                 EncodeKind::Some => (frame.next == 0).then(|| (vm.heap.payload_if(&container, vm.prog.ids.some), 0, 1)),
                 EncodeKind::Payload { base } => payload(vm, container, frame.next).map(|v| (v, base + frame.next as u32, frame.next + 1)),
             };
@@ -602,20 +612,36 @@ impl EncodeWalk {
     }
 }
 
-/// Appends the children of a list, set, map, tuple, or struct to `out`. A map
-/// gives each key and then its value.
-fn copy_children(vm: &Vm, container: VmValue, out: &mut Vec<VmValue>) -> Result<(), Fail> {
-    match container {
-        VmValue::Pair(a, b) => out.extend([VmValue::Int(i64::from(a)), VmValue::Int(b)]),
+/// Returns the element of a list or a set at or after slot `next` and before
+/// slot `bound`, its part index, and the slot after it.
+fn seq_child(vm: &Vm, container: VmValue, next: usize, bound: usize) -> Result<Option<(VmValue, u32, usize)>, Fail> {
+    let slots: &[Option<VmValue>] = match vm.heap.get(container) {
+        Obj::List(items) => return Ok(items[..bound.min(items.len())].get(next).map(|&v| (v, 0, next + 1))),
+        Obj::Set(set) => &set.entries,
+        _ => return Err(Fail::internal("encode: not a list or a set")),
+    };
+    let slots = &slots[next.min(bound).min(slots.len())..bound.min(slots.len())];
+    Ok(slots.iter().enumerate().find_map(|(i, e)| e.map(|v| (v, 0, next + i + 1))))
+}
+
+/// Returns the key and the value of the entry of a map at or after `entry`
+/// and before `bound`, and the index of the entry.
+fn map_entry(vm: &Vm, map: VmValue, entry: usize, bound: usize) -> Option<(VmValue, VmValue, usize)> {
+    let Obj::Map(m) = vm.heap.get(map) else { return None };
+    let entries = &m.entries[entry.min(bound).min(m.entries.len())..bound.min(m.entries.len())];
+    entries.iter().enumerate().find_map(|(i, e)| e.map(|(k, v)| (k, v, entry + i)))
+}
+
+/// Returns field `i` of a tuple or a struct, whose fields a callback cannot
+/// add or remove.
+fn field(vm: &Vm, container: VmValue, i: usize) -> Result<Option<VmValue>, Fail> {
+    Ok(match container {
+        VmValue::Pair(a, b) => [VmValue::Int(i64::from(a)), VmValue::Int(b)].get(i).copied(),
         _ => match vm.heap.get(container) {
-            Obj::List(items) => out.extend_from_slice(items),
-            Obj::Tuple(items) | Obj::Struct(_, items) => out.extend_from_slice(items),
-            Obj::Set(set) => out.extend(set.entries.iter().flatten()),
-            Obj::Map(map) => out.extend(map.entries.iter().flatten().flat_map(|&(k, v)| [k, v])),
-            _ => return Err(Fail::internal("encode: not a container")),
+            Obj::Tuple(items) | Obj::Struct(_, items) => items.get(i).copied(),
+            _ => return Err(Fail::internal("encode: not a tuple or a struct")),
         },
-    }
-    Ok(())
+    })
 }
 
 fn payload(vm: &Vm, v: VmValue, i: usize) -> Option<VmValue> {
