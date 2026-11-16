@@ -146,6 +146,14 @@ pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>
 pub native fn decode<T: Decode>(text: str) -> Result<T>
 
 /// Converts `value` into a `Json` value using the same representation as
-/// `encode`. Aborts with the error that `encode` would return, or with kind
-/// `"limit"` if nesting exceeds 512 levels.
-pub native fn to_json<T: Encode>(value: T) -> Json
+/// `encode`. Aborts with the error that `encode` would return.
+pub fn to_json<T: Encode>(value: T) -> Json {
+    let json = match encode(value) {
+        Ok(text) => parse(text)
+        Err(e) => Err(e)
+    }
+    match json {
+        Ok(json) => json
+        Err(e) => fail(e.message, e.kind)
+    }
+}

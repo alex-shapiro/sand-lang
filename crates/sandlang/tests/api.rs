@@ -4455,7 +4455,7 @@ fn encode_deep_and_cyclic_values_on_a_small_stack() {
     // and a `Some` level, so `[chain(256)]` reaches 512 levels.
     for (operation, message, too_deep_expr) in [
         ("json.encode", "limit: value too deeply nested to encode as JSON", "chain(513)"),
-        ("json.to_json", "limit: value too deeply nested to convert to JSON", "chain(513)"),
+        ("json.to_json", "limit: value too deeply nested to encode as JSON", "chain(513)"),
         ("host.copy", "limit: value too deeply nested to encode as a host value", "[[chain(256)]]"),
     ] {
         for value in [too_deep_expr, "ring"] {

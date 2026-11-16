@@ -101,13 +101,6 @@ pub(crate) fn module() -> NativeModule {
             Ok(VmVal::<String>::from_raw(vm.new_str(std::mem::take(&mut sink.out.out))))
         })
     });
-    m.function("to_json", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>| {
-        let shared = EncodeShared::new(JsonSink::new(TreeOut::default()));
-        codec::encode::<_, _, Fail>(vm, shared, value.raw(), dict.raw(), |vm, sink| {
-            let json = sink.out.root.take().ok_or_else(|| Fail::internal("json.to_json: no value"))?;
-            Ok(VmVal::<Json>::from_raw(json.into_vm_value(vm)?))
-        })
-    });
     m.function(
         "decode",
         |vm: &mut Vm, dict: TraitDict<0, traits::Decode>, text: VmVal<String>| -> Result<Later<Param<0>, HostError>, HostError> {
@@ -612,22 +605,6 @@ fn invalid_key<T>() -> CodecResult<T> {
     Err(HostError::new("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type"))
 }
 
-/// The JSON values that the JSON rules write: JSON text or a `Json` tree.
-trait JsonOut: Send {
-    fn null(&mut self);
-    fn bool(&mut self, b: bool);
-    fn int(&mut self, i: i64);
-    /// Writes a finite float.
-    fn float(&mut self, f: f64);
-    fn str(&mut self, s: &str) -> CodecResult;
-    fn begin_array(&mut self, len: usize) -> CodecResult;
-    fn begin_object(&mut self, len: usize) -> CodecResult;
-    /// Writes the key of the next member of the innermost object.
-    fn key(&mut self, k: &str) -> CodecResult;
-    fn end(&mut self);
-    fn allocated(&self) -> usize;
-}
-
 /// An open container of a [`JsonSink`].
 enum Frame {
     /// A JSON array.
@@ -646,7 +623,7 @@ enum Frame {
     Bare,
 }
 
-/// Applies the JSON rules to Sand values and writes them to a [`JsonOut`].
+/// Applies the JSON rules to Sand values and writes them as JSON text.
 ///
 /// `Some(x)` is `x`, and `None` and `()` are `null`. `bytes` is a Base64
 /// string, `duration` is a count of nanoseconds, and a native value is its
@@ -654,13 +631,13 @@ enum Frame {
 /// variant without a payload, or a native value. A variant without a payload
 /// is its name, and another variant is an object of one member, from the
 /// variant name to an array or an object of the payload.
-struct JsonSink<W> {
-    out: W,
+struct JsonSink {
+    out: TextOut,
     frames: Vec<Frame>,
 }
 
-impl<W: JsonOut> JsonSink<W> {
-    fn new(out: W) -> JsonSink<W> {
+impl JsonSink {
+    fn new(out: TextOut) -> JsonSink {
         JsonSink { out, frames: Vec::new() }
     }
 
@@ -689,7 +666,7 @@ impl<W: JsonOut> JsonSink<W> {
     }
 
     /// Writes a scalar: as a key if it is a map key, or else as `value`.
-    fn scalar(&mut self, key: impl FnOnce() -> Option<String>, value: impl FnOnce(&mut W)) -> CodecResult {
+    fn scalar(&mut self, key: impl FnOnce() -> Option<String>, value: impl FnOnce(&mut TextOut)) -> CodecResult {
         match self.slot()? {
             true => match key() {
                 Some(k) => self.out.key(&k),
@@ -711,7 +688,7 @@ impl<W: JsonOut> JsonSink<W> {
     }
 }
 
-impl<W: JsonOut> EncodeSink for JsonSink<W> {
+impl EncodeSink for JsonSink {
     fn unit(&mut self) -> CodecResult {
         self.scalar(|| None, |o| o.null())
     }
@@ -902,9 +879,7 @@ impl TextOut {
         self.open.push((is_array, true));
         Ok(())
     }
-}
 
-impl JsonOut for TextOut {
     fn null(&mut self) {
         self.separate();
         self.out.push_str("null");
@@ -960,99 +935,6 @@ impl JsonOut for TextOut {
 
     fn allocated(&self) -> usize {
         self.out.capacity()
-    }
-}
-
-/// Builds a Rust [`Json`] tree.
-#[derive(Default)]
-struct TreeOut {
-    root: Option<Json>,
-    open: Vec<TreeFrame>,
-    allocated: usize,
-}
-
-enum TreeFrame {
-    Arr(Vec<Json>),
-    Obj(indexmap::IndexMap<String, Json>, String),
-}
-
-impl TreeOut {
-    fn check_depth(&self) -> CodecResult {
-        if self.open.len() >= MAX_NESTING_DEPTH {
-            return Err(Fail::runtime_error("limit", "value too deeply nested to convert to JSON").into());
-        }
-        Ok(())
-    }
-
-    fn push(&mut self, json: Json) {
-        self.allocated += NODE_BYTES;
-        match self.open.last_mut() {
-            None => self.root = Some(json),
-            Some(TreeFrame::Arr(items)) => items.push(json),
-            Some(TreeFrame::Obj(members, key)) => {
-                members.insert(std::mem::take(key), json);
-            }
-        }
-    }
-}
-
-impl JsonOut for TreeOut {
-    fn null(&mut self) {
-        self.push(Json::Null);
-    }
-
-    fn bool(&mut self, b: bool) {
-        self.push(Json::Bool(b));
-    }
-
-    fn int(&mut self, i: i64) {
-        self.push(Json::Int(i));
-    }
-
-    fn float(&mut self, f: f64) {
-        self.push(Json::Float(f));
-    }
-
-    fn str(&mut self, s: &str) -> CodecResult {
-        self.allocated += s.len();
-        self.push(Json::Str(s.to_string()));
-        Ok(())
-    }
-
-    fn begin_array(&mut self, len: usize) -> CodecResult {
-        self.check_depth()?;
-        self.allocated += len.saturating_mul(std::mem::size_of::<Json>());
-        self.open.push(TreeFrame::Arr(Vec::with_capacity(len)));
-        Ok(())
-    }
-
-    fn begin_object(&mut self, len: usize) -> CodecResult {
-        self.check_depth()?;
-        self.allocated += len.saturating_mul(OBJ_ENTRY_BYTES);
-        self.open.push(TreeFrame::Obj(indexmap::IndexMap::with_capacity(len), String::new()));
-        Ok(())
-    }
-
-    fn key(&mut self, k: &str) -> CodecResult {
-        self.allocated += k.len();
-        if let Some(TreeFrame::Obj(_, key)) = self.open.last_mut() {
-            *key = k.to_string();
-        }
-        Ok(())
-    }
-
-    fn end(&mut self) {
-        let json = match self.open.pop() {
-            Some(TreeFrame::Arr(items)) => Json::Arr(items),
-            Some(TreeFrame::Obj(members, _)) => Json::Obj(members),
-            None => return,
-        };
-        self.allocated -= NODE_BYTES.min(self.allocated);
-        self.push(json);
-    }
-
-    fn allocated(&self) -> usize {
-        self.allocated
     }
 }
 

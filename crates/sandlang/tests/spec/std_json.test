@@ -167,7 +167,7 @@ for _ in 0..170 {
 }
 print(json.to_json([t]))
 --- fail
-value too deeply nested to convert to JSON
+value too deeply nested to encode as JSON
 
 === numbers
 import json
