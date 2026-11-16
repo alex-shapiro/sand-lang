@@ -1932,7 +1932,7 @@ print(none.product())
     m.function("List.go", |vm: &mut Vm, num: Num<0>, _: VmVal<Vec<Param<0, traits::Num>>>| num.one(vm));
     m.source("pub trait Go { fn go(self) -> int }\nimpl<T: Num> Go for [T] { native fn go(self) -> T }");
     let errors = host_module_errors([m]);
-    assert!(errors.iter().any(|e| e == "the Rust function of a native impl method cannot take `Num` evidence"), "{errors:?}");
+    assert!(errors.iter().any(|e| e == "the Rust function of a native impl method cannot take trait dictionaries"), "{errors:?}");
 }
 
 #[test]

@@ -638,9 +638,9 @@ impl Checker {
                 self.error(m.name.span, "the methods of a `Num` impl must be native");
             }
             // Trait dispatch passes the impl dictionary as the first hidden
-            // argument, which conflicts with the `Num` evidence slot in native functions.
+            // argument, which conflicts with the dictionary slots of native functions.
             if m.is_native && !self.fns[f as usize].dicts.is_empty() {
-                self.error(m.name.span, "the Rust function of a native impl method cannot take `Num` evidence");
+                self.error(m.name.span, "the Rust function of a native impl method cannot take trait dictionaries");
             }
             self.fns[f as usize].impl_of = Some(id);
             self.check_impl_method(id, slot as u32, f, m);

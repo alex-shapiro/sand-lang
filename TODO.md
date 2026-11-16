@@ -116,18 +116,14 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ _Testing._ Compare fuel between a 32-bit and a 64-bit target. Only code
       review currently verifies cross-platform fuel determinism. Add programs
       with pinned fuel totals that run on both a native target and `wasm32`.
-      Include a host function that calls `Vm::to_value`.
+      Include a host function that takes an `Encoded` argument.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
       recurse once per nesting level. Deep values can overflow a small host
       thread stack in debug builds before reaching the 256-level limit.
-- [ ] ❓ _Embedding._ Convert `json.parse` and `json.decode` to use an explicit
-      stack without regressing throughput. These functions recurse up to the
-      512-level nesting limit, which can overflow a 2 MiB thread stack in debug
-      builds.
 - [ ] ❓ _Embedding._ Clone, compare, and drop a deep `Value` iteratively. The
       derived `Clone` and `PartialEq` implementations and the default drop
-      recurse once per level. On a 512-level value from `Vm::to_value`, a debug
+      recurse once per level. On a 512-level value from a conversion, a debug
       build uses up to 721 KiB of stack for `clone`, 417 KiB for `==`, and
       129 KiB for drop. A host can also construct a `Value` deeper than 512
       levels in Rust.
@@ -424,6 +420,9 @@ Visible defects that rarely block users.
 
 ### Embedding
 
+- [ ] ⚪ Decode a list from a `Value::List` only. `DecodeSource` reads lists and
+      sets with one `begin_list` request, so `NativeContext::from_value`
+      accepts a `Value::Set` for a list type.
 - [ ] ⚪ Require at compile time that a native function that takes `&mut Vm`
       makes its scheduler requests before its side effects. The engine runs the
       call again after a prompt or a garbage collection, so it executes any
@@ -490,9 +489,11 @@ Visible defects that rarely block users.
       `results` in `bench/programs` to reduce typed native call overhead.
 - [ ] ⚪ Reduce `json.decode` dispatch overhead in the Sand wrapper around
       `decode_raw`.
-- [ ] ⚪ Cache instantiated `TypeDesc` objects in `Op::Describe` by their
-      template and argument descriptions to avoid allocation on each generic
-      `reflect` call.
+- [ ] ⚪ Close the gap between the codec walkers and the value-driven JSON code
+      that they replaced. On `crates/sandlang/benches/codec.rs`, `encode` takes
+      794 ns per item (469 ns before) and `to_json` takes 2490 ns (756 ns
+      before). Each value costs a dictionary read, a shape lookup, and a `dyn`
+      sink call.
 - [ ] ❓ Align the VM dispatch loop or build benchmarks with
       `-C llvm-args=-align-loops=64` so that unrelated code changes do not
       shift loop alignment. On Apple silicon, code placement changes alter
@@ -503,7 +504,4 @@ Visible defects that rarely block users.
 
 ### Language
 
-- [ ] ⚪ Allow local functions to require traits with methods and to declare
-      `reflect` type parameters by passing hidden dictionary and
-      type-description arguments to closures.
 - [ ] ⚪ Support non-constant default expressions on trait method parameters.

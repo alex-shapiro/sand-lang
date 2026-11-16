@@ -30,8 +30,8 @@ An unconstrained type parameter `T` supports only storage, passing, and formatti
 | `Ord`    | `<`, `>`, `sorted()`, `max()`    | numbers, `str`, lists, tuples                                   |
 | `Hash`   | map keys and set elements        | `int`, `bool`, `str`, tuples                                    |
 | `Num`    | `+`, `-`, `*`, `/`, `T.zero()`   | `int`, `float`                                                  |
-| `Encode` | `json.encode()`                  | all types except functions, tasks, channels, and native objects |
-| `Decode` | `json.decode()`                  | `Encode` types except structs that declare `init`               |
+| `Encode` | `json.encode()`                  | data types: not functions, tasks, or channels                   |
+| `Decode` | `json.decode()`                  | data types: not functions, tasks, or channels                   |
 
 ```sand
 fn largest<T: Ord>(xs: [T]) -> T? {
@@ -61,7 +61,7 @@ print(total([1.5, 2.5]))
 print(counts(["a", "b", "a"]))
 ```
 
-The compiler derives `Eq`, `Ord`, `Hash`, and `Encode` for each struct, enum, and tuple whose fields implement them. A struct with a `var` field does not implement `Hash`. `help(Type)` lists the traits that a type implements. For complete rules, see [§5.6 of the specification](/spec/#56-built-in-traits).
+The compiler derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode` for each struct, enum, and tuple whose fields implement them. A struct with a `var` field does not implement `Hash`. An `impl` of `Encode` or `Decode` replaces the derived implementation (see [§5.7](/spec/#57-encode-and-decode)). `help(Type)` lists the traits that a type implements. For complete rules, see [§5.6 of the specification](/spec/#56-built-in-traits).
 
 If a function uses an operation of a trait that its type parameter does not require, the compiler reports the missing trait:
 
