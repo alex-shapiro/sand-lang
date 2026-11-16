@@ -73,7 +73,7 @@ pub(crate) enum Step {
 pub(crate) struct Walk {
     /// Every heap value that the walk holds, except `cached`.
     values: Vec<VmValue>,
-    /// Whether the walk collected garbage after its last memory check.
+    /// Whether the walk collected garbage and has made no progress since.
     collected: bool,
     /// Part dictionaries built from templates, by shape, part, and the heap
     /// handle of the dictionary of the whole.
@@ -104,14 +104,12 @@ impl Walk {
         step
     }
 
-    /// Returns the step after the memory check before the next part, if the
-    /// check failed.
+    /// Returns the step after a memory check before a change to the walk, if
+    /// the check failed. A second failure before the walk makes progress
+    /// ends the walk, because a collection did not help.
     fn checked(&mut self, check: Result<(), Fail>) -> Option<CodecResult<Step>> {
         match check {
-            Ok(()) => {
-                self.collected = false;
-                None
-            }
+            Ok(()) => None,
             Err(e) if !self.collected && e.as_limit() == Some(LimitKind::Memory) => Some(Ok(Step::Collect(e))),
             Err(e) => Some(Err(e.into())),
         }
@@ -606,6 +604,7 @@ impl Walker for EncodeWalk {
                 Method::Structural(s) => {
                     self.pending = None;
                     self.visit(vm, &prog, &mut state.io, s, value, dict)?;
+                    self.walk.collected = false;
                 }
             }
         }
@@ -755,13 +754,7 @@ impl DecodeWalk {
             DecodeKind::Seq => {
                 let container = self.walk.values[at + 1];
                 match vm.heap.get(container) {
-                    Obj::List(items) => {
-                        // A growing list holds its old buffer and its new one at once.
-                        if items.len() == items.capacity() {
-                            vm.check_memory(items.capacity() * size_of::<VmValue>())?;
-                        }
-                        vm.heap.list_push(container, v).map_err(Fail::limit)?
-                    }
+                    Obj::List(_) => vm.heap.list_push(container, v).map_err(Fail::limit)?,
                     _ => _ = vm.set_add(container, v)?,
                 }
             }
@@ -921,7 +914,18 @@ impl DecodeWalk {
         let shape = shape(prog, s)?;
         if !frame.ended {
             let part = match &mut frame.kind {
-                DecodeKind::Seq => source.next()?.then_some(0),
+                DecodeKind::Seq => {
+                    // A full list grows when the next element arrives, and holds its old
+                    // buffer and the new one at once. The check comes before the source
+                    // moves, so a collection can follow.
+                    if let Obj::List(items) = vm.heap.get(self.walk.values[at + 1])
+                        && items.len() == items.capacity()
+                        && let Some(step) = self.walk.checked(vm.check_memory(2 * items.capacity() * size_of::<VmValue>()))
+                    {
+                        return step.map(Some);
+                    }
+                    source.next()?.then_some(0)
+                }
                 DecodeKind::Tuple => (children < shape.parts.len() && source.next()?).then_some(children as u32),
                 DecodeKind::Map { key: true } => Some(1),
                 DecodeKind::Map { key: false } => source.next()?.then_some(0),
@@ -1054,6 +1058,7 @@ impl Walker for DecodeWalk {
                     }
                     Method::Structural(s) => self.visit(vm, &prog, &mut state.io, s, dict)?,
                 }
+                self.walk.collected = false;
                 continue;
             }
             if self.frames.is_empty() {
@@ -1062,6 +1067,7 @@ impl Walker for DecodeWalk {
             if let Some(step) = self.advance(vm, &prog, &mut state.io)? {
                 return Ok(step);
             }
+            self.walk.collected = false;
         }
     }
 
@@ -1235,6 +1241,7 @@ async fn finish<W: Walker>(
             Step::Call(callback) => {
                 let result = cx.call_keeping(callback.callee, &callback.args, walk.walk().roots()).await;
                 cx.with_vm(|vm| walk.apply(vm, shared, callback.purpose, result))?;
+                walk.walk().collected = false;
             }
             Step::Collect(_) => walk.walk().collect(cx).await,
         }
