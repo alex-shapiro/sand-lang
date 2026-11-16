@@ -59,7 +59,7 @@ fn nanos(d: SignedDuration) -> i64 {
 /// Standard error record with a human-readable `message` and a
 /// machine-readable `kind` tag that defaults to `"error"`.
 #[derive(Clone, Debug, PartialEq, crate::SandStruct)]
-#[sand(module = "prelude", encode, decode)]
+#[sand(module = "prelude", derive(Encode, Decode))]
 pub(crate) struct Error {
     /// Human-readable error description.
     pub message: String,

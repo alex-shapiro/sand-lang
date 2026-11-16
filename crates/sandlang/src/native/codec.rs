@@ -5,49 +5,53 @@
 //! Both JSON text and [`Value`](crate::value::Value) implement a sink and a
 //! source.
 //!
-//! A native type implements the Sand codec traits only if its derive attribute
-//! opts in:
+//! A native type implements `Encode` or `Decode` in one of two ways:
 //!
-//! - `#[sand(encode, decode)]` derives codec implementations from the type's
+//! - `#[sand(derive(Encode, Decode))]` derives the traits from the type's
 //!   structure.
-//! - `#[sand(encode = "manual", decode = "manual")]` delegates to the Rust
-//!   [`Encode`] and [`Decode`] traits in this module.
+//! - The module source declares an `impl` block with a native method. Its Rust
+//!   function writes through [`Encoder::write`] or reads through
+//!   [`Decoder::read`].
 //!
 //! ```
-//! # use sandlang::native::codec::{Decode, DecodeSource, Encode, EncodeSink};
+//! # use sandlang::native::NativeModule;
+//! # use sandlang::native::codec::{Decoder, Encoder};
 //! # use sandlang::native::convert::{HostError, IntoVmValue};
 //! # use sandlang::native::ty::VmVal;
 //! # use sandlang::vm::value::VmValue;
 //! # use sandlang::vm::{Fail, Vm};
 //! /// An amount of money in cents.
 //! #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, sandlang::SandStruct)]
-//! #[sand(module = "bank", encode = "manual", decode = "manual")]
+//! #[sand(module = "bank")]
 //! pub struct Money {
 //!     cents: i64,
 //! }
 //!
-//! impl Encode for Money {
-//!     fn encode(vm: &mut Vm, value: VmVal<Money>, sink: &mut dyn EncodeSink) -> Result<(), HostError<Fail>> {
-//!         let Some(VmValue::Int(cents)) = vm.heap.field(value.raw(), 0) else { return Err(Fail::internal("not money").into()) };
-//!         sink.int(cents)
-//!     }
-//! }
-//!
-//! impl Decode for Money {
-//!     fn decode(vm: &mut Vm, source: &mut dyn DecodeSource) -> Result<VmVal<Money>, HostError<Fail>> {
+//! let mut module = NativeModule::new("bank");
+//! module.bind::<Money>();
+//! module.source(
+//!     "impl Encode for Money {\n    native fn encode(self, encoder: Encoder) -> Result<()>\n}\n\
+//!      impl Decode for Money {\n    native fn decode(decoder: Decoder) -> Result<Money>\n}\n",
+//! );
+//! module.function("Money.encode", |vm: &mut Vm, money: VmVal<Money>, encoder: VmVal<Encoder>| -> Result<(), HostError> {
+//!     let Some(VmValue::Int(cents)) = vm.heap.field(money.raw(), 0) else { return Err(Fail::internal("not money").into()) };
+//!     Encoder::write(vm, encoder, |_, sink| sink.int(cents))
+//! });
+//! module.function("Money.decode", |vm: &mut Vm, decoder: VmVal<Decoder>| -> Result<VmVal<Money>, HostError> {
+//!     Decoder::read(vm, decoder, |vm, source| {
 //!         let cents = source.int()?;
 //!         Ok(VmVal::from_raw(Money { cents }.into_vm_value(vm)?))
-//!     }
-//! }
+//!     })
+//! });
 //! ```
 
 use super::convert::HostError;
-use super::ty::VmVal;
 use crate::value::{StructDesc, VariantDesc};
-use crate::vm::value::VmValue;
-use crate::vm::{Fail, Vm};
+use crate::vm::Fail;
 use std::borrow::Cow;
 use std::sync::Arc;
+
+pub use crate::stdlib::codec::{Decoder, Encoder};
 
 /// Result returned by [`EncodeSink`] and [`DecodeSource`] methods.
 pub type CodecResult<T = ()> = Result<T, HostError<Fail>>;
@@ -100,7 +104,7 @@ pub trait EncodeSink: Send {
 
 /// Kind of the next value available from a `Decoder`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, crate::SandEnum)]
-#[sand(module = "prelude", encode, decode)]
+#[sand(module = "prelude", derive(Encode, Decode))]
 pub enum InputKind {
     /// `()`, `None`, or JSON `null`.
     Null,
@@ -200,48 +204,4 @@ pub trait DecodeSource: Send {
     /// Drains the input byte count consumed since the previous
     /// `take_consumed_bytes` call for fuel accounting.
     fn take_consumed_bytes(&mut self) -> usize;
-}
-
-/// Custom encoder for a native type marked `#[sand(encode = "manual")]`.
-pub trait Encode: Sized + 'static {
-    /// Writes `value` to `sink` as a single value.
-    fn encode(vm: &mut Vm, value: VmVal<Self>, sink: &mut dyn EncodeSink) -> CodecResult;
-}
-
-/// Custom decoder for a native type marked `#[sand(decode = "manual")]`.
-pub trait Decode: Sized + 'static {
-    /// Reads a single value from `source`.
-    fn decode(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmVal<Self>>;
-}
-
-/// Function pointer for a manual native [`Encode`] implementation.
-pub type EncodeFn = fn(&mut Vm, VmValue, &mut dyn EncodeSink) -> CodecResult;
-
-/// Function pointer for a manual native [`Decode`] implementation.
-pub type DecodeFn = fn(&mut Vm, &mut dyn DecodeSource) -> CodecResult<VmValue>;
-
-/// Codec implementation strategy for a native type.
-#[derive(Clone, Copy, Debug)]
-pub enum NativeCodec<F> {
-    /// Structural codec generated from the type's fields or variants.
-    Derived,
-    /// Custom Rust codec function.
-    Manual(F),
-}
-
-/// Codec implementations registered for a native type.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NativeCodecs {
-    pub encode: Option<NativeCodec<EncodeFn>>,
-    pub decode: Option<NativeCodec<DecodeFn>>,
-}
-
-#[doc(hidden)]
-pub fn manual_encode<T: Encode>(vm: &mut Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecResult {
-    T::encode(vm, VmVal::from_raw(value), sink)
-}
-
-#[doc(hidden)]
-pub fn manual_decode<T: Decode>(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValue> {
-    T::decode(vm, source).map(VmVal::raw)
 }

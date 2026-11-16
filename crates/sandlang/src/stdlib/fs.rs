@@ -27,7 +27,7 @@ type FsResult<R> = Result<R, HostError>;
 
 /// Metadata for a file or directory.
 #[derive(crate::SandStruct)]
-#[sand(module = "fs", encode, decode)]
+#[sand(module = "fs", derive(Encode, Decode))]
 struct Metadata {
     /// Size in bytes.
     size: i64,

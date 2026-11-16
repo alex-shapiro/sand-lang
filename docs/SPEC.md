@@ -2289,15 +2289,13 @@ optional type attributes:
 - `#[sand(name = "<Name>")]`: overrides the Sand type name.
 - `#[sand(private)]`: keeps the type private to its module.
 - `#[sand(crate = <path>)]`: specifies a renamed `sandlang` dependency.
-- `#[sand(encode)]` and `#[sand(decode)]`: implement `Encode` or `Decode` for
-  the Sand type with the derived walker (§5.7). A native type implements
-  `Encode` or `Decode` only if its `#[sand(...)]` attribute declares the trait.
-  Generic native types cannot implement `Encode` or `Decode`.
-- `#[sand(encode = "manual")]` and `#[sand(decode = "manual")]`: implement
-  `Encode` or `Decode` with the Rust traits `native::codec::Encode` or
-  `native::codec::Decode`. Manual `Encode` implementations write to an
-  `EncodeSink`. Manual `Decode` implementations read from a `DecodeSource`.
-  The `SandObject` macro accepts only the manual forms.
+- `#[sand(derive(<Trait>, ...))]`: derives each named trait from the type's
+  structure, as in `derive(Encode, Decode)` (§5.7). Each trait must have a
+  native default method. `SandObject` and generic native types cannot derive
+  traits. For a custom `Encode` or `Decode` implementation, the module source
+  declares an `impl` block with a native method. Its Rust function writes
+  through `native::codec::Encoder::write` or reads through
+  `native::codec::Decoder::read`.
 - `#[sand(manual_conversion)]`: on `SandEnum` and `SandStruct`, omits the
   derived `FromVmValue` and `IntoVmValue` implementations.
 - `#[sand(no_value)]`: on `SandEnum` and `SandStruct`, omits the derived

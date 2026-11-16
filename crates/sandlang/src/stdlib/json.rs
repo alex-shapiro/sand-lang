@@ -7,7 +7,7 @@ use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mi
 use crate::native::func::Later;
 use crate::native::ty::{Param, TraitDict, VmVal};
 use crate::native::{NamedType, NativeModule, variant_index};
-use crate::stdlib::codec::{self, Shared};
+use crate::stdlib::codec::{self, Decoder, Encoder, Shared};
 use crate::stdlib::codec::{MAX_NESTING_DEPTH, NODE_BYTES};
 use crate::syntax::lexer::is_ident;
 use crate::types::traits;
@@ -33,7 +33,7 @@ use std::sync::Arc;
 /// or `as_int()` to read a number from either numeric variant. `Json` values
 /// can be nested up to 512 levels.
 #[derive(Clone, Debug, PartialEq, crate::SandEnum)]
-#[sand(module = "json", manual_conversion, encode = "manual", decode = "manual")]
+#[sand(module = "json", manual_conversion)]
 pub enum Json {
     /// JSON `null`.
     Null,
@@ -93,6 +93,12 @@ pub(crate) fn module() -> NativeModule {
         let json = decode_json(vm, &mut source).and_then(|json| source.finish().map(|()| json));
         vm.charge(1 + (source.take_consumed_bytes() / SLOW_BYTES_PER_UNIT) as u64)?;
         Ok(VmVal::from_raw(json.map_err(HostError::into_ctl_error)?))
+    });
+    module.function("Json.encode", |vm: &mut Vm, value: VmVal<Json>, encoder: VmVal<Encoder>| {
+        Encoder::write(vm, encoder, |vm, sink| encode_json(vm, value.raw(), sink))
+    });
+    module.function("Json.decode", |vm: &mut Vm, decoder: VmVal<Decoder>| {
+        Decoder::read(vm, decoder, |vm, source| decode_json(vm, source).map(VmVal::<Json>::from_raw))
     });
     module.function("encode", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>, indent: i64| {
         let indent = indent.clamp(0, 1 << 16) as usize;
@@ -449,20 +455,6 @@ impl Builder<'_, '_, '_> {
     }
 }
 
-impl crate::native::codec::Encode for Json {
-    /// Writes the underlying JSON value of `value` to `sink`.
-    fn encode(vm: &mut Vm, value: VmVal<Json>, sink: &mut dyn EncodeSink) -> CodecResult {
-        encode_json(vm, value.raw(), sink)
-    }
-}
-
-impl crate::native::codec::Decode for Json {
-    /// Reads a JSON value from `source`.
-    fn decode(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmVal<Json>> {
-        decode_json(vm, source).map(VmVal::from_raw)
-    }
-}
-
 fn encode_json(vm: &mut Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecResult {
     enum EncodeJsonFrame<'h> {
         Arr(std::slice::Iter<'h, VmValue>),
@@ -632,11 +624,9 @@ fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValu
 fn direct_json(vm: &mut Vm, dict: VmValue, value: VmValue) -> Result<Option<VmValue>, Fail> {
     let ids = JsonIds::new(&vm.prog)?;
     let kind = codec::structural_kind(vm, dict)?;
-    // Variant IDs are unique across a program. A manual-codec value with a
-    // `Json` variant ID is therefore already a `Json` value.
-    if let Some(ShapeKind::ManualEncode(_)) = kind
-        && [ids.null, ids.bool_, ids.int, ids.float, ids.str_, ids.arr, ids.obj].contains(&vm.heap.variant_id(value))
-    {
+    // Variant IDs are unique across a program, so a value with a `Json` variant
+    // ID is a `Json` value.
+    if [ids.null, ids.bool_, ids.int, ids.float, ids.str_, ids.arr, ids.obj].contains(&vm.heap.variant_id(value)) {
         return Ok(all_floats_finite(vm, &ids, value)?.then_some(value));
     }
     let id = match (kind, value) {

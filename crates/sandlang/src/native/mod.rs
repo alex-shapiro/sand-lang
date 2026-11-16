@@ -49,38 +49,38 @@ pub trait NamedType: Sized + 'static {
 }
 
 #[doc(hidden)]
-pub struct Binding<T>(BoundKind, codec::NativeCodecs, PhantomData<fn() -> T>);
+pub struct Binding<T>(BoundKind, &'static [&'static str], PhantomData<fn() -> T>);
 
 impl<T> Binding<T> {
-    /// Sets the codec implementations for this type.
-    pub fn codecs(self, codecs: codec::NativeCodecs) -> Binding<T> {
-        Binding(self.0, codecs, PhantomData)
+    /// Sets the names of the traits that the checker derives for this type.
+    pub fn derives(self, traits: &'static [&'static str]) -> Binding<T> {
+        Binding(self.0, traits, PhantomData)
     }
 }
 
 impl<T: EnumType> Binding<T> {
     pub fn of_enum() -> Binding<T> {
-        Binding(BoundKind::Enum { rust: T::rust_type(), params: T::PARAMS, variants: T::VARIANTS }, Default::default(), PhantomData)
+        Binding(BoundKind::Enum { rust: T::rust_type(), params: T::PARAMS, variants: T::VARIANTS }, &[], PhantomData)
     }
 }
 
 impl<T: ObjectType> Binding<T> {
     pub fn of_object() -> Binding<T> {
-        Binding(BoundKind::Object(T::rust_type()), Default::default(), PhantomData)
+        Binding(BoundKind::Object(T::rust_type()), &[], PhantomData)
     }
 }
 
 impl<T: StructType> Binding<T> {
     pub fn of_struct() -> Binding<T> {
         let defaults = T::FIELDS.iter().map(|f| f.default.map(|default| default())).collect();
-        Binding(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults }, Default::default(), PhantomData)
+        Binding(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults }, &[], PhantomData)
     }
 }
 
 impl<T: ValueType> Binding<T> {
     pub fn of_value() -> Binding<T> {
         let info = ValueTypeInfo { ord: T::ORDER.is_some(), parse: crate::vm::value::parse_value::<T>, type_id: T::rust_type() };
-        Binding(BoundKind::Value(info), Default::default(), PhantomData)
+        Binding(BoundKind::Value(info), &[], PhantomData)
     }
 }
 
@@ -697,7 +697,8 @@ pub(crate) struct BoundType {
     pub doc: &'static str,
     pub public: bool,
     pub kind: BoundKind,
-    pub codecs: codec::NativeCodecs,
+    /// Names of the traits that the checker derives for this type.
+    pub derives: &'static [&'static str],
 }
 
 #[derive(Clone, Debug)]
@@ -904,7 +905,7 @@ impl NativeModule {
     /// variant, field, or type parameter names of `T` are invalid or
     /// duplicated, or if `T::NAME` is already registered in this module.
     pub fn bind<T: NamedType>(&mut self) -> &mut Self {
-        let Binding(kind, codecs, _) = T::binding();
+        let Binding(kind, derives, _) = T::binding();
         let names = |what: &str, owner: &str, names: &[&str], type_names: bool| {
             for (i, n) in names.iter().enumerate() {
                 match type_names {
@@ -938,19 +939,12 @@ impl NativeModule {
             }
             _ => {}
         }
-        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: T::PUBLIC, kind, codecs })
+        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: T::PUBLIC, kind, derives })
     }
 
     pub(crate) fn builtin_type(&mut self, name: &'static str, doc: &'static str, params: &'static [&'static str]) -> &mut Self {
         assert!(self.kind == ModKind::Prelude, "only the prelude has built-in types");
-        self.add_type(BoundType {
-            module: "prelude",
-            name,
-            doc,
-            public: true,
-            kind: BoundKind::Builtin(params),
-            codecs: Default::default(),
-        })
+        self.add_type(BoundType { module: "prelude", name, doc, public: true, kind: BoundKind::Builtin(params), derives: &[] })
     }
 
     fn add_type(&mut self, t: BoundType) -> &mut Self {

@@ -26,7 +26,7 @@ use crate::value::ValueSink;
 use crate::vm::bytecode::{PartFill, PartTemplate, Program, SHAPE_SLOT, Shape, ShapeKind};
 use crate::vm::meter::SLOW_BYTES_PER_UNIT;
 use crate::vm::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
-use crate::vm::{Fail, Vm, WaitKind};
+use crate::vm::{CtlKind, Fail, Vm, WaitKind};
 use parking_lot::Mutex;
 use std::sync::{Arc, Weak};
 
@@ -180,6 +180,22 @@ fn eval_template(vm: &mut Vm, template: &PartTemplate, outer_dict: VmValue) -> R
             vm.heap.alloc(Obj::Tuple(items.into_boxed_slice()))
         }
     })
+}
+
+/// Runs custom method `callee` with `args` if it is a native function.
+///
+/// Returns `None` for a Sand method, which runs as a callback. A native method
+/// must finish without waiting.
+fn call_native(vm: &mut Vm, callee: VmValue, args: &[VmValue]) -> CodecResult<Option<VmValue>> {
+    match vm.call_native_value(callee, args) {
+        None => Ok(None),
+        Some(Ok(result)) => Ok(Some(result)),
+        Some(Err(ctl)) => Err(match ctl.into_kind() {
+            CtlKind::Fail(fail) => fail.into(),
+            CtlKind::Collect => Fail::limit(LimitKind::Memory).into(),
+            _ => Fail::internal("a native `encode` or `decode` method waited").into(),
+        }),
+    }
 }
 
 /// Dispatch target extracted from a codec dictionary.
@@ -364,7 +380,7 @@ pub(crate) type SharedDecode = Arc<Mutex<Shared<dyn DecodeSource>>>;
 /// Handle that writes the single value of a custom `encode` method.
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
-pub(crate) struct Encoder {
+pub struct Encoder {
     /// Weak reference to the shared encode state.
     ///
     /// The walk drops the sink after finishing even if Sand code retains the
@@ -378,7 +394,7 @@ impl crate::native::NativeObject for Encoder {}
 /// Handle that reads the single value of a custom `decode` method.
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
-pub(crate) struct Decoder {
+pub struct Decoder {
     /// Weak reference to the shared decode state.
     ///
     /// The walk drops the source after finishing even if Sand code retains the
@@ -388,6 +404,43 @@ pub(crate) struct Decoder {
 }
 
 impl crate::native::NativeObject for Decoder {}
+
+impl Encoder {
+    /// Writes the value of a native `encode` method to the sink of `encoder`.
+    ///
+    /// `write` must write a single value. Fails with kind `"invalid"` if
+    /// `encoder` already received a value or if its `encode` call returned.
+    pub fn write<T>(
+        vm: &mut Vm,
+        encoder: VmVal<Encoder>,
+        write: impl FnOnce(&mut Vm, &mut dyn EncodeSink) -> CodecResult<T>,
+    ) -> Result<T, HostError> {
+        let (shared, token) = encoder.get(&vm.heap).map(|encoder_ref| (encoder_ref.shared.upgrade(), encoder_ref.token))?;
+        let shared = claim(shared, token, ENCODER_MISUSE)?;
+        let result = write(vm, &mut shared.lock().io);
+        release(&shared, &result);
+        result.map_err(HostError::into_ctl_error)
+    }
+}
+
+impl Decoder {
+    /// Reads the value of a native `decode` method from the source of
+    /// `decoder`.
+    ///
+    /// `read` must read a single value. Fails with kind `"invalid"` if
+    /// `decoder` already gave a value or if its `decode` call returned.
+    pub fn read<T>(
+        vm: &mut Vm,
+        decoder: VmVal<Decoder>,
+        read: impl FnOnce(&mut Vm, &mut dyn DecodeSource) -> CodecResult<T>,
+    ) -> Result<T, HostError> {
+        let (shared, token) = decoder.get(&vm.heap).map(|decoder_ref| (decoder_ref.shared.upgrade(), decoder_ref.token))?;
+        let shared = claim(shared, token, DECODER_MISUSE)?;
+        let result = read(vm, &mut shared.lock().io);
+        release(&shared, &result);
+        result.map_err(HostError::into_ctl_error)
+    }
+}
 
 /// Open container frame on the [`EncodeWalker`] stack.
 struct EncodeFrame {
@@ -507,7 +560,6 @@ impl EncodeWalker {
                 vm.meter.charge_bytes(text.len())?;
                 sink.native(&prog.types[*def as usize].desc().type_name, &text)?;
             }
-            (ShapeKind::ManualEncode(encode_fn), _) => encode_fn(vm, value, sink)?,
             (ShapeKind::List, _) => {
                 let len = vm.heap.list(value).len();
                 self.push_frame(vm, value, dict, shape_idx, EncodeKind::List, len)?;
@@ -630,7 +682,14 @@ impl Walker for EncodeWalker {
                     let encoder = vm.unchecked(|vm| (Encoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm))?;
                     self.callback = Some(shared_guard.turn.begin());
                     self.pending = None;
-                    return Ok(Step::Call(Callback { callee, args: vec![dict, value, encoder], kind: CallbackKind::Method }));
+                    let args = vec![dict, value, encoder];
+                    // A native method writes through the `Encoder`, which locks `shared`.
+                    drop(shared_guard);
+                    let Some(result) = call_native(vm, callee, &args)? else {
+                        return Ok(Step::Call(Callback { callee, args, kind: CallbackKind::Method }));
+                    };
+                    self.apply(vm, shared, CallbackKind::Method, result)?;
+                    shared_guard = shared.lock();
                 }
                 CodecDispatch::Structural(shape_idx) => {
                     self.pending = None;
@@ -872,7 +931,6 @@ impl DecodeWalker {
                     }
                 }
             }
-            ShapeKind::ManualDecode(decode_fn) => decode_fn(vm, source)?,
             ShapeKind::List | ShapeKind::Set => {
                 source.begin_list()?;
                 let container = match shape.kind {
@@ -950,7 +1008,6 @@ impl DecodeWalker {
                     slot_count,
                 );
             }
-            ShapeKind::ManualEncode(_) => return Err(Fail::internal("decode: an encode shape").into()),
         };
         self.place(vm, value)
     }
@@ -1113,7 +1170,14 @@ impl Walker for DecodeWalker {
                         // Pre-step memory check covers allocating `Decoder`.
                         let decoder = vm.unchecked(|vm| (Decoder { shared: Arc::downgrade(shared), token }).into_vm_value(vm))?;
                         self.callback = Some(shared_guard.turn.begin());
-                        return Ok(Step::Call(Callback { callee, args: vec![dict, decoder], kind: CallbackKind::Method }));
+                        let args = vec![dict, decoder];
+                        // A native method reads through the `Decoder`, which locks `shared`.
+                        drop(shared_guard);
+                        let Some(result) = call_native(vm, callee, &args)? else {
+                            return Ok(Step::Call(Callback { callee, args, kind: CallbackKind::Method }));
+                        };
+                        self.apply(vm, shared, CallbackKind::Method, result)?;
+                        shared_guard = shared.lock();
                     }
                     CodecDispatch::Structural(shape_idx) => self.visit(vm, &prog, &mut shared_guard.io, shape_idx, dict)?,
                 }
@@ -1416,27 +1480,41 @@ const ENCODER_MISUSE: [&str; 2] =
 const DECODER_MISUSE: [&str; 2] =
     ["a `Decoder` gives a value only during its `decode` call", "a `decode` method read a second value from its `Decoder`"];
 
-/// Claims `token` on `shared`. Runs nested `walker` asynchronously.
+/// Claims the single operation of `token` on `shared`.
+fn claim<IO: ?Sized>(
+    shared: Option<Arc<Mutex<Shared<IO>>>>,
+    token: u64,
+    [inactive, second]: [&str; 2],
+) -> Result<Arc<Mutex<Shared<IO>>>, HostError> {
+    let Some(shared) = shared else { return Err(HostError::new("invalid", inactive)) };
+    shared.lock().turn.claim(token, inactive, second)?;
+    Ok(shared)
+}
+
+/// Ends an operation that [`claim`] started.
 ///
-/// Records any recoverable failure in `Turn` so the outer walk fails even if
-/// the custom method ignores the returned `Result`.
+/// Records a recoverable failure in `Turn`, so that the outer walk fails even
+/// if the custom method ignores the returned `Result`.
+fn release<IO: ?Sized, T>(shared: &Mutex<Shared<IO>>, result: &CodecResult<T>) {
+    let mut shared_guard = shared.lock();
+    shared_guard.turn.in_flight -= 1;
+    if let Err(err) = result {
+        shared_guard.turn.record_error(err);
+    }
+}
+
+/// Claims `token` on `shared`. Runs nested `walker` asynchronously.
 fn start_nested_walk<W: Walker, T: IntoVmValue + 'static>(
     shared: Option<Arc<Mutex<Shared<W::IO>>>>,
     token: u64,
-    [inactive, second]: [&str; 2],
+    messages: [&str; 2],
     walker: W,
     output: impl FnOnce(W::Output) -> T + Send + 'static,
 ) -> Result<Later<T, HostError>, HostError> {
-    let Some(shared) = shared else { return Err(HostError::new("invalid", inactive)) };
-    shared.lock().turn.claim(token, inactive, second)?;
+    let shared = claim(shared, token, messages)?;
     Ok(Later::new(WaitKind::Io, |mut context| async move {
         let result = run_async(&mut context, &shared, walker).await;
-        let mut shared_guard = shared.lock();
-        shared_guard.turn.in_flight -= 1;
-        if let Err(err) = &result {
-            shared_guard.turn.record_error(err);
-        }
-        drop(shared_guard);
+        release(&shared, &result);
         result.map(output)
     }))
 }

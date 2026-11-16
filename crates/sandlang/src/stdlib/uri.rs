@@ -9,7 +9,7 @@ use crate::vm::{Fail, Vm};
 /// A parsed RFC 3986 URI. `host` is `Some` if the URI includes an authority
 /// component (`//...`). IPv6 host literals omit the enclosing brackets.
 #[derive(crate::SandStruct)]
-#[sand(module = "uri", encode, decode)]
+#[sand(module = "uri", derive(Encode, Decode))]
 struct Uri {
     /// Lowercase URI scheme, such as `"https"`.
     scheme: String,

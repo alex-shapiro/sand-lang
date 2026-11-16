@@ -357,6 +357,12 @@ Visible defects that rarely block users.
 ### Miscellaneous
 
 - [ ] ⚪ Move all crates into a `crates/` directory and standardize crate metadata to use workspace values.
+- [ ] ⚪ Let host traits declare native default methods. Today the Rust function
+      of a native default method must take the dictionary of a built-in trait
+      (`src/check/traits.rs`, `native_default_method`), so only `Encode` and
+      `Decode` are structural traits. A structural trait must also declare a
+      single method, take no type parameters, and have no supertraits with
+      methods, because its dictionary stores the shape index after the method.
 
 ### Test coverage
 

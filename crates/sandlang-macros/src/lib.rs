@@ -12,14 +12,11 @@
 //! - `manual_conversion`: the macro omits `FromVmValue` and `IntoVmValue` on
 //!   `SandEnum` and `SandStruct`.
 //! - `no_value`: the macro omits `ToValue` on `SandEnum` and `SandStruct`.
-//! - `encode` and `decode`: the checker derives the Sand `Encode` and `Decode`
-//!   traits from the type's structure.
-//! - `encode = "manual"` and `decode = "manual"`: the macro delegates to the
-//!   Rust traits `native::codec::Encode` and `native::codec::Decode`.
+//! - `derive(<Trait>, ...)`: the checker derives each named trait from the
+//!   type's structure, as in `derive(Encode, Decode)`. The trait must have a
+//!   native default method.
 //!
-//! The macros omit Sand codec traits unless `encode` or `decode` is present.
-//! `SandObject` accepts only `encode = "manual"` and `decode = "manual"`. The
-//! macros reject `encode` and `decode` on generic types.
+//! The macros reject `derive` on `SandObject` and on generic types.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
@@ -124,30 +121,8 @@ struct TypeAttrs {
     doc: Tokens,
     manual_conversion: bool,
     no_value: bool,
-    /// Codec mode for `Encode` and `Decode`:
-    ///
-    /// - `None`: the type does not implement the trait.
-    /// - `Some(false)`: the checker derives a structural implementation.
-    /// - `Some(true)`: a manual Rust codec implements the trait.
-    encode: Option<bool>,
-    decode: Option<bool>,
-}
-
-/// Parses an `encode` or `decode` attribute.
-///
-/// Returns `true` for `= "manual"`.
-fn parse_codec_is_manual(meta: &syn::meta::ParseNestedMeta, derive: &str) -> syn::Result<bool> {
-    if meta.input.peek(syn::Token![=]) {
-        let mode: LitStr = meta.value()?.parse()?;
-        if mode.value() != "manual" {
-            return Err(Error::new_spanned(mode, "expected `\"manual\"`"));
-        }
-        return Ok(true);
-    }
-    if derive == "SandObject" {
-        return Err(meta.error("a `SandObject` can only implement `Encode` and `Decode` with `= \"manual\"`"));
-    }
-    Ok(false)
+    /// Names of the traits that the checker derives for the type.
+    derives: Vec<Ident>,
 }
 
 fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs> {
@@ -157,7 +132,7 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     let mut public = true;
     let mut manual_conversion = false;
     let mut no_value = false;
-    let (mut encode, mut decode) = (None, None);
+    let mut derives = Vec::new();
     let mut krate: Path = parse_quote!(::sandlang);
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("sand")) {
         attr.parse_nested_meta(|meta| {
@@ -169,20 +144,23 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
                 public = false;
             } else if meta.path.is_ident("crate") {
                 krate = meta.value()?.parse()?;
-            } else if meta.path.is_ident("encode") {
-                encode = Some(parse_codec_is_manual(&meta, derive)?);
-            } else if meta.path.is_ident("decode") {
-                decode = Some(parse_codec_is_manual(&meta, derive)?);
+            } else if meta.path.is_ident("derive") {
+                if derive == "SandObject" {
+                    return Err(meta.error("a `SandObject` cannot derive traits"));
+                }
+                meta.parse_nested_meta(|trait_meta| {
+                    let name = trait_meta.path.get_ident().ok_or_else(|| trait_meta.error("expected a trait name"))?;
+                    derives.push(name.clone());
+                    Ok(())
+                })?;
             } else if meta.path.is_ident("manual_conversion") && matches!(derive, "SandEnum" | "SandStruct") {
                 manual_conversion = true;
             } else if meta.path.is_ident("no_value") && matches!(derive, "SandEnum" | "SandStruct") {
                 no_value = true;
             } else if matches!(derive, "SandEnum" | "SandStruct") {
-                return Err(
-                    meta.error("expected `module`, `name`, `private`, `crate`, `encode`, `decode`, `manual_conversion` or `no_value`")
-                );
+                return Err(meta.error("expected `module`, `name`, `private`, `crate`, `derive`, `manual_conversion` or `no_value`"));
             } else {
-                return Err(meta.error("expected `module`, `name`, `private`, `crate`, `encode` or `decode`"));
+                return Err(meta.error("expected `module`, `name`, `private` or `crate`"));
             }
             Ok(())
         })?;
@@ -190,10 +168,10 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     let Some(module) = module else {
         return Err(Error::new(Span::call_site(), format!("`{derive}` requires `#[sand(module = \"...\")]`")));
     };
-    if (encode.is_some() || decode.is_some()) && input.generics.type_params().next().is_some() {
-        return Err(Error::new_spanned(&input.generics, "a generic native type cannot implement `Encode` or `Decode`"));
+    if !derives.is_empty() && input.generics.type_params().next().is_some() {
+        return Err(Error::new_spanned(&input.generics, "a generic native type cannot derive traits"));
     }
-    Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs), manual_conversion, no_value, encode, decode })
+    Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs), manual_conversion, no_value, derives })
 }
 
 struct TypeParams {
@@ -316,15 +294,9 @@ fn reject_member_attrs(data: &Data) -> syn::Result<()> {
 }
 
 fn expand_named_type(input: &DeriveInput, a: &TypeAttrs, type_params: &TypeParams, binding: Tokens) -> Tokens {
-    let TypeAttrs { module, name, public, krate, doc, encode, decode, .. } = a;
-    let codec_tokens = |is_manual: Option<bool>, manual_fn: Tokens| match is_manual {
-        None => quote!(::std::option::Option::None),
-        Some(false) => quote!(::std::option::Option::Some(#krate::native::codec::NativeCodec::Derived)),
-        Some(true) => quote!(::std::option::Option::Some(#krate::native::codec::NativeCodec::Manual(#manual_fn))),
-    };
-    let encode = codec_tokens(*encode, quote!(#krate::native::codec::manual_encode::<Self>));
-    let decode = codec_tokens(*decode, quote!(#krate::native::codec::manual_decode::<Self>));
-    let binding = quote!(#binding.codecs(#krate::native::codec::NativeCodecs { encode: #encode, decode: #decode }));
+    let TypeAttrs { module, name, public, krate, doc, derives, .. } = a;
+    let derives = derives.iter().map(|name| name.to_string());
+    let binding = quote!(#binding.derives(&[#(#derives),*]));
     let ty = &input.ident;
     let check = assert_type_name(krate, "type", &name.value(), name.span());
     let (imp, tyg, wh) = type_params.split_for_impl(input, |_| quote!(#krate::native::ty::SandType));
@@ -893,24 +865,12 @@ mod tests {
             (
                 sand_enum,
                 "#[sand(module = \"m\", public)] enum E { A }",
-                "expected `module`, `name`, `private`, `crate`, `encode`, `decode`, `manual_conversion` or `no_value`",
+                "expected `module`, `name`, `private`, `crate`, `derive`, `manual_conversion` or `no_value`",
             ),
-            (
-                sand_object,
-                "#[sand(module = \"m\", manual_conversion)] struct O;",
-                "expected `module`, `name`, `private`, `crate`, `encode` or `decode`",
-            ),
-            (
-                sand_object,
-                "#[sand(module = \"m\", encode)] struct O;",
-                "a `SandObject` can only implement `Encode` and `Decode` with `= \"manual\"`",
-            ),
-            (
-                sand_struct,
-                "#[sand(module = \"m\", decode)] struct S<T> { x: T }",
-                "a generic native type cannot implement `Encode` or `Decode`",
-            ),
-            (sand_struct, "#[sand(module = \"m\", encode = \"custom\")] struct S;", "expected `\"manual\"`"),
+            (sand_object, "#[sand(module = \"m\", manual_conversion)] struct O;", "expected `module`, `name`, `private` or `crate`"),
+            (sand_object, "#[sand(module = \"m\", derive(Encode))] struct O;", "a `SandObject` cannot derive traits"),
+            (sand_struct, "#[sand(module = \"m\", derive(Decode))] struct S<T> { x: T }", "a generic native type cannot derive traits"),
+            (sand_struct, "#[sand(module = \"m\", derive(a::B))] struct S;", "expected a trait name"),
         ];
         for (f, src, msg) in cases {
             let out = expand(f, src);

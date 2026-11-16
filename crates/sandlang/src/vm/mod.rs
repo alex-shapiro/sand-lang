@@ -1040,6 +1040,15 @@ impl Vm {
         self.meter.charge(units)
     }
 
+    /// Runs `callee` with `args` if `callee` is a native function. Returns
+    /// `None` for a Sand function.
+    pub(crate) fn call_native_value(&mut self, callee: VmValue, args: &[VmValue]) -> Option<Result<VmValue, Ctl>> {
+        let VmValue::Obj(_) = callee else { return None };
+        let Obj::NativeFn(native) = self.heap.get(callee) else { return None };
+        let natives = self.natives.clone();
+        Some(natives[*native as usize].f.call(self, args))
+    }
+
     /// Charges for `n` bytes copied, compared or scanned.
     #[inline]
     pub fn charge_bytes(&self, n: usize) -> Result<(), Fail> {

@@ -112,6 +112,16 @@ extend Json {
     }
 }
 
+impl Encode for Json {
+    /// Writes the JSON data of `self` to `encoder`.
+    native fn encode(self, encoder: Encoder) -> Result<()>
+}
+
+impl Decode for Json {
+    /// Reads JSON data from `decoder`.
+    native fn decode(decoder: Decoder) -> Result<Json>
+}
+
 /// Parses `text` as a `Json` value.
 ///
 /// Numbers without a decimal point, exponent, or `-0` that fit in a 64-bit

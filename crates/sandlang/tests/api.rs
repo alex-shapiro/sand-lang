@@ -317,7 +317,7 @@ fn host_type_implements_vm_value_conversion() {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, sandlang::SandValue)]
-#[sand(module = "bank", encode, decode)]
+#[sand(module = "bank", derive(Encode, Decode))]
 struct Money(i64);
 
 impl std::fmt::Display for Money {
@@ -335,7 +335,7 @@ impl ValueType for Money {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, sandlang::SandValue)]
-#[sand(module = "bank", encode, decode)]
+#[sand(module = "bank", derive(Encode, Decode))]
 struct Cell(i64, i64);
 
 impl std::fmt::Display for Cell {
@@ -1258,7 +1258,7 @@ fn boxed_structs_convert_to_a_bounded_depth() {
 
 /// A figure in the plane.
 #[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
-#[sand(module = "draw", encode, decode)]
+#[sand(module = "draw", derive(Encode, Decode))]
 enum Figure {
     /// Nothing at all.
     Empty,
@@ -1551,7 +1551,7 @@ fn generic_host_types_refer_to_their_own_type_as_self() {
 
 /// Settings with defaults.
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
-#[sand(module = "conf", encode, decode)]
+#[sand(module = "conf", derive(Encode, Decode))]
 struct Settings {
     name: String,
     #[sand(default = 8080)]
@@ -1609,7 +1609,7 @@ fn default_doc() -> sandlang::stdlib::json::Json {
 }
 
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
-#[sand(module = "conf", encode, decode)]
+#[sand(module = "conf", derive(Encode, Decode))]
 struct Doc {
     #[sand(default = default_doc())]
     body: sandlang::stdlib::json::Json,
@@ -1793,7 +1793,7 @@ fn help_cuts_long_rust_field_defaults_as_it_cuts_sand_ones() {
 #[test]
 fn rust_field_defaults_can_be_any_constant() {
     #[derive(Debug, PartialEq, sandlang::SandStruct)]
-    #[sand(module = "draw", encode, decode)]
+    #[sand(module = "draw", derive(Encode, Decode))]
     struct Frame {
         #[sand(default = 1.5)]
         width: f64,
@@ -1801,7 +1801,7 @@ fn rust_field_defaults_can_be_any_constant() {
         labels: Vec<String>,
     }
     #[derive(Debug, PartialEq, sandlang::SandStruct)]
-    #[sand(module = "draw", encode, decode)]
+    #[sand(module = "draw", derive(Encode, Decode))]
     struct Sketch {
         #[sand(default = Figure::Empty)]
         figure: Figure,
@@ -4546,7 +4546,7 @@ fn to_value_counts_its_memory_against_the_memory_limit() {
 
 /// Delivery state with unit, tuple, and struct variants.
 #[derive(Clone, sandlang::SandEnum)]
-#[sand(module = "shop", encode, decode)]
+#[sand(module = "shop", derive(Encode, Decode))]
 enum Delivery {
     Pending,
     Shipped(i64, String),
@@ -4555,7 +4555,7 @@ enum Delivery {
 
 /// Sample order with each field kind that derived `Encode` supports.
 #[derive(Clone, sandlang::SandStruct)]
-#[sand(module = "shop", encode, decode)]
+#[sand(module = "shop", derive(Encode, Decode))]
 struct Purchase {
     id: i64,
     deliveries: Vec<Delivery>,

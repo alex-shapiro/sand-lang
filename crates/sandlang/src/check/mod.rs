@@ -17,7 +17,6 @@ pub(crate) mod verify;
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::native::codec::NativeCodec;
 use crate::native::func::Signature;
 use crate::native::ty::Type;
 use crate::native::{BoundKind, EnumVariant, NativeDecl, StructField};
@@ -1575,7 +1574,7 @@ impl Checker {
             is_pub,
             doc: doc.map(Arc::from),
             span: name.span,
-            native_codecs: None,
+            native_derives: None,
         });
         (self.types.len() - 1) as TypeDefId
     }
@@ -1726,7 +1725,7 @@ impl Checker {
                 BoundKind::Struct { .. } => TypeDefKind::Struct { fields: vec![] },
             };
             let id = self.new_typedef(&ident, generics, kind, t.public, doc);
-            self.types[id as usize].native_codecs = Some(t.codecs);
+            self.types[id as usize].native_derives = Some(t.derives);
             self.define_ident(&ident, Def::Type(TyRef::Def(id)), t.public);
             match &t.kind {
                 BoundKind::Enum { rust, variants, .. } => {

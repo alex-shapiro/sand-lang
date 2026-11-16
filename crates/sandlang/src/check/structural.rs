@@ -129,19 +129,14 @@ impl Checker {
                 if has_declared_impl {
                     continue;
                 }
-                match self.structural_form(def_id, trait_id) {
-                    Some(is_derived) => {
-                        let impl_id = self.add_structural_impl(trait_ref, def_id);
-                        if is_derived {
-                            candidates.push(impl_id);
-                        }
-                    }
-                    None if matches!(self.types[def_id as usize].kind, TypeDefKind::Struct { .. }) => {
-                        let reason =
-                            format!("the parameters of `{}.init` differ from its fields", self.name(self.types[def_id as usize].name));
-                        self.structural_failure_reasons.insert((trait_ref.trait_id, def_id), reason.into());
-                    }
-                    None => {}
+                if self.derives(def_id, trait_id) {
+                    candidates.push(self.add_structural_impl(trait_ref, def_id));
+                    continue;
+                }
+                let def = &self.types[def_id as usize];
+                if def.native_derives.is_none() && matches!(def.kind, TypeDefKind::Struct { .. }) {
+                    let reason = format!("the parameters of `{}.init` differ from its fields", self.name(def.name));
+                    self.structural_failure_reasons.insert((trait_id, def_id), reason.into());
                 }
             }
             self.propagate_structural_bounds(&candidates);
@@ -157,26 +152,22 @@ impl Checker {
         }
     }
 
-    /// Classifies how type definition `def_id` implements structural trait
-    /// `trait_id`:
+    /// Returns `true` if the checker derives structural trait `trait_id` for
+    /// type definition `def_id`.
     ///
-    /// - `Some(true)` if the checker derives it from the type's parts.
-    /// - `Some(false)` if a manual Rust codec function implements it.
-    /// - `None` if `def_id` requires an explicit `impl` block to implement
-    ///   `trait_id`.
-    fn structural_form(&mut self, def_id: TypeDefId, trait_id: TraitId) -> Option<bool> {
-        let view = self.traits[trait_id as usize].structural?;
-        if let Some(native_codecs) = self.types[def_id as usize].native_codecs {
-            let manual = match view {
-                StructView::Fields => matches!(native_codecs.encode?, NativeCodec::Manual(_)),
-                StructView::Constructor => matches!(native_codecs.decode?, NativeCodec::Manual(_)),
-            };
-            return Some(!manual);
+    /// A native type derives the traits that its binding names. A Sand enum
+    /// derives every structural trait. A Sand struct derives a trait that
+    /// reads values only if its `init` parameters match its fields.
+    fn derives(&mut self, def_id: TypeDefId, trait_id: TraitId) -> bool {
+        let Some(view) = self.traits[trait_id as usize].structural else { return false };
+        if let Some(derives) = self.types[def_id as usize].native_derives {
+            let name = self.name(self.traits[trait_id as usize].name);
+            return derives.contains(&name);
         }
         match &self.types[def_id as usize].kind {
-            TypeDefKind::Struct { .. } => (view == StructView::Constructor || self.init_matches_fields(def_id)).then_some(true),
-            TypeDefKind::Enum { .. } => Some(true),
-            TypeDefKind::Opaque(_) => None,
+            TypeDefKind::Struct { .. } => view == StructView::Constructor || self.init_matches_fields(def_id),
+            TypeDefKind::Enum { .. } => true,
+            TypeDefKind::Opaque(_) => false,
         }
     }
 
@@ -466,9 +457,6 @@ impl Checker {
             Ty::Named(def_id, args) => {
                 let args = self.elems(args);
                 let def = self.types[def_id as usize].clone();
-                if self.structural_form(def_id, trait_ref.trait_id) == Some(false) {
-                    return Some(structural);
-                }
                 let instantiate_ty = |checker: &mut Checker, ty: TypeId, generics: &[ParamId]| {
                     checker.arena.instantiate(ty, generics, &args[..generics.len().min(args.len())])
                 };

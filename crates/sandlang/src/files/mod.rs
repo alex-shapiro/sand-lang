@@ -68,7 +68,7 @@ pub(crate) fn is_unchecked_symlink(e: &io::Error) -> bool {
 
 /// File access mode for `open`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, crate::SandEnum)]
-#[sand(module = "fs", name = "Mode", encode, decode)]
+#[sand(module = "fs", name = "Mode", derive(Encode, Decode))]
 pub(crate) enum OpenMode {
     /// Opens an existing file for reading. Requires `FsRead`.
     Read,

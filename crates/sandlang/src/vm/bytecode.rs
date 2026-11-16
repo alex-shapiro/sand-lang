@@ -1362,8 +1362,6 @@ pub enum ShapeKind {
     },
     /// Native value type `def` encoded and decoded as text.
     Native(u32, crate::vm::value::ParseValue),
-    ManualEncode(crate::native::codec::EncodeFn),
-    ManualDecode(crate::native::codec::DecodeFn),
 }
 
 /// Template that constructs a part dictionary from the outer dictionary.

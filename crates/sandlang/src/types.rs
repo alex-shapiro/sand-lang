@@ -746,8 +746,9 @@ pub struct TypeDef {
     pub is_pub: bool,
     pub doc: Option<Arc<str>>,
     pub span: Span,
-    /// Codec traits declared on a native type, or `None` for a Sand type.
-    pub native_codecs: Option<crate::native::codec::NativeCodecs>,
+    /// Names of the traits that a native type derives, or `None` for a Sand
+    /// type.
+    pub native_derives: Option<&'static [&'static str]>,
 }
 
 impl TypeDef {

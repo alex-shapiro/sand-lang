@@ -33,7 +33,7 @@ fn float_lit(f: f64) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
-#[sand(module = "fig", encode, decode)]
+#[sand(module = "fig", derive(Encode, Decode))]
 enum Fig {
     Empty,
     Num(i64),
@@ -80,7 +80,7 @@ struct Holder<A, B: Ord> {
 }
 
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
-#[sand(module = "fig", encode, decode)]
+#[sand(module = "fig", derive(Encode, Decode))]
 struct Defaults {
     #[sand(default = -7)]
     n: i64,

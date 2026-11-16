@@ -15,7 +15,6 @@ use crate::check::{CheckedProgram, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::native::codec::{NativeCodec, NativeCodecs};
 use crate::types::{FnId, ImplId, Opaque, Ty, TypeArena, TypeDefId, TypeDefKind, TypeId};
 use crate::vm::bytecode::*;
 use crate::vm::value::FxHashMap;
@@ -2786,12 +2785,10 @@ impl<'a> Compiler<'a> {
             Ty::Tuple(_) => ShapeKind::Tuple,
             Ty::Named(def_id, _) => {
                 let def = &cp.types[def_id as usize];
-                match (def.native_codecs, &def.kind) {
-                    (Some(NativeCodecs { encode: Some(NativeCodec::Manual(f)), .. }), _) if !builds_values => ShapeKind::ManualEncode(f),
-                    (Some(NativeCodecs { decode: Some(NativeCodec::Manual(f)), .. }), _) if builds_values => ShapeKind::ManualDecode(f),
+                match &def.kind {
                     _ if def_id == cp.wk.option => ShapeKind::Option,
-                    (_, TypeDefKind::Opaque(Opaque::Value(info))) => ShapeKind::Native(def_id, info.parse),
-                    (_, TypeDefKind::Enum { .. }) => {
+                    TypeDefKind::Opaque(Opaque::Value(info)) => ShapeKind::Native(def_id, info.parse),
+                    TypeDefKind::Enum { .. } => {
                         let first_variant = self.prog.variants.iter().position(|v| v.def == def_id).unwrap_or(0) as u32;
                         ShapeKind::Enum { def: def_id, first_variant }
                     }
