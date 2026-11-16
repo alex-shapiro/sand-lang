@@ -85,10 +85,6 @@ pub(crate) struct CodecReqs {
     pub found: Vec<(TypeId, TraitRef)>,
 }
 
-/// The index of the first bound in the dictionary of a structural
-/// implementation, after its method and its shape.
-pub const CODEC_BOUNDS: u32 = 2;
-
 impl Checker {
     /// Returns `true` if `t` is `Encode` or `Decode`.
     pub(crate) fn is_codec_trait(&self, t: TraitId) -> bool {
@@ -178,10 +174,9 @@ impl Checker {
         let args: Vec<TypeId> = generics.iter().map(|&p| self.param_ty(p)).collect();
         let target = self.arena.named(d, &args);
         let (module, span) = (self.types[d as usize].module, self.types[d as usize].span);
-        self.push_codec_impl(tr, target, generics, Vec::new(), module, span, (Ctor::Def(d), 0))
+        self.push_codec_impl(tr, target, generics, Vec::new(), module, span)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn push_codec_impl(
         &mut self,
         tr: TraitRef,
@@ -190,11 +185,9 @@ impl Checker {
         evidence: Vec<(TypeId, TraitRef)>,
         module: ModId,
         span: Span,
-        key: (Ctor, u32),
     ) -> ImplId {
         let method = self.traits[tr.trait_id as usize].methods[0].default.expect("a codec trait has a native default method");
         let id = self.impls.len() as ImplId;
-        let derived = true;
         self.impls.push(ImplDef {
             trait_ref: tr,
             target,
@@ -205,9 +198,11 @@ impl Checker {
             evidence,
             replaced: false,
             codec: None,
-            derived,
+            derived: true,
         });
-        if target != TypeId::NEVER {
+        if target != TypeId::NEVER
+            && let Some(key) = impl_key(&self.arena, target)
+        {
             super::traits::add_impl(&mut self.impls_by, (tr.trait_id, key.0, key.1), id);
             super::traits::add_impl(&mut self.impls_by_ctor, key, id);
         }
@@ -229,7 +224,7 @@ impl Checker {
         let target = self.arena.tuple(&elems);
         let evidence = elems.iter().map(|&t| (t, tr)).collect();
         let module = self.prelude.unwrap_or(self.cur_mod);
-        let id = self.push_codec_impl(tr, target, generics, evidence, module, Span::default(), (Ctor::Tuple, arity));
+        let id = self.push_codec_impl(tr, target, generics, evidence, module, Span::default());
         self.resolve_codec_parts(id);
     }
 
@@ -240,7 +235,7 @@ impl Checker {
             return id;
         }
         let module = self.prelude.unwrap_or(self.cur_mod);
-        let id = self.push_codec_impl(tr, TypeId::NEVER, Vec::new(), Vec::new(), module, Span::default(), (Ctor::Unit, 0));
+        let id = self.push_codec_impl(tr, TypeId::NEVER, Vec::new(), Vec::new(), module, Span::default());
         self.impls[id as usize].codec = Some(Arc::new(CodecImpl::default()));
         self.never_impls[b as usize] = Some(id);
         id
@@ -396,7 +391,7 @@ impl Checker {
             return;
         };
         let mut evidence = Vec::new();
-        let mut slot = CODEC_BOUNDS;
+        let mut slot = crate::vm::bytecode::CODEC_SHAPE_SLOT as u32 + 1;
         for &(t, tr) in &imp.evidence {
             let e = match self.has_dict(&tr) {
                 true => {

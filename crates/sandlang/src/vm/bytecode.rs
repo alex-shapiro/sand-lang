@@ -1288,8 +1288,12 @@ pub struct VariantRt {
     pub desc: OnceLock<Arc<VariantDesc>>,
 }
 
+/// The slot of the shape index in the dictionary of a structural codec
+/// impl, after the one method of the trait. The bounds of the impl follow.
+pub const CODEC_SHAPE_SLOT: usize = 1;
+
 /// How the codec walker visits one level of a type for a structural
-/// `Encode` or `Decode` dictionary. Slot 1 of the dictionary holds the index
+/// `Encode` or `Decode` dictionary. Slot [`CODEC_SHAPE_SLOT`] of the dictionary holds the index
 /// of its shape in [`Program::codec_shapes`].
 #[derive(Clone, Debug)]
 pub struct CodecShape {

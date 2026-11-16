@@ -743,7 +743,8 @@ the `InputKind` of the input value without reading it: `Null`, `Bool`, `Int`,
 
 A struct that declares `init` (§4.2) decodes the parameters of `init` and
 calls `init`. A missing `Option` parameter is `None`, and a missing parameter
-with a default gets its default. If the names or types of the `init`
+with a default gets its default. The input can give every parameter, including
+a parameter with a default, such as a limit that `init` checks. If the names or types of the `init`
 parameters differ from the fields, the struct does not derive `Encode`.
 
 A derived `Decode` gives a missing struct field its default. A duplicate struct

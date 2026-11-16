@@ -2720,6 +2720,7 @@ impl<'a> Compiler<'a> {
         let slots = self.cp.impls[impl_id as usize].slots.clone();
         let mut heads: Vec<u32> = slots.iter().map(|&fid| self.fn_const(fid)).collect();
         if self.cp.is_structural_impl(impl_id) {
+            debug_assert_eq!(heads.len(), crate::vm::bytecode::CODEC_SHAPE_SLOT);
             let shape = self.codec_shape(impl_id);
             heads.push(self.const_idx(Const::Int(i64::from(shape))));
         }
@@ -2786,7 +2787,10 @@ impl<'a> Compiler<'a> {
                     _ => ShapeKind::Struct(d),
                 }
             }
-            _ => ShapeKind::Never,
+            _ => {
+                self.errors.push(Diag::error(imp.span, "internal error: a structural impl has a type without a shape"));
+                ShapeKind::Never
+            }
         };
         let field_consts: Vec<Option<&crate::types::ConstVal>> = match &kind {
             ShapeKind::Struct(d) => cp.types[*d as usize].fields().iter().map(|f| f.const_default.as_deref()).collect(),

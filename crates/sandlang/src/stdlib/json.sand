@@ -136,7 +136,8 @@ pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>
 /// If a struct field is omitted from a JSON object, `decode` uses the field's
 /// declared default, or `None` if the field is an `Option` without a default.
 /// A struct that declares `init` decodes the parameters of `init` and calls
-/// it. Custom `decode` methods, `init`, and computed defaults run as the
+/// it. The input can give each parameter, including a parameter with a
+/// default. Custom `decode` methods, `init`, and computed defaults run as the
 /// decode reaches each value, so one of them can run before a later value
 /// fails to decode.
 ///

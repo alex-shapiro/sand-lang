@@ -14,7 +14,7 @@
 //! the source. Only the first pass of a native call, which the VM can run
 //! again from the start, returns that failure as a retryable error.
 
-use super::bytecode::{CodecShape, Fill, PartTemplate, Program, ShapeKind};
+use super::bytecode::{CODEC_SHAPE_SLOT, CodecShape, Fill, PartTemplate, Program, ShapeKind};
 use super::meter::{SCRATCH_STEP, SLOW_BYTES_PER_UNIT};
 use super::value::{FxHashMap, MapObj, Obj, SetObj, VariantRef, VmValue};
 use super::{Fail, Vm, WaitKind};
@@ -176,10 +176,10 @@ enum Method {
 
 fn method(vm: &Vm, dict: VmValue) -> Result<Method, Fail> {
     match vm.heap.get(dict) {
-        Obj::Tuple(items) => match items[..] {
-            [_, VmValue::Int(s), ..] => Ok(Method::Structural(s as u32)),
-            [m, ..] => Ok(Method::Custom(m)),
-            [] => Err(Fail::internal("a codec dictionary is empty")),
+        Obj::Tuple(items) => match (items.first(), items.get(CODEC_SHAPE_SLOT)) {
+            (_, Some(&VmValue::Int(s))) => Ok(Method::Structural(s as u32)),
+            (Some(&m), _) => Ok(Method::Custom(m)),
+            (None, _) => Err(Fail::internal("a codec dictionary is empty")),
         },
         _ => Err(Fail::internal("a codec dictionary is not a tuple")),
     }

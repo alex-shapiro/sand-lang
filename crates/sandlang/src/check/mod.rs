@@ -2303,22 +2303,21 @@ impl Checker {
     ) -> Vec<(u8, Builtin)> {
         let span = f.name.span;
         let owner = format!("the Rust function of native `{key}`");
-        let mut num: Vec<(u8, Builtin)> = Vec::new();
+        let mut available: Vec<(u8, Builtin)> = Vec::new();
         for i in 0..generics.len() as u8 {
             for &b in Builtin::ALL {
                 if let Some(t) = self.builtins[b as usize]
                     && self.traits[t as usize].has_dict
                     && self.param_has_trait(generics[i as usize], t)
                 {
-                    num.push((i, b));
+                    available.push((i, b));
                 }
             }
         }
         let k = sig.params.iter().take_while(|t| matches!(t, Type::Dict(..))).count();
-        let (evidence, rest) = sig.params.split_at(k);
-        let taken: Vec<(u8, Builtin)> =
-            evidence.iter().filter_map(|t| if let Type::Dict(i, b) = t { Some((*i, *b)) } else { None }).collect();
-        let mut wanted = num.iter();
+        let (dicts, rest) = sig.params.split_at(k);
+        let taken: Vec<(u8, Builtin)> = dicts.iter().filter_map(|t| if let Type::Dict(i, b) = t { Some((*i, *b)) } else { None }).collect();
+        let mut wanted = available.iter();
         let leads_match = taken.iter().all(|i| wanted.any(|j| j == i)) && !rest.iter().any(|t| matches!(t, Type::Dict(..)));
         if leads_match {
             let mark = self.diags.len();
@@ -2333,7 +2332,7 @@ impl Checker {
                 return taken;
             }
         }
-        let leads: Vec<Type> = num.iter().map(|&(i, b)| Type::Dict(i, b)).collect();
+        let leads: Vec<Type> = available.iter().map(|&(i, b)| Type::Dict(i, b)).collect();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let names: Vec<String> = generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect();
         let show_rust =
