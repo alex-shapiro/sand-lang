@@ -584,7 +584,7 @@ print(Box(item: 1).show())
 --- error
 8: int does not implement `Describe`
 
-=== reflect natives alongside dictionaries
+=== json.encode and json.decode alongside user trait dictionaries
 import json
 trait Describe {
     fn describe(self) -> str
@@ -592,7 +592,7 @@ trait Describe {
 struct P { x: int }
 impl Describe for P {
     fn describe(self) -> str {
-        let again: P = json.decode(json.encode(self)).unwrap()
+        let again: P = json.decode(json.encode(self).unwrap()).unwrap()
         "P\(again.x)"
     }
 }
@@ -1115,7 +1115,6 @@ fn outer() {
 3: `where` clauses in trait methods may only constrain the method's own type parameters
 8: default values are declared by the trait, not the impl
 9: impl methods cannot require traits of the impl's type parameters
-12: local functions cannot require traits with methods
 
 === pub is not allowed on trait and impl methods
 trait Describe {
@@ -1455,7 +1454,7 @@ fn main() {
 --- error
 20: float does not implement `Hash` (required for [float] to implement `Marker`)
 
-=== a local function that requires a trait with methods is reported once
+=== the checker verifies trait bounds at each call to a local function
 trait Describe {
     fn describe(self) -> str
 }
@@ -1469,9 +1468,41 @@ fn outer() {
     print(show("s"))
 }
 --- error
-8: local functions cannot require traits with methods
-9: local functions cannot require traits with methods
 11: str does not implement `Describe`
+
+=== local generic functions receive trait dictionaries at each call
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for int {
+    fn describe(self) -> str { "int \(self)" }
+}
+impl Describe for str {
+    fn describe(self) -> str { "str \(self)" }
+}
+fn outer<T: Describe>(t: T) {
+    fn show<U: Describe>(x: U, n: int) -> str {
+        if n == 0 { x.describe() } else { show(x, n - 1) + "!" }
+    }
+    fn both<A: Describe, B: Describe>(a: A, b: B) -> str { show(a, 1) + " " + show(b, 0) }
+    fn with_outer<U: Describe>(u: U) -> str { u.describe() + ", " + t.describe() }
+    fn twice<N: Num>(x: N) -> N { x + x }
+    print(show(3, 2))
+    print(both("a", 4))
+    let f = show
+    print(f(5, 0))
+    print([1, 2].map(x => show(x, 0)))
+    print(with_outer(1))
+    print(twice(2.5))
+}
+outer("t")
+--- stdout
+int 3!!
+str a! int 4
+int 5
+["int 1", "int 2"]
+int 1, str t
+5.0
 
 === the traits of a type's parameters may take types declared later
 trait Into<T> {
@@ -1517,7 +1548,7 @@ fn f(x: Keys<float>) -> int { x.len() }
 --- error
 1: the type parameters of a type alias cannot require traits; require them on the functions that use the alias
 
-=== never implements only the traits without methods
+=== never implements Encode, Decode, and traits without methods
 trait D { fn d(self) -> int }
 trait Make { fn make() -> Self }
 impl D for int { fn d(self) -> int { self } }
@@ -1589,13 +1620,27 @@ enum E { Keyed([float: int]) }
 6: str does not implement `Describe` (required for Wrap<str>)
 7: float does not implement `Hash` (required for the keys of [float: int])
 
-=== field defaults cannot use traits with methods of the type's parameters
+=== struct field defaults can call trait methods on type parameters
+import json
 trait Make { fn make() -> Self }
 impl Make for int { fn make() -> int { 7 } }
+impl Make for str { fn make() -> str { "s" } }
 struct Bag<T: Make + Ord> { x: T = T.make(), big: bool = false }
 struct Keys<T: Hash> { s: Set<T> = Set([]) }
---- error
-3: field defaults cannot use `Make`, which type parameter `T` requires, because defaults receive no trait dictionaries
+fn empty<T: Make + Ord>() -> Bag<T> { Bag() }
+let a: Bag<int> = Bag()
+print(a)
+let s: Bag<str> = empty()
+print(s)
+let b: Bag<int> = json.decode("{\"big\": true}")?
+print(b)
+let k: Keys<int> = Keys()
+print(k)
+--- stdout
+Bag(x: 7, big: false)
+Bag(x: "s", big: false)
+Bag(x: 7, big: true)
+Keys(s: Set([]))
 
 === required traits take the type arguments that the trait declares
 trait Into<T> {

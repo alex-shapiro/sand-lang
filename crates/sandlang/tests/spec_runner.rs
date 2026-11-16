@@ -495,6 +495,7 @@ spec_files!(
     generics,
     iterators,
     traits,
+    codecs,
     types,
     modules,
     concurrency,

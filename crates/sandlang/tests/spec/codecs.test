@@ -1,0 +1,404 @@
+=== custom codec implementations can be nested inside derived and custom types
+import json
+struct Celsius { degrees: float }
+impl Encode for Celsius {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.degrees) }
+}
+impl Decode for Celsius {
+    fn decode(decoder: Decoder) -> Result<Celsius> { Ok(Celsius(degrees: decoder.decode()?)) }
+}
+struct Secret<T> { v: T }
+impl<T: Encode> Encode for Secret<T> {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(["secret": self.v]) }
+}
+impl<T: Decode> Decode for Secret<T> {
+    fn decode(decoder: Decoder) -> Result<Secret<T>> {
+        let m: [str: T] = decoder.decode()?
+        Ok(Secret(v: m["secret"]))
+    }
+}
+struct Chain { n: int, next: Chain? }
+impl Encode for Chain {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode((self.n, self.next)) }
+}
+impl Decode for Chain {
+    fn decode(decoder: Decoder) -> Result<Chain> {
+        let (n, next): (int, Chain?) = decoder.decode()?
+        Ok(Chain(n: n, next: next))
+    }
+}
+let s = Secret(v: [Celsius(degrees: 1.5), Celsius(degrees: 2.5)])
+let text = json.encode(s)?
+print(text)
+let back: Secret<[Celsius]> = json.decode(text)?
+print(back)
+let c = Chain(n: 1, next: Some(Chain(n: 2, next: Some(Chain(n: 3, next: None)))))
+let ctext = json.encode(c)?
+print(ctext)
+let cback: Chain = json.decode(ctext)?
+print(cback == c)
+--- stdout
+{"secret":[1.5,2.5]}
+Secret(v: [Celsius(degrees: 1.5), Celsius(degrees: 2.5)])
+[1,[2,[3,null]]]
+true
+
+=== an Encoder accepts a single value during its encode call
+import json
+struct Twice { a: int }
+impl Encode for Twice {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        encoder.encode(1)?
+        encoder.encode(2)
+    }
+}
+struct Ignored { a: int }
+impl Encode for Ignored {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        encoder.encode(1)?
+        let _ = encoder.encode(2)
+        Ok(())
+    }
+}
+struct Nothing { a: int }
+impl Encode for Nothing {
+    fn encode(self, encoder: Encoder) -> Result<()> { Ok(()) }
+}
+var kept: Encoder? = None
+struct Keep { a: int }
+impl Encode for Keep {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        kept = Some(encoder)
+        encoder.encode(self.a)
+    }
+}
+struct Fails { a: int }
+impl Encode for Fails {
+    fn encode(self, encoder: Encoder) -> Result<()> { Err(Error(message: "no", kind: "denied")) }
+}
+print(json.encode(Twice(a: 1)))
+print(json.encode(Ignored(a: 1)))
+print(json.encode(Nothing(a: 1)))
+print(json.encode([Keep(a: 1)]))
+print(kept.unwrap().encode(5))
+print(json.encode(["x": [Fails(a: 1)]]))
+--- stdout
+Err(Error(message: "an `encode` method wrote a second value to its `Encoder`", kind: "invalid"))
+Err(Error(message: "an `encode` method wrote a second value to its `Encoder`", kind: "invalid"))
+Err(Error(message: "an `encode` method wrote no value to its `Encoder`", kind: "invalid"))
+Ok("[1]")
+Err(Error(message: "an `Encoder` accepts a value only during its `encode` call", kind: "invalid"))
+Err(Error(message: "no", kind: "denied"))
+
+=== Decoder single-read checks and unread input skipping
+import json
+struct Twice { a: int }
+impl Decode for Twice {
+    fn decode(decoder: Decoder) -> Result<Twice> {
+        let a: int = decoder.decode()?
+        let b: int = decoder.decode()?
+        Ok(Twice(a: a + b))
+    }
+}
+struct Skip {}
+impl Decode for Skip {
+    fn decode(decoder: Decoder) -> Result<Skip> { Ok(Skip()) }
+}
+struct Ignored { a: int }
+impl Decode for Ignored {
+    fn decode(decoder: Decoder) -> Result<Ignored> {
+        let r: Result<str> = decoder.decode()
+        Ok(Ignored(a: 0))
+    }
+}
+struct Row { skip: Skip, n: int }
+enum Id { Num(int), Name(str) }
+impl Decode for Id {
+    fn decode(decoder: Decoder) -> Result<Id> {
+        match decoder.kind()? {
+            InputKind.Int => Ok(Id.Num(decoder.decode()?))
+            InputKind.Str => Ok(Id.Name(decoder.decode()?))
+            other => Err(Error(message: "unexpected \(other)", kind: "parse"))
+        }
+    }
+}
+struct Late { a: int }
+impl Decode for Late {
+    fn decode(decoder: Decoder) -> Result<Late> {
+        let a: int = decoder.decode()?
+        let _ = decoder.kind()?
+        Ok(Late(a: a))
+    }
+}
+let t: Result<Twice> = json.decode("1")
+print(t)
+let rows: [Row] = json.decode(r#"[{"skip": {"deep": [1, {"x": null}]}, "n": 1}, {"n": 2, "skip": "s"}]"#)?
+print(rows)
+let i: Result<Ignored> = json.decode("5")
+print(i)
+let ids: Result<[Id]> = json.decode(r#"[1, "a", 2]"#)
+print(ids)
+let bad: Result<[Id]> = json.decode("[true]")
+print(bad)
+let kinds = ["null", "true", "1", "1.5", "\"s\"", "[]", "{}"]
+struct SeenKind { name: str }
+impl Decode for SeenKind {
+    fn decode(decoder: Decoder) -> Result<SeenKind> { Ok(SeenKind(name: "\(decoder.kind()?)")) }
+}
+for text in kinds {
+    let seen: SeenKind = json.decode(text)?
+    print(seen.name)
+}
+let l: Result<Late> = json.decode("1")
+print(l)
+--- stdout
+Err(Error(message: "a `decode` method read a second value from its `Decoder`", kind: "invalid"))
+[Row(skip: Skip(), n: 1), Row(skip: Skip(), n: 2)]
+Err(Error(message: "$: expected str", kind: "parse"))
+Ok([Num(1), Name("a"), Num(2)])
+Err(Error(message: "$[0]: unexpected Bool", kind: "parse"))
+Null
+Bool
+Int
+Float
+Str
+List
+Map
+Err(Error(message: "a `decode` method asked for the kind of a value that it read", kind: "invalid"))
+
+=== concrete generic Encode implementation and never codecs
+import json
+struct Wrapper<T> { v: T }
+impl Encode for Wrapper<int> {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.v * 100) }
+}
+print(json.encode(Wrapper(v: 2))?)
+let none: [never] = []
+print(json.encode(none)?)
+let n: Result<[never]> = json.decode("[1]")
+print(n)
+let ok: Result<int, never> = Ok(3)
+print(json.encode(ok)?)
+--- stdout
+200
+[]
+Err(Error(message: "$[0]: cannot decode a value of type never", kind: "parse"))
+{"Ok":[3]}
+
+=== the type checker explains why a type lacks a derived Encode implementation
+import json
+struct Wrapper<T> { v: T }
+impl Encode for Wrapper<int> {
+    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.v * 100) }
+}
+struct Email {
+    addr: str
+    fn init(raw: str) -> Email { Email(addr: raw.to_lower()) }
+}
+print(json.encode(Wrapper(v: "a")))
+print(json.encode(Email("A")))
+let e: Email = json.decode("{\"raw\": \"B\"}").unwrap()
+--- error
+10: Wrapper<str> does not implement `Encode`
+11: Email does not implement `Encode` because the parameters of `Email.init` differ from its fields
+
+=== json.decode evaluates init parameter defaults from earlier parameters
+import json
+struct Span {
+    lo: int
+    hi: int
+    fn init(lo: int, hi: int = lo + 10) -> Span { Span(lo: lo, hi: hi) }
+}
+struct Name {
+    name: str
+    label: str
+    fn init(name: str, label: str = name.to_upper()) -> Name { Name(name: name, label: label) }
+}
+struct Interval<T: Num> {
+    lo: T
+    hi: T
+    fn init(lo: T, hi: T = lo + T.one()) -> Interval<T> { Interval(lo: lo, hi: hi) }
+}
+let s: Span = json.decode("{\"lo\": 1}")?
+print(s == Span(lo: 1))
+print(s)
+let n: Name = json.decode("{\"name\": \"ab\"}")?
+print(n)
+let r: Interval<float> = json.decode("{\"lo\": 1.5}")?
+print(r)
+print(r == Interval(lo: 1.5))
+--- stdout
+true
+Span(lo: 1, hi: 11)
+Name(name: "ab", label: "AB")
+Interval(lo: 1.5, hi: 2.5)
+true
+
+=== container mutation during custom Encode callbacks
+import json
+struct Key { s: str }
+impl Encode for Key {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        items.clear()
+        names.push("late")
+        encoder.encode(self.s)
+    }
+}
+var items = [Key(s: "a"): 1, Key(s: "b"): 2]
+var names = ["x"]
+struct Doc { m: [Key: int], names: [str] }
+print(json.encode([Doc(m: items, names: names)]))
+--- stdout
+Ok("[{\"m\":{\"a\":1,\"b\":2},\"names\":[\"x\",\"late\",\"late\"]}]")
+
+=== json.encode returns an error for a value nested too deeply
+import json
+struct Envelope { data: json.Json }
+let doc = json.parse("[".repeat(512) + "]".repeat(512))?
+print(json.encode(doc).is_ok())
+print(json.encode(Envelope(data: doc)))
+let deep: Result<Envelope> = json.decode("{\"data\": " + "[".repeat(512) + "]".repeat(512) + "}")
+print(deep)
+--- stdout
+true
+Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))
+Err(Error(message: "nesting too deep at line 1, column 521", kind: "parse"))
+
+=== Some wrappers are excluded from the JSON nesting limit
+import json
+struct Link { n: int, next: Link? }
+fn chain(k: int) -> Link {
+    var link = Link(n: 0, next: None)
+    for i in 1..k {
+        link = Link(n: i, next: Some(link))
+    }
+    link
+}
+let text = json.encode(chain(500))?
+let back: Link = json.decode(text)?
+print(back.n)
+print(json.encode(chain(513)))
+--- stdout
+499
+Err(Error(message: "value too deeply nested to encode or decode", kind: "limit"))
+
+=== json.encode rejects an encode method that returns with a spawned write in flight
+import json
+struct Slow { n: int }
+impl Encode for Slow {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        task.sleep(10ms)
+        encoder.encode(self.n)
+    }
+}
+struct Wrap { a: int, inner: Slow }
+struct Outer { a: int }
+impl Encode for Outer {
+    fn encode(self, encoder: Encoder) -> Result<()> {
+        let e = encoder
+        let t = spawn e.encode(Wrap(a: self.a, inner: Slow(n: 9)))
+        task.yield_now()
+        Ok(())
+    }
+}
+let r = json.encode([Outer(a: 1), Outer(a: 2)])
+print(r)
+task.sleep(50ms)
+print("after")
+--- stdout
+Err(Error(message: "an `encode` method returned before its write ended", kind: "invalid"))
+after
+
+=== json.decode rejects a decode method that returns with a spawned read in flight
+import json
+struct Slow { n: int }
+impl Decode for Slow {
+    fn decode(decoder: Decoder) -> Result<Slow> {
+        task.sleep(10ms)
+        Ok(Slow(n: decoder.decode()?))
+    }
+}
+struct Wrap { a: int, inner: Slow }
+struct Outer { a: int }
+impl Decode for Outer {
+    fn decode(decoder: Decoder) -> Result<Outer> {
+        let d = decoder
+        let t = spawn { let w: Result<Wrap> = d.decode(); print("spawned: {w}") }
+        task.yield_now()
+        Ok(Outer(a: 7))
+    }
+}
+let r: Result<[Outer]> = json.decode("[{\"a\": 1, \"inner\": 5}, {\"a\": 2, \"inner\": 6}]")
+print(r)
+task.sleep(50ms)
+print("after")
+--- stdout
+Err(Error(message: "a `decode` method returned before its read ended", kind: "invalid"))
+spawned: {w}
+after
+
+=== trait dictionaries for local generic functions with Encode bounds
+import json
+trait Size {
+    fn size(self) -> int
+}
+impl Size for int {
+    fn size(self) -> int { 1 }
+}
+impl<T: Size> Size for [T] {
+    fn size(self) -> int { self.map(x => x.size()).sum() }
+}
+fn main() -> Result<()> {
+    fn encode_pair<T: Encode>(x: T) -> Result<str> { json.encode([x, x]) }
+    fn opt<T: Encode>(x: T) -> Result<str> {
+        let o: T? = Some(x)
+        json.encode(o)
+    }
+    fn both<T: Size>(x: T) -> int { [x, x].size() }
+    fn looped<T: Encode>(x: T) -> Result<str> {
+        var out = ""
+        for _ in 0..2 { out += json.encode([x])? }
+        Ok(out)
+    }
+    print(encode_pair(5)?)
+    print(opt("a")?)
+    print(both(3))
+    print(looped(true)?)
+    Ok(())
+}
+main().unwrap()
+--- stdout
+[5,5]
+"a"
+2
+[true][true]
+
+=== derived Encode with reordered init parameters and InputKind
+import json
+struct Pair {
+    a: int
+    b: str
+    fn init(b: str, a: int) -> Pair { Pair(a: a, b: b) }
+}
+let text = json.encode(Pair("x", 1))?
+print(text)
+let back: Pair = json.decode(text)?
+print(back)
+print(json.encode([InputKind.Int, InputKind.Map])?)
+--- stdout
+{"a":1,"b":"x"}
+Pair(a: 1, b: "x")
+["Int","Map"]
+
+=== a unit variant inside Some closes every enclosing container
+import json
+enum Mode { Read, Write }
+struct S { pair: (int, Mode?), nested: Mode??, list: [Mode?] }
+let s = S(pair: (0, Some(Mode.Read)), nested: Some(Some(Mode.Write)), list: [Some(Mode.Read), None])
+let text = json.encode(s)?
+print(text)
+let back: S = json.decode(text)?
+print(back == s)
+--- stdout
+{"pair":[0,"Read"],"nested":"Write","list":["Read",null]}
+true

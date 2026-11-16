@@ -1,23 +1,26 @@
-//! Benchmarks for the `json` module and [`Vm::to_value`].
+//! Benchmarks for the `json` module and host value conversion.
 //!
-//! `cargo bench --bench codec` reports the fastest time per operation across
-//! `BENCH_RUNS` engine runs. The default is 3 runs. Each operation runs in its
-//! own engine instance. Each run executes the operation `BENCH_REPS` times and
-//! keeps the fastest repetition. The default is 5 repetitions. The test
-//! document contains `BENCH_USERS` users, which defaults to 5000. Set
-//! `BENCH_OPS=encode,decode` to filter operations.
+//! `cargo bench --bench codec` runs each operation in a fresh `Engine` and
+//! reports the fastest time. `cargo test --benches` runs each benchmark once to
+//! check its output.
 //!
-//! `cargo test --benches` runs each benchmark once and verifies its output.
+//! Environment variables configure the harness:
+//!
+//! - `BENCH_RUNS`: `Engine` runs per operation. Defaults to `3`.
+//! - `BENCH_REPS`: repetitions per `Engine` run. Defaults to `5`.
+//! - `BENCH_USERS`: user records in the test document. Defaults to `5000`.
+//! - `BENCH_OPS`: comma-separated operation names to run, such as
+//!   `encode,decode`.
 
 use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
 use sandlang::native::NativeModule;
-use sandlang::native::ty::Param;
+use sandlang::native::ty::Encoded;
 use sandlang::stdlib::json::Json;
 use sandlang::value::Value;
-use sandlang::vm::{Fail, Vm};
 
-/// Declares the benchmark document types and `make(n)`, which builds a document
-/// with `n` users.
+/// Benchmark document types and generator function.
+///
+/// `make(n)` builds a `Doc` with `n` users.
 const PRELUDE: &str = r#"import json
 import time
 import host
@@ -51,10 +54,10 @@ struct Operation {
 }
 
 const DOC: &str = "let doc = make({n})\n";
-const DOC_TEXT: &str = "let text = json.encode(make({n}))\n";
+const DOC_TEXT: &str = "let text = json.encode(make({n}))?\n";
 const DOC_JSON: &str = "let value = json.to_json(make({n}))\n";
 const ADDRESS: &str = "let addr = Address(street: \"1 Main St\", city: \"Springfield\", zip: Some(\"01234\"))\n";
-const ADDRESS_TEXT: &str = "let atext = json.encode(Address(street: \"1 Main St\", city: \"Springfield\", zip: Some(\"01234\")))\n";
+const ADDRESS_TEXT: &str = "let atext = json.encode(Address(street: \"1 Main St\", city: \"Springfield\", zip: Some(\"01234\")))?\n";
 const DEEP: &str = r#"var nested = json.Json.Int(1)
 for _ in 0..400 {
     nested = json.Json.Arr([nested])
@@ -65,12 +68,12 @@ const DEEP_TEXT: &str = r#"var nested = json.Json.Int(1)
 for _ in 0..400 {
     nested = json.Json.Arr([nested])
 }
-let dtext = json.encode(json.Json.Obj(["v": nested]))
+let dtext = json.encode(json.Json.Obj(["v": nested]))?
 "#;
 
 const OPERATIONS: &[Operation] = &[
-    Operation { name: "encode", inputs: DOC, closure: "() => json.encode(doc).len()", runs_per_call: None },
-    Operation { name: "encode_indent", inputs: DOC, closure: "() => json.encode(doc, indent: 2).len()", runs_per_call: None },
+    Operation { name: "encode", inputs: DOC, closure: "() => json.encode(doc).unwrap().len()", runs_per_call: None },
+    Operation { name: "encode_indent", inputs: DOC, closure: "() => json.encode(doc, indent: 2).unwrap().len()", runs_per_call: None },
     Operation {
         name: "decode",
         inputs: DOC_TEXT,
@@ -90,7 +93,7 @@ const OPERATIONS: &[Operation] = &[
 }"#,
         runs_per_call: None,
     },
-    Operation { name: "encode_json", inputs: DOC_JSON, closure: "() => json.encode(value).len()", runs_per_call: None },
+    Operation { name: "encode_json", inputs: DOC_JSON, closure: "() => json.encode(value).unwrap().len()", runs_per_call: None },
     Operation { name: "json_param", inputs: DOC_JSON, closure: "() => host.json_members(value)", runs_per_call: None },
     Operation { name: "json_echo", inputs: DOC_JSON, closure: "() => [host.json_echo(value)].len()", runs_per_call: None },
     Operation { name: "to_value", inputs: DOC, closure: "() => host.copied_fields(doc)", runs_per_call: None },
@@ -100,7 +103,7 @@ const OPERATIONS: &[Operation] = &[
         closure: r#"() => {
     var t = 0
     for _ in 0..20000 {
-        t += json.encode(addr).len()
+        t += json.encode(addr).unwrap().len()
     }
     t
 }"#,
@@ -149,7 +152,7 @@ const OPERATIONS: &[Operation] = &[
         closure: r#"() => {
     var t = 0
     for _ in 0..200 {
-        t += json.encode(deep).len()
+        t += json.encode(deep).unwrap().len()
     }
     t
 }"#,
@@ -170,7 +173,9 @@ const OPERATIONS: &[Operation] = &[
     },
 ];
 
-/// Times the closure `operation` and prints `ns_per_item check`.
+/// Times the closure `operation`.
+///
+/// Prints `ns_per_item check`.
 const TIMING: &str = r#"
 var best = -1
 var check = 0
@@ -188,10 +193,10 @@ print("\(best / {items}) \(check)")
 /// Prints a `check` line for each property that the benchmark relies on.
 const CHECKS: &str = r#"
 let doc = make({n})
-let text = json.encode(doc)
+let text = json.encode(doc)?
 let p: json.Json = json.decode(text).unwrap()
 let t: Doc = json.decode(text).unwrap()
-let pretty: Doc = json.decode(json.encode(doc, indent: 2)).unwrap()
+let pretty: Doc = json.decode(json.encode(doc, indent: 2)?).unwrap()
 print("check json.decode(text) == json.to_json(doc): \(p == json.to_json(doc))")
 print("check json.decode(text) == doc: \(t == doc)")
 print("check json.decode(indented text) == doc: \(pretty == doc)")
@@ -200,17 +205,16 @@ print("check host.copied_fields(doc) == 1: \(host.copied_fields(doc) == 1)")
 print("check text length: \(text.len())")
 "#;
 
-/// Builds the `host` module with helper functions for `Vm::to_value` and
-/// `Json` conversion benchmarks.
+/// Builds the `host` module with helper functions for host value and `Json`
+/// conversion benchmarks.
 fn host_modules() -> HostModules {
     let mut host = NativeModule::new("host");
-    host.source("pub native fn copied_fields<T>(value: T) -> int");
-    host.function("copied_fields", |vm: &mut Vm, value: Param<0>| -> Result<i64, Fail> {
-        let fields = match vm.to_value(value.raw())? {
-            Value::Struct(value) => value.fields.len(),
+    host.source("pub native fn copied_fields<T: Encode>(value: T) -> int");
+    host.function("copied_fields", |value: Encoded<0>| -> i64 {
+        match value.value() {
+            Value::Struct(struct_val) => struct_val.fields.len() as i64,
             _ => 0,
-        };
-        Ok(fields as i64)
+        }
     });
     host.function("json_echo", |value: Json| -> Json { value });
     host.function("json_members", |value: Json| -> i64 {

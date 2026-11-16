@@ -95,7 +95,9 @@ pub(crate) struct ActiveNativeCall {
 impl ActiveNativeCall {
     /// Appends this call's rooted values to `roots`.
     pub fn trace(&self, roots: &mut Vec<VmValue>) {
-        roots.extend_from_slice(&self.call.state.lock().roots);
+        let state = self.call.state.lock();
+        roots.extend_from_slice(&state.roots);
+        state.request_roots.iter().for_each(|group| roots.extend_from_slice(group));
     }
 }
 
@@ -166,8 +168,7 @@ pub(crate) enum IdleStop {
     Prompt(Capability),
 }
 
-/// Drives tasks until all tasks are finished or blocked, or a task needs a
-/// permission prompt.
+/// Drives tasks until the scheduler is idle or needs a permission prompt.
 pub(crate) struct UntilIdle {
     /// Whether the drive waits for pending I/O before stopping.
     pub waits_for_io: bool,
@@ -193,7 +194,7 @@ impl DriveUntil for UntilIdle {
     }
 }
 
-/// Execution timer tracking elapsed CPU and clock time.
+/// Execution timer that tracks elapsed CPU and clock time.
 struct RunTimer {
     clock: Arc<dyn crate::platform::Clock>,
     cpu: Duration,
@@ -211,7 +212,7 @@ impl RunTimer {
         RunTimer { clock, cpu: Duration::ZERO, cpu_mark, now, last_yield: now, unrecorded_slices: 0, unrecorded_fuel: 0 }
     }
 
-    /// Updates CPU and monotonic times, and reports completed work.
+    /// Updates CPU and monotonic times. Reports completed work to the clock.
     fn read(&mut self) {
         self.clock.work(self.unrecorded_fuel);
         let mark = self.clock.cpu_time();
@@ -370,6 +371,22 @@ impl Vm {
 
     /// Pushes a [`CALLBACK_PROTO`] frame on `fiber` to call `callee` with `args`.
     fn begin_callback(&mut self, fiber: &mut Fiber, callee: VmValue, args: &[VmValue]) -> Result<(), RunEnding> {
+        let arity = match self.heap.get(callee) {
+            Obj::Closure(proto, _) => self.prog.protos.get(*proto as usize).map(|proto_def| proto_def.nparams as usize),
+            Obj::NativeFn(id) => self.prog.native_argc.get(*id as usize).map(|&count| count as usize),
+            _ => None,
+        };
+        if arity.is_some_and(|param_count| param_count != args.len()) {
+            let fail =
+                Fail::internal(format!("a callback has {} parameters, but its caller passes {} arguments", arity.unwrap_or(0), args.len()));
+            return Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
+        }
+        if self.heap.stress {
+            // Stack growth below can trigger garbage collection before this
+            // function copies `args` onto the stack. Force a collection under
+            // GC stress to verify that the caller rooted `args`.
+            self.collect_all_garbage(Some(fiber));
+        }
         let base = fiber.live_top(&self.prog);
         let need = base + 1 + MAX_CALLBACK_ARGS;
         let grow = |vm: &mut Vm, fiber: &mut Fiber| -> Result<(), Fail> {
@@ -494,7 +511,7 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
         let (request, root_capacity) = {
             let mut state = active_call.call.state.lock();
             state.lent_vm = None;
-            (state.request.take(), state.roots.capacity())
+            (state.request.take(), state.roots.capacity() + state.request_roots.iter().map(Vec::capacity).sum::<usize>())
         };
         let polled = match polled {
             Ok(polled) => polled,
@@ -529,6 +546,11 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
             Some(VmRequest::Collect) => {
                 collected = true;
                 vm.collect_all_garbage(Some(fiber));
+                // Enforce time and interrupt limits if a native future requests
+                // repeated collections.
+                if let Err(fail) = vm.meter.check() {
+                    return Err(vm.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
+                }
             }
             Some(VmRequest::Prompt(capability)) => return Ok(Some(FiberStop::Prompt(capability))),
         }

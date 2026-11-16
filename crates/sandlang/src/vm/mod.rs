@@ -2,7 +2,6 @@
 
 pub mod bytecode;
 pub mod compare;
-pub(crate) mod container_children;
 pub mod display;
 pub mod heap;
 mod interp;
@@ -608,6 +607,9 @@ pub struct Vm {
     caller_site: (u32, u32),
     /// Extra GC roots (e.g. values held by the test runner).
     pub pinned: Vec<VmValue>,
+    /// State of native modules, keyed by a Rust type that each module owns. See
+    /// [`Vm::native_state`].
+    native_state: value::FxHashMap<std::any::TypeId, Box<dyn std::any::Any + Send>>,
     /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
     spare_ctl: Option<Box<CtlKind>>,
     /// The map handle and slot of the last lookup of a key other than an
@@ -713,6 +715,7 @@ impl Vm {
             collected: false,
             caller_site: (0, 0),
             pinned: Vec::new(),
+            native_state: value::FxHashMap::default(),
             spare_ctl: None,
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
             ascii_strs: Vec::new(),
@@ -745,7 +748,6 @@ impl Vm {
                 Const::Bytes(b) => heap.new_bytes(b.clone()),
                 Const::Fn(p) => heap.alloc(Obj::Closure(*p, Box::new([]))),
                 Const::Native(n) => heap.alloc(Obj::NativeFn(*n)),
-                Const::TypeDesc(t) => heap.alloc(Obj::TypeDesc(TypeDescObj::constant(t.clone()))),
                 Const::Tuple(items) => heap.new_tuple(&items.iter().map(|&i| self.consts[i as usize]).collect::<Vec<_>>()),
             };
             self.consts.push(v);
@@ -911,42 +913,6 @@ impl Vm {
         self.heap.alloc(value::value_obj(x))
     }
 
-    /// Copies `v` out of the VM into a [`Value`](crate::value::Value).
-    ///
-    /// A `Value` is independent of the VM and remains valid after a run ends.
-    /// Structs, enum variants, and native values keep their qualified names.
-    /// Any part whose type does not implement the Sand `Encode` trait, such as
-    /// a function, becomes [`Value::Opaque`](crate::value::Value::Opaque). For
-    /// example, a struct with a function field becomes a `Value::Struct` with
-    /// an opaque field.
-    ///
-    /// The copy charges fuel and memory against the run limits. It fails with a
-    /// `"limit"` error if `v` exceeds 512 nesting levels, which includes cyclic
-    /// values. Each `Some` wrapper adds a nesting level.
-    ///
-    /// If the copy exceeds the memory limit, `to_value` returns a memory limit
-    /// error. If a native function returns that error, the engine collects
-    /// garbage and reruns the function from the start. Call `to_value` before
-    /// performing any side effect.
-    ///
-    /// ```
-    /// # use sandlang::native::NativeModule;
-    /// # use sandlang::native::ty::Param;
-    /// # use sandlang::value::Value;
-    /// # use sandlang::vm::{Fail, Vm};
-    /// let mut module = NativeModule::new("audit");
-    /// module.source("pub native fn record<T>(event: T) -> int");
-    /// module.function("record", |vm: &mut Vm, event: Param<0>| -> Result<i64, Fail> {
-    ///     match vm.to_value(event.raw())? {
-    ///         Value::Struct(event) => Ok(event.fields.len() as i64),
-    ///         _ => Ok(0),
-    ///     }
-    /// });
-    /// ```
-    pub fn to_value(&self, v: VmValue) -> Result<crate::value::Value, Fail> {
-        crate::value::copy_from_vm(self, v)
-    }
-
     #[inline]
     pub fn option(&mut self, v: Option<VmValue>) -> VmValue {
         match v {
@@ -1076,6 +1042,25 @@ impl Vm {
     #[inline]
     pub fn charge(&self, units: u64) -> Result<(), Fail> {
         self.meter.charge(units)
+    }
+
+    /// Returns the state that a native module keeps in this VM as a value of
+    /// Rust type `T`.
+    ///
+    /// Creates the state with `T::default()` on first use. A module that keeps
+    /// `T` private has state that no other module can read.
+    pub fn native_state<T: std::any::Any + Default + Send>(&mut self) -> &mut T {
+        let state = self.native_state.entry(std::any::TypeId::of::<T>()).or_insert_with(|| Box::new(T::default()));
+        state.downcast_mut().expect("each key is the type of its value")
+    }
+
+    /// Runs `callee` with `args` if `callee` is a native function. Returns
+    /// `None` for a Sand function.
+    pub(crate) fn call_native_value(&mut self, callee: VmValue, args: &[VmValue]) -> Option<Result<VmValue, Ctl>> {
+        let VmValue::Obj(_) = callee else { return None };
+        let Obj::NativeFn(native) = self.heap.get(callee) else { return None };
+        let natives = self.natives.clone();
+        Some(natives[*native as usize].f.call(self, args))
     }
 
     /// Charges for `n` bytes copied, compared or scanned.
@@ -1731,6 +1716,9 @@ impl Vm {
             }
             self.heap.stats.record(start.elapsed(), true);
         }
+        // Publish the post-collection heap size so immediate I/O reservations
+        // observe the freed bytes.
+        self.heap.io_memory.publish_heap(self.heap.used());
     }
 
     pub fn trace_of(&self, fiber: &Fiber, ip: Option<u32>) -> Vec<TraceFrame> {

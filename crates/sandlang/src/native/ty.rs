@@ -1,11 +1,13 @@
 //! Rust representations of Sand types.
 
-use crate::types::{Builtins, traits};
+use crate::types::{Builtin, Builtins, traits};
+use crate::value::Value;
 use crate::vm::value::VmValue;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 /// A Sand type derived from a Rust type through [`SandType`].
 #[derive(Clone, Debug)]
@@ -24,14 +26,19 @@ pub enum Type {
     Map(Box<Type>, Box<Type>),
     Tuple(Vec<Type>),
     Fn(Vec<Type>, Box<Type>),
-    /// Type parameter at index `0..` (ordered with enclosing `extend` or `impl`
-    /// type parameters before the function's own type parameters) and the
-    /// built-in traits that the Rust function requires of it.
+    /// Type parameter at index `0..` and its required built-in traits.
+    ///
+    /// Enclosing `extend` or `impl` type parameters precede the function's own
+    /// type parameters.
     Param(u8, Builtins),
-    /// Runtime type descriptor for the `reflect` type parameter at index `0..`.
-    Reflect(u8),
-    /// `Num` trait dictionary for the type parameter at index `0..` (see [`Num`]).
-    Num(u8),
+    /// Runtime dictionary of a built-in trait for the type parameter at index
+    /// `0..`. See [`TraitDict`].
+    TraitDict(u8, Builtin),
+    /// Host [`Value`] encoded from an argument of the type parameter at index
+    /// `0..`.
+    ///
+    /// The type parameter must implement `Encode`. See [`Encoded`].
+    Encoded(u8),
     /// Nominal type declared in a module.
     Named(Named),
 }
@@ -143,9 +150,9 @@ impl Type {
                 out.push_str(") -> ");
                 r.write(module, param, out);
             }
-            Type::Param(i, _) => out.push_str(&param(*i)),
-            Type::Reflect(i) => out.push_str(&format!("<description of {}>", param(*i))),
-            Type::Num(i) => out.push_str(&format!("<Num evidence of {}>", param(*i))),
+            Type::Param(index, _) => out.push_str(&param(*index)),
+            Type::TraitDict(index, builtin) => out.push_str(&format!("<{} dictionary of {}>", builtin.name(), param(*index))),
+            Type::Encoded(index) => out.push_str(&param(*index)),
             Type::Named(n) if n.module == "prelude" && n.name == "Option" && n.args.len() == 1 => {
                 let fn_type = matches!(n.args[0], Type::Fn(..));
                 out.push_str(if fn_type { "(" } else { "" });
@@ -301,7 +308,7 @@ fn_type!(A, B, C);
 /// native call that received or allocated it.
 struct UnrootedVmHandle(#[allow(dead_code)] *const ());
 
-/// Uninhabited return type for native functions that never return (Sand `never`).
+/// Uninhabited return type for native functions with Sand return type `never`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Never {}
 
@@ -321,9 +328,9 @@ impl<const N: u8, B: traits::Set> Param<N, B> {
         self.0
     }
 
-    /// Wraps `v`, which must have the type of the `N`-th type parameter.
-    pub fn from_raw(v: VmValue) -> Self {
-        Param(v, PhantomData, PhantomData)
+    /// Wraps `value`. Callers must pass a value of the `N`-th type parameter.
+    pub fn from_raw(value: VmValue) -> Self {
+        Param(value, PhantomData, PhantomData)
     }
 }
 
@@ -347,68 +354,108 @@ impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
     }
 }
 
-/// Runtime dictionary of `Num` for the `N`-th generic type parameter (`int`
-/// or `float`).
+/// Runtime dictionary of the built-in trait `B` for the `N`-th generic type
+/// parameter of a `native fn`.
 ///
-/// A Rust function can accept `Num<N>` for any type parameter that the
-/// `native fn` declaration declares as `T: Num`. Place `Num<N>` parameters in ascending order of `N`, after
-/// any [`Reflect`] parameters and before regular value parameters.
-pub struct Num<const N: u8>(VmValue, PhantomData<UnrootedVmHandle>);
+/// A Rust function can accept `TraitDict<N, B>` if `B` declares methods. The
+/// `native fn` declaration must require `B` on that type parameter directly or
+/// through a supertrait. Place `TraitDict` parameters before value parameters
+/// in ascending order of `N`.
+pub struct TraitDict<const N: u8, B: traits::Single>(VmValue, PhantomData<fn() -> B>, PhantomData<UnrootedVmHandle>);
 
-impl<const N: u8> Num<N> {
+/// Runtime dictionary of `Num` for the `N`-th generic type parameter.
+pub type Num<const N: u8> = TraitDict<N, traits::Num>;
+
+impl<const N: u8, B: traits::Single> TraitDict<N, B> {
     pub fn raw(self) -> VmValue {
         self.0
     }
 
-    pub(crate) fn from_raw(v: VmValue) -> Self {
-        Num(v, PhantomData)
+    pub(crate) fn from_raw(value: VmValue) -> Self {
+        TraitDict(value, PhantomData, PhantomData)
     }
 }
 
-impl<const N: u8> Clone for Num<N> {
+impl<const N: u8, B: traits::Single> Clone for TraitDict<N, B> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<const N: u8> Copy for Num<N> {}
+impl<const N: u8, B: traits::Single> Copy for TraitDict<N, B> {}
 
-impl<const N: u8> fmt::Debug for Num<N> {
+impl<const N: u8, B: traits::Single> fmt::Debug for TraitDict<N, B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Num({:?})", self.0)
+        write!(f, "TraitDict<{N}, {}>({:?})", B::BUILTIN.name(), self.0)
     }
 }
 
-impl<const N: u8> SandType for Num<N> {
+impl<const N: u8, B: traits::Single> SandType for TraitDict<N, B> {
     fn sand_type() -> Type {
-        Type::Num(N)
+        Type::TraitDict(N, B::BUILTIN)
     }
 }
 
-/// Runtime type descriptor for the `N`-th `reflect` type parameter of a
-/// `native fn` (see [`Type::Reflect`]).
-#[derive(Clone, Copy)]
-pub struct Reflect<const N: u8>(VmValue, PhantomData<UnrootedVmHandle>);
+/// Host [`Value`] encoded from an argument of the `N`-th generic type
+/// parameter of a `native fn`.
+///
+/// The `native fn` declaration must require `Encode` on that type parameter.
+/// The engine runs the argument's Sand `Encode` implementation before calling
+/// the Rust function. Synchronous Rust functions can therefore accept
+/// `Encoded<N>`:
+///
+/// ```
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::native::ty::Encoded;
+/// # use sandlang::value::Value;
+/// let mut module = NativeModule::new("audit");
+/// module.source("pub native fn record<T: Encode>(event: T) -> int");
+/// module.function("record", |event: Encoded<0>| match event.value() {
+///     Value::Struct(event) => event.fields.len() as i64,
+///     _ => 0,
+/// });
+/// ```
+pub struct Encoded<const N: u8>(Arc<Value>);
 
-impl<const N: u8> Reflect<N> {
-    pub fn raw(self) -> VmValue {
-        self.0
+impl<const N: u8> Encoded<N> {
+    /// Borrows the encoded value.
+    pub fn value(&self) -> &Value {
+        &self.0
     }
 
-    pub(crate) fn from_raw(v: VmValue) -> Self {
-        Reflect(v, PhantomData)
+    /// Returns an owned copy of the encoded value.
+    pub fn into_value(self) -> Value {
+        Arc::unwrap_or_clone(self.0)
     }
 }
 
-impl<const N: u8> fmt::Debug for Reflect<N> {
+impl<const N: u8> fmt::Debug for Encoded<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Reflect({:?})", self.0)
+        write!(f, "Encoded({:?})", self.0)
     }
 }
 
-impl<const N: u8> SandType for Reflect<N> {
+impl<const N: u8> SandType for Encoded<N> {
     fn sand_type() -> Type {
-        Type::Reflect(N)
+        Type::Encoded(N)
+    }
+}
+
+/// Heap object that passes an [`Encoded`] argument to a native function.
+#[derive(crate::SandObject)]
+#[sand(module = "prelude", private)]
+pub(crate) struct EncodedArg {
+    pub(crate) value: Arc<Value>,
+    /// Reservation that charges `value` against the VM memory limit.
+    pub(crate) _reservation: crate::vm::iomem::Reservation,
+}
+
+impl super::NativeObject for EncodedArg {}
+
+impl<const N: u8> crate::native::convert::FromVmValue for Encoded<N> {
+    type Item<'a> = Self;
+    fn from_vm_value(vm: &crate::vm::Vm, value: VmValue, _: &mut crate::native::convert::Conversion) -> Result<Self, crate::vm::Fail> {
+        Ok(Encoded(VmVal::<EncodedArg>::from_raw(value).get(&vm.heap)?.value.clone()))
     }
 }
 
@@ -419,7 +466,7 @@ impl<const N: u8> SandType for Reflect<N> {
 ///
 /// A `VmVal` is valid only until the call returns or suspends. Garbage
 /// collection during a wait can free an unrooted heap object. `VmVal`,
-/// [`Param`], [`Num`], and [`Reflect`] are therefore `!Send`. The compiler
+/// [`Param`], and [`TraitDict`] are therefore `!Send`. The compiler
 /// rejects these VM handles in three places:
 ///
 /// - a [`NativeObject`](super::NativeObject)
@@ -444,9 +491,9 @@ impl<T: ?Sized> VmVal<T> {
         self.0
     }
 
-    /// Wraps `v`, which must have the Sand type of `T`.
-    pub fn from_raw(v: VmValue) -> Self {
-        VmVal(v, PhantomData, PhantomData)
+    /// Wraps `value`. Callers must pass a value of Sand type `T`.
+    pub fn from_raw(value: VmValue) -> Self {
+        VmVal(value, PhantomData, PhantomData)
     }
 }
 
@@ -470,7 +517,7 @@ impl<T: SandType + ?Sized> SandType for VmVal<T> {
     }
 }
 
-/// Marker type representing the prelude's `Task<T>` in [`VmVal<Task<T>>`](VmVal).
+/// Marker type for the prelude's `Task<T>` in [`VmVal<Task<T>>`](VmVal).
 pub struct Task<T>(PhantomData<T>);
 
 impl<T: SandType> SandType for Task<T> {
@@ -479,7 +526,7 @@ impl<T: SandType> SandType for Task<T> {
     }
 }
 
-/// Marker type representing the prelude's `Channel<T>` in [`VmVal<Channel<T>>`](VmVal).
+/// Marker type for the prelude's `Channel<T>` in [`VmVal<Channel<T>>`](VmVal).
 pub struct Channel<T>(PhantomData<T>);
 
 impl<T: SandType> SandType for Channel<T> {
@@ -488,7 +535,7 @@ impl<T: SandType> SandType for Channel<T> {
     }
 }
 
-/// Marker type representing the prelude's `Range` in [`VmVal<Range>`](VmVal).
+/// Marker type for the prelude's `Range` in [`VmVal<Range>`](VmVal).
 pub struct Range;
 
 impl SandType for Range {

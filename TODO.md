@@ -114,23 +114,18 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ _Testing._ Compare fuel across hash seeds in the spec suite. Add a test
       configuration option to set the hash seed.
 - [ ] ❓ _Testing._ Compare fuel between a 32-bit and a 64-bit target. Only code
-      review currently verifies cross-platform fuel determinism. Add programs
-      with pinned fuel totals that run on both a native target and `wasm32`.
-      Include a host function that calls `Vm::to_value`.
+      review verifies cross-platform fuel determinism. Add programs with pinned
+      fuel totals for both a native target and `wasm32`. Include a host function
+      that takes an `Encoded` argument.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
       recurse once per nesting level. Deep values can overflow a small host
       thread stack in debug builds before reaching the 256-level limit.
-- [ ] ❓ _Embedding._ Convert `json.parse` and `json.decode` to use an explicit
-      stack without regressing throughput. These functions recurse up to the
-      512-level nesting limit, which can overflow a 2 MiB thread stack in debug
-      builds.
-- [ ] ❓ _Embedding._ Clone, compare, and drop a deep `Value` iteratively. The
-      derived `Clone` and `PartialEq` implementations and the default drop
-      recurse once per level. On a 512-level value from `Vm::to_value`, a debug
-      build uses up to 721 KiB of stack for `clone`, 417 KiB for `==`, and
-      129 KiB for drop. A host can also construct a `Value` deeper than 512
-      levels in Rust.
+- [ ] ❓ _Embedding._ Clone, compare, and drop a deep `Value` iteratively. Derived
+      `Clone`, derived `PartialEq`, and default `Drop` recurse once per level. On
+      a 512-level value from a conversion, a debug build uses up to 721 KiB of
+      stack for `clone`, 417 KiB for `==`, and 129 KiB for `drop`. A host can
+      also construct a `Value` deeper than 512 levels in Rust.
 - [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form. This lets
       `#[sand(default)]` support value-type fields and lets `json.decode`
       evaluate constant value-type defaults directly.
@@ -265,20 +260,6 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
 - [ ] 🔴 [070](triage/070-generic-plus/summary.md) _Language._ Replace the hardcoded `+` operand check in `crates/sandlang/src/check/unify.rs`
       with a prelude `Add` trait so that generic functions can concatenate
       `str`, `bytes`, and lists in addition to adding numbers.
-- [ ] 🔴 [063](triage/063-decode-with-init/summary.md) _Language._ Support `Decode` for structs that declare `init` by calling `init` with
-      the JSON object members as named arguments:
-
-      - Propagate `Err` results from deferred `Decoded::Pending` thunks in
-        `crates/sandlang/src/stdlib/json.rs` so that a fallible `init` fails `json.decode`.
-      - Pass trait dictionaries to `Decoded::Pending` thunks so that a generic
-        `init` can call trait methods on its type parameters.
-      - Execute `init` before inserting decoded structs into a `Set`, as
-        `json.decode` does for computed field defaults.
-      - Verify that `init` is visible at the `json.decode` call site.
-
-- [ ] 🔴 [068](triage/068-generic-field-defaults/summary.md) _Language._ Allow struct field defaults to call methods from traits required by the
-      struct type parameters by passing trait dictionaries to default-value
-      helpers and `json.decode` field initializers.
 - [ ] 🔴 [062](triage/062-error-kind-enum/summary.md) _Language._ Evaluate replacing string error kinds with an enum.
 - [ ] 🔴 [072](triage/072-explicit-type-args/summary.md) _Diagnostics._ Accept explicit type arguments in calls, or make the parser error suggest
       `let config: Config = json.decode(text)` instead of `comparison operators cannot be chained`.
@@ -376,6 +357,12 @@ Visible defects that rarely block users.
 ### Miscellaneous
 
 - [ ] ⚪ Move all crates into a `crates/` directory and standardize crate metadata to use workspace values.
+- [ ] ⚪ Let host traits declare native default methods. Today the Rust function
+      of a native default method must take the dictionary of a built-in trait
+      (`src/check/traits.rs`, `native_default_method`), so only `Encode` and
+      `Decode` are structural traits. A structural trait must also declare a
+      single method, take no type parameters, and have no supertraits with
+      methods, because its dictionary stores the shape index after the method.
 
 ### Test coverage
 
@@ -424,6 +411,69 @@ Visible defects that rarely block users.
 
 ### Embedding
 
+- [ ] ❓ Decide whether the codec walkers should rewind the current part on a
+      post-callback `max_memory` error. Today, the engine stops the run if the
+      walker has already read from the source or written to the sink. With a
+      custom `Decode` implementation and heap garbage, the engine finishes a
+      request loop at 40 MB and 52 MB. At 44 MB and 48 MB, the engine stops
+      that same loop. Each source and sink could save a position before each
+      part. The walker could then restore its frames. `JsonSource` and
+      `JsonTextWriter` can reset their positions cheaply. `ValueSource` would
+      need indexed reads. With saved positions, `Encoder.encode` and
+      `Decoder.decode` could also run their first pass synchronously.
+- [ ] ❓ Decide whether generic native types can derive `Encode` and `Decode`
+      with `#[sand(encode, decode)]`. Today, the derive macros reject both
+      manual and derived codecs on generic native types. Manual Rust codecs
+      cannot run callbacks for an erased type parameter `T`. The VM walker runs
+      derived codecs directly without generated Rust code.
+- [ ] ❓ Align `Decoder.kind()` and `ValueSource::unit` on host `Option.None`.
+      `Decoder.kind()` reports `Null` for `Option.None`. `ValueSource::unit`
+      rejects `Option.None`. Either report `Variant` from `kind()`, or accept
+      `Option.None` in `ValueSource::unit` to match JSON `null`.
+- [ ] ⚪ Check set and map table growth before decoding the next entry. If table
+      growth exceeds `max_memory` after a callback, the engine stops the run
+      instead of collecting garbage.
+- [ ] ⚪ Check list capacity only after the source confirms another element.
+      Today, the decode walker reserves space for another element before
+      checking for the end of a full list.
+- [ ] ❓ Decide whether `JsonSource` should reject out-of-range numbers like
+      `serde_json`. `json.parse("[1e999]")` returns `Float(inf)`. `json.encode`
+      then rejects that infinite float.
+- [ ] ⚪ Define a nesting level in each codec doc comment. The walkers count Sand
+      containers and skip `Some`. `JsonTextWriter` and `JsonSource` count JSON
+      brackets. `ValueSink` counts `Value` nodes including `Some`.
+- [ ] ⚪ Reject an empty `impl Encode for T {}` block on a struct whose `init`
+      parameters differ from its fields. Report why the compiler cannot derive
+      `Encode` for `T`.
+- [ ] ⚪ Derive `ToValue` only for native types with derived codecs. On a type
+      with a manual codec, `ToValue::to_value` builds a different `Value` than
+      `NativeContext::to_value`. `NativeContext::from_value` then rejects the
+      `ToValue` output.
+- [ ] ⚪ Retry the final text-parsing step of `json.to_json` after garbage
+      collection. After a callback, a memory limit failure during that parse
+      stops the run. The engine can safely repeat that parse after collecting
+      garbage.
+- [ ] ⚪ Match JSON map key rules between encoding and decoding. `JsonSink`
+      rejects `bytes` and `Option` keys. `JsonSource` accepts both key types. A
+      script can decode `{"1": 1}` into `[int?: int]` and then fail to encode
+      that map back to JSON.
+- [ ] ⚪ Verify that each manual `native::codec::Encode` implementation writes a
+      single complete value. The encode walker passes its sink without tracking
+      root writes or open containers. If a host implementation writes two values
+      or omits `end()`, `json.encode` returns invalid JSON. A typed sink
+      interface such as `serde::ser::SerializeStruct` would enforce that rule.
+      It would also remove separate field and key counters from `JsonSink` and
+      `ValueSink`.
+- [ ] ⚪ Borrow the input text during synchronous `json.parse`. `JsonSource::new`
+      copies the full input string because `json.decode` cannot borrow the VM
+      heap across Sand callbacks.
+- [ ] ❓ _Testing._ Fail the Nth memory check of a native call in a stress mode.
+      `retry_stress` fails only the first check. It misses memory checks after
+      a side effect. After a callback, the codec walker stops the run on a
+      mid-part memory limit check. The stress test must expect that stop.
+- [ ] ⚪ Reject `Value::Set` if the target type is a Sand list. Today,
+      `NativeContext::from_value` accepts `Value::Set` for a list type because
+      `DecodeSource` shares `begin_list` between lists and sets.
 - [ ] ⚪ Require at compile time that a native function that takes `&mut Vm`
       makes its scheduler requests before its side effects. The engine runs the
       call again after a prompt or a garbage collection, so it executes any
@@ -443,8 +493,8 @@ Visible defects that rarely block users.
       compiles each tool three times across `check_file`, `lint_file`, and
       `run_tests`. Return lint warnings from compilation and accept a
       `CompiledProgram` in `run_tests`.
-- [ ] ⚪ Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`
-      dictionary from the `impl` dictionary.
+- [ ] ⚪ Pass `TraitDict` arguments to native `impl` methods by reading the
+      trait dictionary from the `impl` dictionary.
 - [ ] ⚪ Unify the terminology for Rust types attached via `NativeModule::bind`
       across `BoundKind`, `BoundType`, `Type::bound`, `declare_bound_types`, and
       `Binding<T>`.
@@ -479,20 +529,53 @@ Visible defects that rarely block users.
 
 ### Diagnostics
 
+- [ ] ⚪ Report a distinct error if a nested callback reuses an active outer
+      `Encoder` or `Decoder`.
+- [ ] ⚪ Suggest a `Decode` bound if the parser sees `<reflect T>`.
+- [ ] ⚪ Include the field or element path in encode errors, as decode errors
+      do. Encode errors for non-finite floats, non-text map keys, and custom
+      `encode` methods omit the failing path.
+- [ ] ⚪ Print every bound of a prelude implementation in `help`. `help(Decode)`
+      prints `Set<T> where T: Decode` without `T: Hash`. The help printer skips
+      marker trait bounds without dictionaries.
 - [ ] ⚪ Deduplicate missing trait diagnostics within a single expression.
 
 ### Performance
 
+- [ ] ❓ Decide whether to add fast paths to the codec walkers. Each walker
+      reads a trait dictionary at every value. Fast paths could skip constant
+      part dictionary reads or format JSON text without dynamic sink calls.
+      Those fast paths must stay aligned with the walker. Benchmarks in
+      `crates/sandlang/benches/codec.rs`:
+      - `json.encode`: 916 ns per item versus 469 ns on `main`
+      - `json.decode`: 1900 ns versus 1028 ns on `main`
+      - `json.to_json`: 2614 ns versus 756 ns on `main`
+      - custom implementation overhead: about 500 ns per value
+      - `bench/run.py` omits the `json` module
+- [ ] ⚪ Deduplicate and simplify the codec walkers:
+      - Share the common memory check, fuel charge, method dispatch, and handle
+        setup across both `run` loops.
+      - Precompute each variant's payload base at compile time.
+      - Split `DecodeWalker::advance` into separate phases for reading parts,
+        filling missing slots, and finishing containers.
+      - Match on `&DecodeFill` instead of cloning it for each missing field.
+- [ ] ❓ Find why plain recursion retains unreachable heap values. If a
+      recursive function builds a 5,000-string list and takes its length, each
+      frame retains about 0.3 MB on both `main` and this branch. Eighty levels
+      require 32 MB. Two hundred fifty levels require 128 MB. The collector
+      likely traces each frame's full register window. That window still holds
+      stale handles from returned callees.
+- [ ] ⚪ Split `CodecShape` into separate encode and decode shapes. `fills`,
+      `init`, and `ManualDecode` apply only to decoding. `ManualEncode` applies
+      only to encoding. Separate shapes would eliminate unreachable internal
+      error branches in the walkers.
+- [ ] ⚪ Format `ValueSource` path segments lazily on error instead of
+      formatting a segment in every `ValueSource::next` and `next_field` call.
 - [ ] ⚪ Benchmark `HostFn::Static` against `HostFn::Shared` to determine whether
       avoiding the `Arc` dereference justifies `Box::leak` and the enum
       dispatch; if not, keep only `Arc`.
 - [ ] ⚪ Profile `HostFn` dispatch and argument slice construction on `fannkuch` and
       `results` in `bench/programs` to reduce typed native call overhead.
-- [ ] ⚪ Reduce `json.decode` dispatch overhead in the Sand wrapper around
-      `decode_raw`.
-- [ ] ⚪ Cache instantiated `TypeDesc` objects in `Op::Describe` by their
-      template and argument descriptions to avoid allocation on each generic
-      `reflect` call.
 - [ ] ❓ Align the VM dispatch loop or build benchmarks with
       `-C llvm-args=-align-loops=64` so that unrelated code changes do not
       shift loop alignment. On Apple silicon, code placement changes alter
@@ -503,7 +586,12 @@ Visible defects that rarely block users.
 
 ### Language
 
-- [ ] ⚪ Allow local functions to require traits with methods and to declare
-      `reflect` type parameters by passing hidden dictionary and
-      type-description arguments to closures.
+- [ ] ❓ Decide whether the JSON encoder should write a single-payload tuple
+      variant as `{"Banned":"spam"}` instead of `{"Banned":["spam"]}` to match
+      `serde` newtype variants. Hosts often exchange JSON with `serde_json`. A
+      later change to the derived format would break scripts that expect the
+      array wrapper.
+- [ ] ❓ Decide how JSON should represent nested `Option` values such as
+      `Some(None)`. `JsonSink` writes `Some(None)` as `null`. `JsonSource` then
+      decodes `null` as `None`.
 - [ ] ⚪ Support non-constant default expressions on trait method parameters.

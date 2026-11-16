@@ -581,7 +581,7 @@ print(out)
 
 
 === import hint for an unimported module
-fn f() -> str {
+fn f() -> Result<str> {
     json.encode(1)
 }
 --- error

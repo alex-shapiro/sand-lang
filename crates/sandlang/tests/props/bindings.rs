@@ -33,7 +33,7 @@ fn float_lit(f: f64) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
-#[sand(module = "fig")]
+#[sand(module = "fig", derive(Encode, Decode))]
 enum Fig {
     Empty,
     Num(i64),
@@ -80,7 +80,7 @@ struct Holder<A, B: Ord> {
 }
 
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
-#[sand(module = "fig")]
+#[sand(module = "fig", derive(Encode, Decode))]
 struct Defaults {
     #[sand(default = -7)]
     n: i64,
@@ -108,8 +108,6 @@ struct Defaults {
     figs: Vec<Fig>,
     #[sand(default = (1, "t".to_string()))]
     pair: (i64, String),
-    #[sand(default = Holder { a: 2, bs: vec!["b".into()], pair: Some((2, "c".into())), extra: vec![5] })]
-    holder: Holder<i64, String>,
     #[sand(default = BTreeMap::from([("k".to_string(), Fig::Named { tag: None, parts: vec![Fig::Empty] })]))]
     map: BTreeMap<String, Fig>,
     #[sand(default = BTreeSet::from(["b".to_string(), "a".to_string()]))]
@@ -134,7 +132,6 @@ impl Default for Defaults {
             some_fig: Some(Fig::Empty),
             figs: vec![Fig::Num(3), Fig::Pair("p".into(), Box::new(Fig::Empty))],
             pair: (1, "t".into()),
-            holder: Holder { a: 2, bs: vec!["b".into()], pair: Some((2, "c".into())), extra: vec![5] },
             map: BTreeMap::from([("k".to_string(), Fig::Named { tag: None, parts: vec![Fig::Empty] })]),
             tags: BTreeSet::from(["b".to_string(), "a".to_string()]),
             ids: HashSet::from([3, -1]),
@@ -308,8 +305,8 @@ proptest! {
     }
 
     #[test]
-    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 17), n in int(), s in text()) {
-        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: jiff::SignedDuration::from_secs(3), shape: Fig::Num(n), raw: vec![1, 2, 255], some: None, some_fig: Some(Fig::Num(n)), figs: vec![Fig::Num(n)], pair: (n, s.clone()), holder: Holder { a: n, bs: Vec::new(), pair: None, extra: Vec::new() }, map: BTreeMap::from([(s.clone(), Fig::Num(n))]), tags: BTreeSet::from([s.clone()]), ids: HashSet::from([n]) };
+    fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 16), n in int(), s in text()) {
+        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: jiff::SignedDuration::from_secs(3), shape: Fig::Num(n), raw: vec![1, 2, 255], some: None, some_fig: Some(Fig::Num(n)), figs: vec![Fig::Num(n)], pair: (n, s.clone()), map: BTreeMap::from([(s.clone(), Fig::Num(n))]), tags: BTreeSet::from([s.clone()]), ids: HashSet::from([n]) };
         let lits = [
             ("n", int_lit(n), format!("{n}")),
             ("x", "(-1.25)".to_string(), "-1.25".to_string()),
@@ -324,7 +321,6 @@ proptest! {
             ("some_fig", format!("Some(fig.Fig.Num({}))", int_lit(n)), format!("{{\"Num\": [{n}]}}")),
             ("figs", format!("[fig.Fig.Num({})]", int_lit(n)), format!("[{{\"Num\": [{n}]}}]")),
             ("pair", format!("({}, {})", int_lit(n), str_lit(&s)), format!("[{n}, {}]", serde_str(&s))),
-            ("holder", format!("fig.Holder(a: {}, bs: [], pair: None)", int_lit(n)), format!("{{\"a\": {n}, \"bs\": [], \"pair\": null}}")),
             ("map", format!("[{}: fig.Fig.Num({})]", str_lit(&s), int_lit(n)), format!("{{{}: {{\"Num\": [{n}]}}}}", serde_str(&s))),
             ("tags", format!("Set([{}])", str_lit(&s)), format!("[{}]", serde_str(&s))),
             ("ids", format!("Set([{}])", int_lit(n)), format!("[{n}]")),
@@ -348,9 +344,8 @@ proptest! {
                     10 => expected.some_fig = full.some_fig.clone(),
                     11 => expected.figs = full.figs.clone(),
                     12 => expected.pair = full.pair.clone(),
-                    13 => expected.holder = full.holder.clone(),
-                    14 => expected.map = full.map.clone(),
-                    15 => expected.tags = full.tags.clone(),
+                    13 => expected.map = full.map.clone(),
+                    14 => expected.tags = full.tags.clone(),
                     _ => expected.ids = full.ids.clone(),
                 }
             }
@@ -378,8 +373,8 @@ proptest! {
         let made = value.clone();
         m.function("make", move || made.clone());
         let src = format!(
-            "import doc\nimport json\nlet j = doc.make()\nlet back = json.parse(json.encode(j, indent: {indent}))?\nprint(back == j)\n\
-             print(json.to_json(j) == j)\ndoc.keep(back)\nlet d: json.Json = json.decode(json.encode(j))?\ndoc.keep(d)"
+            "import doc\nimport json\nlet j = doc.make()\nlet back = json.parse(json.encode(j, indent: {indent})?)?\nprint(back == j)\n\
+             print(json.to_json(j) == j)\ndoc.keep(back)\nlet d: json.Json = json.decode(json.encode(j)?)?\ndoc.keep(d)"
         );
         let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");

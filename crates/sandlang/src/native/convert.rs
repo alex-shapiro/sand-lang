@@ -1,6 +1,6 @@
 //! Conversion between VM values and the arguments and results of native functions.
 
-use super::ty::{Never, Num, Param, Reflect, SandType, VmVal};
+use super::ty::{Never, Param, SandType, TraitDict, VmVal};
 use crate::types::traits;
 use crate::value::{NativeValue, Value, qualified_name, qualified_name_module};
 use crate::vm::meter::Scratch;
@@ -16,11 +16,10 @@ use std::hash::Hash;
 /// borrow `&str`, `&[u8]`, or `&T` from the VM heap. Owned types allocate a
 /// Rust copy.
 ///
-/// A Sand value can contain shared references to one heap object. Converting a
-/// value into an owned Rust type copies each reachable reference.
-/// Implementations must charge fuel to `vm` and record allocated bytes in
-/// [`Conversion`] so that instruction and memory limits bound shared-value
-/// expansion.
+/// A Sand value can contain shared references to the same heap object. An
+/// owned Rust conversion copies each reachable reference. Implementations must
+/// charge fuel to `vm` and record allocated bytes in [`Conversion`] so that
+/// instruction and memory limits bound shared-value expansion.
 pub trait FromVmValue: SandType {
     type Item<'a>;
 
@@ -29,8 +28,9 @@ pub trait FromVmValue: SandType {
     fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail>;
 }
 
-/// Tracks temporary Rust memory allocated while converting arguments for a
-/// native call and enforces the VM memory limit.
+/// Temporary allocation tracker for native call argument conversion.
+///
+/// Enforces the VM memory limit across all converted arguments.
 pub struct Conversion {
     bytes: usize,
     scratch: Scratch,
@@ -55,7 +55,7 @@ impl Conversion {
         r
     }
 
-    /// Records `bytes` of temporary Rust allocation and checks the VM memory limit.
+    /// Records `bytes` of temporary Rust allocation. Checks the VM memory limit.
     pub fn alloc(&mut self, vm: &Vm, bytes: usize) -> Result<(), Fail> {
         self.bytes = self.bytes.saturating_add(bytes);
         self.scratch.check(&vm.heap, self.bytes)
@@ -108,9 +108,10 @@ enum HostErrorKind<C> {
 }
 
 impl<C> HostError<C> {
-    /// Creates a recoverable Sand `Error` with the given `kind` (such as
-    /// `"not_found"`, `"invalid"`, or `"permission_denied"`; see SPEC §5.4) and
-    /// `message`.
+    /// Creates a recoverable Sand `Error` with `kind` and `message`.
+    ///
+    /// Standard error kinds include `"not_found"`, `"invalid"`, and
+    /// `"permission_denied"`. See SPEC §5.4.
     pub fn new(kind: impl Into<String>, message: impl Into<String>) -> HostError<C> {
         HostError(Box::new(HostErrorKind::Error { kind: kind.into(), message: message.into() }))
     }
@@ -129,8 +130,9 @@ impl<C: From<Fail>> From<Fail> for HostError<C> {
 }
 
 impl<C: From<Fail>> HostError<C> {
-    /// Converts a recoverable error into a Sand `Err` value, or returns the
-    /// control signal that stops the call.
+    /// Converts a recoverable error into a Sand `Err` value.
+    ///
+    /// Returns `Err` if `self` holds a control signal that stops the call.
     pub(crate) fn into_sand_error(self, vm: &mut Vm) -> Result<VmValue, C> {
         match *self.0 {
             HostErrorKind::Error { kind, message } => {
@@ -141,12 +143,30 @@ impl<C: From<Fail>> HostError<C> {
         }
     }
 
+    /// Returns the kind and message if `self` is a recoverable Sand error.
+    pub(crate) fn sand_error(&self) -> Option<(&str, &str)> {
+        match &*self.0 {
+            HostErrorKind::Error { kind, message } => Some((kind, message)),
+            HostErrorKind::Abort(_) => None,
+        }
+    }
+
     /// Splits `self` into a control signal `Ok(c)` or a recoverable
     /// `Err(HostError<Fail>)`.
     pub(crate) fn into_abort(self) -> Result<C, HostError<Fail>> {
         match *self.0 {
             HostErrorKind::Error { kind, message } => Err(HostError::new(kind, message)),
             HostErrorKind::Abort(c) => Ok(c),
+        }
+    }
+}
+
+impl HostError<Fail> {
+    /// Converts `self` into a synchronous native call error.
+    pub(crate) fn into_ctl_error(self) -> HostError<Ctl> {
+        match *self.0 {
+            HostErrorKind::Error { kind, message } => HostError::new(kind, message),
+            HostErrorKind::Abort(fail) => HostError(Box::new(HostErrorKind::Abort(fail.into()))),
         }
     }
 }
@@ -166,8 +186,8 @@ impl<C: std::fmt::Debug> std::fmt::Debug for HostError<C> {
     }
 }
 
-/// Converts a Rust error into a [`HostError<Fail>`] for native functions returning
-/// `Result<T, E>`.
+/// Converts a Rust error into a [`HostError<Fail>`] for native functions that
+/// return `Result<T, E>`.
 pub trait IntoHostError {
     fn into_host_error(self) -> HostError<Fail>;
 }
@@ -575,45 +595,45 @@ macro_rules! __value_type_impls {
                 $crate::native::convert::value_type_into_vm_value(self, vm)
             }
         }
-        impl $crate::value::Encode for $t {
-            fn encode(&self) -> $crate::value::Value {
+        impl $crate::value::ToValue for $t {
+            fn to_value(&self) -> $crate::value::Value {
                 static SAND_TYPE_NAME: $crate::native::convert::TypeNameCell = $crate::native::convert::TypeNameCell::new();
-                $crate::native::convert::encode_value_type(&SAND_TYPE_NAME, self)
+                $crate::native::convert::value_type_to_value(&SAND_TYPE_NAME, self)
             }
         }
     };
 }
 
-/// Cached qualified type name shared across values from a derived `Encode`
+/// Cached qualified type name shared across values from a derived `ToValue`
 /// implementation.
 #[doc(hidden)]
 pub type TypeNameCell = std::sync::OnceLock<std::sync::Arc<str>>;
 
 #[doc(hidden)]
-pub fn encode_value_type<T: ValueType>(type_name: &TypeNameCell, x: &T) -> Value {
+pub fn value_type_to_value<T: ValueType>(type_name: &TypeNameCell, value: &T) -> Value {
     let type_name = type_name.get_or_init(|| qualified_name(qualified_name_module(T::MODULE), T::NAME).into()).clone();
-    Value::Native(Box::new(NativeValue { type_name, text: x.to_string() }))
+    Value::Native(Box::new(NativeValue { type_name, text: value.to_string() }))
 }
 
 #[doc(hidden)]
-pub fn value_type_from_vm_value<T: ValueType>(vm: &Vm, v: VmValue) -> Result<T, Fail> {
-    vm.heap.native_value::<T>(v).ok_or_else(mismatch::<T>)
+pub fn value_type_from_vm_value<T: ValueType>(vm: &Vm, value: VmValue) -> Result<T, Fail> {
+    vm.heap.native_value::<T>(value).ok_or_else(mismatch::<T>)
 }
 
 #[doc(hidden)]
-pub fn value_type_into_vm_value<T: ValueType>(x: T, vm: &mut Vm) -> Result<VmValue, Fail> {
+pub fn value_type_into_vm_value<T: ValueType>(value: T, vm: &mut Vm) -> Result<VmValue, Fail> {
     if T::PACKING.is_none() {
-        vm.check_memory(ValueType::size(&x))?;
+        vm.check_memory(ValueType::size(&value))?;
     }
-    Ok(vm.new_native_value(x))
+    Ok(vm.new_native_value(value))
 }
 
 macro_rules! handle {
     ($([$($g:tt)*] $t:ty),* $(,)?) => {$(
         impl<$($g)*> FromVmValue for $t {
             type Item<'a> = Self;
-            fn from_vm_value(_: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
-                Ok(Self::from_raw(v))
+            fn from_vm_value(_: &Vm, value: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
+                Ok(Self::from_raw(value))
             }
         }
         impl<$($g)*> IntoVmValue for $t {
@@ -628,21 +648,12 @@ handle! {
     [const N: u8, B: traits::Set] Param<N, B>,
 }
 
-impl<const N: u8> FromVmValue for Num<N> {
+impl<const N: u8, B: traits::Single> FromVmValue for TraitDict<N, B> {
     type Item<'a> = Self;
-    fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
-        match vm.heap.get(v) {
-            Obj::Tuple(_) => Ok(Num::from_raw(v)),
+    fn from_vm_value(vm: &Vm, value: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
+        match vm.heap.get(value) {
+            Obj::Tuple(_) => Ok(TraitDict::from_raw(value)),
             _ => Err(mismatch::<Self>()),
         }
-    }
-}
-
-impl<const N: u8> FromVmValue for Reflect<N> {
-    type Item<'a> = Self;
-    fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
-        let r = Reflect::from_raw(v);
-        r.desc(&vm.heap)?;
-        Ok(r)
     }
 }
