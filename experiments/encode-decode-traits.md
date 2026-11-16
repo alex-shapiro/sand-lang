@@ -19,7 +19,7 @@ Design goals:
 
 ### Static trait dictionaries over runtime type inspection
 
-The compiler resolves `Encode` and `Decode` from static types. Callers pass trait dictionaries to generic functions. We delete the `reflect` keyword. Callers pass `Decode` dictionaries with the target type structure instead. A host function that decodes into a type parameter requires `Decode` instead of `reflect`.
+The compiler resolves `Encode` and `Decode` from static types. Callers pass trait dictionaries to generic functions. A `Decode` dictionary describes the structure of the target type. A host function that decodes into a type parameter requires `Decode`.
 
 The walkers cannot resolve generic implementations or `Decode` implementations from heap value tags. The VM omits type arguments from runtime values. An empty `[Email]` list has the same heap representation as an empty `[int]` list. An inline `None` of type `Email?` has the same bits as an inline `None` of type `int?`. If the VM recorded type arguments on every value, every generic call would pass hidden descriptors. The VM would also allocate heap objects for inline values such as `None`. The decode walker also cannot inspect a value tag to select a `Decode` implementation. The decode walker reads raw input before any Sand value exists.
 
@@ -29,19 +29,22 @@ With trait dictionaries, callers pass a hidden argument only to generic function
 
 Each trait declares a native Rust default method that walks structural values. The walker processes derived parts in Rust. It awaits a Sand callback for custom methods, `init` constructors, and computed field defaults.
 
-We rejected three alternatives:
+During a callback, the walker keeps its position in an explicit stack of frames on the heap. Only walks with a callback below the root use this stack. See [Cached plans over per-part dictionary reads](#cached-plans-over-per-part-dictionary-reads).
 
+We rejected four alternatives:
+
+- **Recursive async walkers.** A recursive async walker keeps its position in nested futures. Each poll recurses once for each nesting level. A prototype overflowed a 512 KiB thread stack at 500 levels.
 - **Generated Sand methods.** In benchmarks, generated Sand `encode` and `decode` methods took 2.3 to 7 times as long as native walkers.
 - **Dual native and Sand codecs.** With both generated Sand codecs and native walkers, the engine duplicates output formatting, error paths, and memory-limit retries. In an earlier prototype, over a quarter of the new code kept the two paths aligned.
 - **Two-pass walks with placeholders.** In a two-pass design, the walker builds an intermediate value tree with placeholders on every JSON call. That tree uses extra memory. Without format rules, the walker also cannot distinguish Base64 bytes from plain strings in an untyped first pass.
 
-The decode walker can invoke a callback before rejecting a later field. The decode walker runs custom `decode` methods, `init` constructors, and computed defaults as it reaches each part. Previously, `json.decode` ran computed field defaults only after it parsed the entire input.
+The decode walker can invoke a callback before rejecting a later field. The decode walker runs custom `decode` methods, `init` constructors, and computed defaults as it reaches each part.
 
 ### Trait-agnostic native default methods over codec support in the compiler
 
-The checker automatically derives every trait with a native default method.
+The checker automatically derives every trait with a native default method for Sand structs and enums.
 
-The compiler records a shape for each derived implementation. A shape holds the type constructor and a dictionary template for each part. A trait builds values if its native default method is a static method with `Self` in its return type, as in `Decode.decode`. A trait reads values if its native default method takes `self`, as in `Encode.encode`. The shapes of a trait that builds values also hold constructor data: the `init` call and the default value of each parameter or field. Each derived dictionary stores its shape index after its method slots.
+The compiler records a shape for each derived implementation. The walkers read a shape to find the parts of a value and the dictionary of each part. A shape holds the type constructor and a part template for each part. A part template builds the part's dictionary from the outer dictionary. A trait builds values if its native default method is a static method with `Self` in its return type, as in `Decode.decode`. For a trait that builds values, a shape also holds constructor data: the `init` call and the default value of each parameter or field.
 
 The walkers form a standard library module.
 
@@ -64,7 +67,7 @@ We rejected two alternatives:
 
 Structural dictionaries store part templates instead of child dictionaries. Before a walk, the walker resolves the templates below the root dictionary into a plan: a Rust tree with a node for each distinct dictionary. The walker then visits values by the plan without dictionary reads.
 
-If a dictionary below the root runs Sand code, the walker reads each part dictionary as it reaches the part, and awaits each callback. A plan also stops at 1,024 distinct dictionaries. A polymorphically recursive type such as `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }` exceeds that limit.
+A plan has a size limit. A polymorphically recursive type such as `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }` exceeds it. If a dictionary below the root runs Sand code, or if a plan exceeds its size limit, the walker reads each part dictionary as it reaches the part.
 
 The walkers cache plans across calls in per-VM storage for native modules. That storage maps a Rust type to a value, so two modules cannot collide. Each VM has its own map, so engines in one process do not share caches. The cache keys plans by constant root dictionaries, whose handles last for the life of the VM.
 
@@ -72,7 +75,7 @@ We rejected three alternatives:
 
 - **Per-part dictionary reads.** In release-build benchmarks of small and large `json.encode` and `json.decode` calls, reading each part's dictionary and shape made calls take 1.7 to 2.3 times as long as on `main`.
 - **Eagerly nested dictionaries.** If parent dictionaries stored child dictionaries directly, the compiler would need cyclic constants for recursive types such as `Tree`. On a polymorphically recursive type such as `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }`, the compiler would expand nested dictionaries without bound.
-- **Generated Sand lookup functions.** Each call to a generated Sand helper function costs about 90 ns per uncached child dictionary. The walker would pay that callback cost even on derived types.
+- **Generated Sand lookup functions.** Each call to a generated Sand helper function costs about 90 ns per uncached child dictionary. Generic code builds dictionaries at run time, and the walker builds a new plan for each of them on every call. Each of those plans would pay that cost for each part.
 
 ## Language Design
 
@@ -138,7 +141,7 @@ We rejected two alternatives:
 
 For a struct with an `init` constructor, the compiler derives `Decode` from `init`'s parameters. At runtime, the decode walker reads those parameters and calls `init`. The derived implementation includes `init`'s trait bounds. The walker passes their dictionaries to `init`. The walker sets missing `Option` parameters to `None`. For other missing parameters with defaults, the walker evaluates their defaults. The walker ignores `init`'s visibility. Field-based decoding likewise populates private fields.
 
-For a trait that builds values, such as `Decode`, the derived implementation visits a struct's `init` parameters. For a trait that reads values, such as `Encode`, the derived implementation visits the struct's fields. The checker derives a trait that reads values for a struct with `init` only if the `init` parameters match the fields by name and type. The compiler accepts the struct definition in both cases.
+For a trait that builds values, such as `Decode`, the derived implementation visits a struct's `init` parameters. A trait reads values if its native default method takes `self`, as in `Encode.encode`. For a trait that reads values, the derived implementation visits the struct's fields. The checker derives a trait that reads values for a struct with `init` only if the `init` parameters match the fields by name and type. The compiler accepts the struct definition in both cases.
 
 We rejected six alternatives:
 
@@ -163,8 +166,6 @@ Every conversion between a Sand value and a host `Value` runs inside an active `
 
 - Every conversion to `Value` requires `T: Encode`.
 - Every conversion from `Value` requires `T: Decode`.
-- We delete `Value::Opaque`, synchronous `Vm::to_value`, and `value::Encode`.
-- `Later::new` futures convert values through `NativeContext::to_value` and `NativeContext::from_value`.
 - Native functions can also take `Encoded<N>` arguments that the engine converts before the call.
 - The engine rejects host calls to functions whose return type does not implement `Encode`.
 - If a top-level script result does not implement `Encode`, the engine returns `Value::Unit`.
