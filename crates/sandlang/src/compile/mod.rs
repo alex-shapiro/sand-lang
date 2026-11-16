@@ -9,9 +9,9 @@ mod init_order;
 mod inline;
 
 use crate::check::budget::CompileBudget;
-use crate::check::codec::CodecImpl;
+use crate::check::codec::{CodecFill, CodecImpl};
 use crate::check::persist::{PMap, PVec};
-use crate::check::{CheckedProgram, DefaultArg, FnKind};
+use crate::check::{CheckedProgram, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
@@ -2788,36 +2788,28 @@ impl<'a> Compiler<'a> {
             }
             _ => ShapeKind::Never,
         };
-        let mut fills = Vec::new();
-        let mut init = None;
-        if let (true, ShapeKind::Struct(d)) = (decode, &kind) {
-            for (i, field) in cp.types[*d as usize].fields().iter().enumerate() {
-                fills.push(match (&field.const_default, field.default) {
-                    (Some(c), _) => Fill::Const((**c).clone()),
-                    (None, Some(helper)) => {
-                        let dicts = codec.fills.get(i).map(|ds| ds.iter().map(|e| self.part_template(e)).collect()).unwrap_or_default();
-                        Fill::Call(self.fn_const(helper), dicts)
-                    }
-                    (None, None) => Fill::Required,
-                });
-            }
-        }
-        if let Some(ci) = &codec.init {
-            let fi = &cp.fns[ci.func as usize];
-            for (i, p) in fi.params.iter().enumerate() {
-                fills.push(match (&p.default, ci.consts.get(i).cloned().flatten()) {
-                    (_, Some(c)) => Fill::Const(c),
-                    (Some(DefaultArg::Helper(helper)), None) => {
-                        let dicts = codec.fills.get(i).map(|ds| ds.iter().map(|e| self.part_template(e)).collect()).unwrap_or_default();
-                        Fill::Call(self.fn_const(*helper), dicts)
-                    }
-                    _ => Fill::Required,
-                });
-            }
-            let dicts = ci.dicts.iter().map(|e| self.part_template(e)).collect();
-            let names = fi.params.iter().map(|p| cp.name(p.name).to_string()).collect();
-            init = Some(InitCall { func: self.fn_const(ci.func), dicts, names });
-        }
+        let field_consts: Vec<Option<&crate::types::ConstVal>> = match &kind {
+            ShapeKind::Struct(d) => cp.types[*d as usize].fields().iter().map(|f| f.const_default.as_deref()).collect(),
+            _ => Vec::new(),
+        };
+        let fills = codec
+            .fills
+            .iter()
+            .enumerate()
+            .map(|(i, fill)| match (field_consts.get(i).copied().flatten(), fill) {
+                (Some(c), _) | (None, CodecFill::Const(c)) => Fill::Const(c.clone()),
+                (None, CodecFill::Helper(helper, dicts)) => {
+                    let dicts = dicts.iter().map(|e| self.part_template(e)).collect();
+                    Fill::Call(self.fn_const(*helper), dicts)
+                }
+                (None, CodecFill::Required) => Fill::Required,
+            })
+            .collect();
+        let init = codec.init.as_ref().map(|(func, dicts)| {
+            let dicts = dicts.iter().map(|e| self.part_template(e)).collect();
+            let names = cp.fns[*func as usize].params.iter().map(|p| cp.name(p.name).to_string()).collect();
+            InitCall { func: self.fn_const(*func), dicts, names }
+        });
         CodecShape { kind, parts, fills, init }
     }
 
