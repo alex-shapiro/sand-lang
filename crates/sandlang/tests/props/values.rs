@@ -170,7 +170,7 @@ proptest! {
     fn json_roundtrip(j in json_value()) {
         let text = render_json(&j);
         let src = format!(
-            "import json\nlet j = json.parse({})?\nlet t = json.encode(j)\nprint(t)\nprint(json.parse(t)? == j)\nprint(json.parse(json.encode(j, indent: 2))? == j)\n",
+            "import json\nlet j = json.parse({})?\nlet t = json.encode(j)?\nprint(t)\nprint(json.parse(t)? == j)\nprint(json.parse(json.encode(j, indent: 2)?)? == j)\n",
             str_lit(&text)
         );
         check(&src, &format!("{text}\ntrue\ntrue\n"), None)?;

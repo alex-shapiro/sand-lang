@@ -3,9 +3,10 @@
 //! ### Enum Encodings
 //!
 //! - Unit enum variants map to strings like `"Red"`
-//! - Tuple variants with a single payload field map to `{"Variant": payload}`
-//! - Tuple variants with multiple payload fields map to `{"Variant": [f0, f1, ...]}`
+//! - Tuple variants map to `{"Variant": [f0, f1, ...]}`
 //! - Struct variants map to `{"Variant": {...}}`
+//! - `Some(x)` maps to `x`, and `None` and `()` map to `null`
+//! - `Json` values map to the JSON data that they hold
 //!
 //! ### Other Type Encodings
 //!
@@ -120,46 +121,31 @@ pub native fn parse(text: str) -> Result<Json>
 /// Serializes `value` as JSON text.
 ///
 /// Emits compact output if `indent <= 0`, or pretty-prints with `indent` spaces
-/// per level. Finite floats include a decimal point or exponent, and `NaN` or
-/// infinite floats are serialized as `null`. Aborts with kind `"invalid"` if a
-/// map key is not a `str`, `int`, `duration`, `bool`, unit enum variant, or
-/// value type, or with kind `"limit"` if array or object nesting exceeds 512
-/// levels.
-pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
+/// per level. Finite floats include a decimal point or exponent. Fails with
+/// kind `"invalid"` for a `NaN` or infinite float, or if a map key is not a
+/// `str`, `int`, `duration`, `bool`, unit enum variant, or value type. Fails
+/// with the error of a custom `encode` method. Aborts with kind `"limit"` if
+/// nesting exceeds 512 levels.
+pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>
 
 /// Decodes JSON `text` into a value of type `T`.
 ///
-/// Unknown object fields are ignored, and duplicate keys overwrite earlier
-/// values.
+/// Unknown object fields are ignored. Duplicate keys of a map overwrite
+/// earlier values, and duplicate fields of a struct fail with kind `"parse"`.
 ///
 /// If a struct field is omitted from a JSON object, `decode` uses the field's
 /// declared default, or `None` if the field is an `Option` without a default.
-/// Constant defaults are filled inline during parsing, and non-constant default
-/// expressions are evaluated in post-order after parsing succeeds.
+/// A struct that declares `init` decodes the parameters of `init` and calls
+/// it. Custom `decode` methods, `init`, and computed defaults run as the
+/// decode reaches each value, so one of them can run before a later value
+/// fails to decode.
 ///
 /// Fails with kind `"parse"` on invalid JSON syntax, missing required fields,
 /// or type mismatches, including the JSON path such as `$.items[2].price` in
-/// the error message. Fails with kind `"invalid"` if a target map key type does
-/// not implement `Encode`.
-pub fn decode<reflect T: Decode>(text: str) -> Result<T> {
-    let decoded: Decoded<T> = decode_raw(text)
-    match decoded {
-        Done(value) => Ok(value)
-        Pending(value, fills) => {
-            for fill in fills {
-                fill()
-            }
-            Ok(value)
-        }
-        Failed(e) => Err(e)
-    }
-}
-
-native fn decode_raw<reflect T: Decode>(text: str) -> Decoded<T>
+/// the error message.
+pub native fn decode<T: Decode>(text: str) -> Result<T>
 
 /// Converts `value` into a `Json` value using the same representation as
-/// `encode`. Aborts with kind `"invalid"` if `value` contains a map key type
-/// that `encode` does not support, or with kind `"limit"` if array or object
-/// nesting exceeds 512 levels. Also reuses existing `Json` values without
-/// traversing them.
+/// `encode`. Aborts with the error that `encode` would return, or with kind
+/// `"limit"` if nesting exceeds 512 levels.
 pub native fn to_json<T: Encode>(value: T) -> Json

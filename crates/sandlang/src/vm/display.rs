@@ -278,7 +278,6 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmVa
                                     x.write_text(out)
                                 }
                             }
-                            Obj::TypeDesc(_) => out.push_str("<type>"),
                             Obj::Free(_) => out.push_str("<freed>"),
                         }
                     }

@@ -422,7 +422,7 @@ fn hostile_native_work_is_contained() {
         format!("{dag}print([a].contains(b))"),
         format!("{dag}print(Set([a]).len())"),
         format!("{dag}let m = [a: 1]\nprint(m.len())"),
-        format!("import json\n{dag}print(json.encode(a).len())"),
+        format!("import json\n{dag}print(json.encode(a)?.len())"),
         "let s = \"x\".repeat(20000000)\nvar n = 0\nwhile true { n += s.len() + s.find(\"y\").unwrap_or(0) }".into(),
         "let s = \"x\".repeat(20000000)\nlet m = [s: 1]\nwhile true { m.contains(s) }".into(),
         "let xs = (0..1000000).to_list()\nwhile true { xs.sorted() }".into(),

@@ -615,11 +615,8 @@ impl Checker {
             let mut scope = self.fs.generics.clone();
             let self_ty = self.fs.self_ty;
             let own = self.declare_params(&f.generics, &scope, self_ty);
-            for (g, &p) in f.generics.iter().zip(&own) {
+            for &p in &own {
                 scope.push((self.params[p as usize].name, p));
-                if g.reflect {
-                    self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
-                }
             }
             let mut ptys = Vec::new();
             self.check_param_names(f.params.iter().map(|p| &p.name));
@@ -1163,7 +1160,7 @@ impl Checker {
 
     fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
         let fi = &self.fns[f as usize];
-        if !fi.dicts.is_empty() || fi.generics.iter().any(|&p| self.params[p as usize].reflect) {
+        if !fi.dicts.is_empty() || self.takes_encoded(f) {
             return self.wrapper_value(f, &[], span);
         }
         let inst = self.instantiate_fn_with(f, span, &[]);
@@ -1592,7 +1589,7 @@ impl Checker {
         let Some(mut hargs) = self.bind_args(Callee::Fn(f), &ptys, recv, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        let mut hidden = self.hidden_args(f, &fresh, &dicts, "call", &|_, _| false, span);
+        let mut hidden = self.hidden_args(&dicts, &|_, _| false, span);
         if !hidden.is_empty() {
             let k = hidden.len();
             for a in &mut hargs {
@@ -1603,7 +1600,46 @@ impl Checker {
             hidden.extend(hargs);
             hargs = hidden;
         }
+        let k = hargs.len() - ptys.len();
+        self.encode_native_args(f, &ptys, &mut hargs[k..], span);
         mk(self.call_kind(f, fresh, hargs), ret, span)
+    }
+
+    /// Returns `true` if the Rust function of native `f` takes an
+    /// [`Encoded`](crate::native::ty::Encoded) argument.
+    fn takes_encoded(&self, f: FnId) -> bool {
+        let FnKind::Native(n) = self.fns[f as usize].kind else { return false };
+        self.natives.fns.get(n as usize).is_some_and(|d| d.sig.params.iter().any(|t| matches!(t, Type::Encoded(_))))
+    }
+
+    /// Wraps each argument of native `f` that its Rust function takes as
+    /// [`Encoded`](crate::native::ty::Encoded) in a call that encodes it as a
+    /// host value.
+    pub(crate) fn encode_native_args(&mut self, f: FnId, ptys: &[TypeId], args: &mut [HArg], span: Span) {
+        let FnKind::Native(n) = self.fns[f as usize].kind else { return };
+        let Some(decl) = self.natives.fns.get(n as usize) else { return };
+        let script: Vec<bool> =
+            decl.sig.params.iter().filter(|t| !matches!(t, Type::Dict(..))).map(|t| matches!(t, Type::Encoded(_))).collect();
+        if !script.contains(&true) {
+            return;
+        }
+        let (Some(encode), Some(tr)) = (self.natives.id("prelude.encode_arg"), self.builtin_trait(Builtin::Encode)) else { return };
+        for ((a, &t), _) in args.iter_mut().zip(ptys).zip(&script).filter(|(_, e)| **e) {
+            let HArg::Expr(e) = a else { continue };
+            let value = std::mem::replace(e, mk(HKind::Unit, TypeId::UNIT, span));
+            let dict = self.evidence_hole(t, tr, false, span);
+            let call = HKind::CallNative { native: encode, targs: vec![t], args: vec![HArg::Expr(dict), HArg::Expr(value)] };
+            *e = mk(call, self.encoded_arg_ty(), span);
+        }
+    }
+
+    /// Returns the type of an encoded native argument, the prelude
+    /// `EncodedArg`.
+    fn encoded_arg_ty(&mut self) -> TypeId {
+        match self.prelude.and_then(|p| self.scope_def(p, "EncodedArg")) {
+            Some(Def::Type(TyRef::Def(d))) => self.arena.named(d, &[]),
+            _ => TypeId::ERROR,
+        }
     }
 
     pub(crate) fn call_kind(&self, f: FnId, targs: Vec<TypeId>, args: Vec<HArg>) -> HKind {
@@ -2232,7 +2268,16 @@ impl Checker {
             let v = match (given, &base, self.types[d as usize].fields()[i].default) {
                 (Some(h), _, _) => h,
                 (None, Some(b), _) => mk(HKind::Field { obj: Box::new(b.clone()), index: i as u32 }, fty, span),
-                (None, None, Some(helper)) => mk(HKind::Call { func: helper, targs: targs.clone(), args: vec![] }, fty, span),
+                (None, None, Some(helper)) => {
+                    let gens = self.types[d as usize].generics.clone();
+                    let mut args = Vec::new();
+                    for (t, tr) in self.fns[helper as usize].dicts.clone() {
+                        let t = self.arena.instantiate(t, &gens, &targs);
+                        let tr = tr.subst_params(&mut self.arena, &|p| gens.iter().position(|&g| g == p).map(|i| targs[i]));
+                        args.push(HArg::Expr(self.evidence_hole(t, tr, false, span)));
+                    }
+                    mk(HKind::Call { func: helper, targs: targs.clone(), args }, fty, span)
+                }
                 (None, None, None) => {
                     let field = self.name(self.types[d as usize].fields()[i].name);
                     self.error(span, format!("missing field `{field}` in `{name}(...)`"));

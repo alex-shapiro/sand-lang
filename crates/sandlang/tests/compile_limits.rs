@@ -548,15 +548,17 @@ print(bad.is_err())
 }
 
 #[test]
-fn reflected_types_too_large_to_describe() {
-    // Polymorphic recursion: `P<int>` contains `P<[int]>`, which contains
-    // `P<[[int]]>`, ... (each new). Many call sites stay cheap: the work of
-    // all descriptions of a compilation is bounded too.
+fn polymorphically_recursive_types_compile_quickly() {
+    // `P<int>` contains `P<[int]>`, which contains `P<[[int]]>`, and so on.
+    // The decode walker builds each part dictionary at run time, so each
+    // call site costs the same work.
     let mut src = String::from("import json\nstruct P<T> { v: T, next: P<[T]>? }\n");
     for i in 0..300 {
         src += &format!("struct Q{i} {{ x: int }}\nlet r{i}: Result<P<Q{i}>> = json.decode(\"1\")\n");
     }
-    rejects(&src, "type too large to describe at runtime");
+    let (r, took) = check(Config::new(), &src);
+    assert!(r.is_ok(), "{r:?}");
+    assert!(took < FAST, "took {took:?}");
 }
 
 /// Compiles the sources `source(n)` and `source(4 * n)` and asserts that the larger

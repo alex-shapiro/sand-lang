@@ -321,7 +321,7 @@ fn library_lookup_ignores_standard_module_names() {
     let (r, _) = run(config(), "import prelude\nprint(prelude.f())");
     let Err(Error::Compile(ds)) = r else { panic!("expected a compile error, got {r:?}") };
     assert!(ds[0].message.contains("unknown module `prelude`"), "{ds:?}");
-    let (r, out) = run(config(), "import json\nprint(json.encode(1))");
+    let (r, out) = run(config(), "import json\nprint(json.encode(1)?)");
     r.unwrap();
     assert_eq!(out, "1\n");
 }

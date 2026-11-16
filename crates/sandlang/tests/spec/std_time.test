@@ -421,14 +421,14 @@ let d = time.PlainDate(2024, 2, 29)?
 print("due \(d), at \(time.PlainTime(9, 30)?)")
 print("[\(d:>12)]")
 print(d.debug())
-print(json.encode([d]))
+print(json.encode([d])?)
 struct Event {
     name: str
     at: time.ZonedDateTime
     every: time.Span
 }
 let e = Event(name: "standup", at: time.ZonedDateTime.parse("2024-03-11T09:00[America/New_York]")?, every: time.Span(weeks: 1))
-let text = json.encode(e)
+let text = json.encode(e)?
 print(text)
 let back: Event = json.decode(text)?
 print(back == e)
@@ -520,7 +520,7 @@ import time
 import json
 from time import Span
 for s in [Span(milliseconds: 1500), Span(nanoseconds: 1000), Span(microseconds: 2000000), Span(hours: 1, milliseconds: 1000)] {
-    let back: Span = json.decode(json.encode(s))?
+    let back: Span = json.decode(json.encode(s)?)?
     print((s, Span.parse(s.to_str())? == s, back == s))
 }
 let counts = [Span(milliseconds: 1500): 1]
@@ -536,7 +536,7 @@ print(counts[Span(seconds: 1, milliseconds: 500)])
 import time
 import json
 let m = [time.PlainDate(2024, 2, 29)?: 1, time.PlainDate(2023, 1, 1)?: 2]
-let back: [time.PlainDate: int] = json.decode(json.encode(m))?
+let back: [time.PlainDate: int] = json.decode(json.encode(m)?)?
 print(back == m)
 let dup: [time.TimeZone: int] = json.decode("{\"america/new_york\": 1, \"America/New_York\": 2}")?
 print(dup)
@@ -608,7 +608,7 @@ import time
 import json
 from time import Span
 let a = Span(milliseconds: 1500)
-let b: Span = json.decode(json.encode(a))?
+let b: Span = json.decode(json.encode(a)?)?
 print((a == b, a.seconds(), a.milliseconds(), b.seconds(), b.milliseconds()))
 print(Span(nanoseconds: -1500).to_str())
 --- stdout

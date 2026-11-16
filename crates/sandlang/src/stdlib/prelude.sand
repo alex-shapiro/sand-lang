@@ -308,14 +308,72 @@ pub trait Ord: Eq {}
 /// implement `Hash`.
 pub trait Hash: Eq {}
 
-/// Encodes values as JSON with `json.encode`. The compiler derives `Encode`
-/// for tuples, structs, and enums whose components implement `Encode`.
-pub trait Encode {}
+/// Converts a value into an external format, such as JSON text.
+///
+/// The compiler derives `Encode` for the built-in data types, `never`, and
+/// each struct and enum whose parts implement `Encode`. A struct whose `init`
+/// parameters differ from its fields does not derive `Encode`. An `impl`
+/// replaces the derived implementation for its type.
+pub trait Encode {
+    /// Writes `self` to `encoder` as a single value.
+    /// Returns an error if `self` cannot be encoded.
+    native fn encode(self, encoder: Encoder) -> Result<()>
+}
 
-/// Decodes values from JSON with `json.decode`. The compiler derives `Decode`
-/// for tuples, structs without `init`, and enums whose components implement
-/// `Decode`.
-pub trait Decode: Encode {}
+/// Builds a value from an external format, such as JSON text.
+///
+/// The compiler derives `Decode` for the built-in data types, `never`, and
+/// each struct and enum whose parts implement `Decode`. A struct that
+/// declares `init` decodes the parameters of `init` and calls it. An `impl`
+/// replaces the derived implementation for its type.
+pub trait Decode {
+    /// Reads a value of type `Self` from `decoder`.
+    native fn decode(decoder: Decoder) -> Result<Self>
+}
+
+impl Encode for () {}
+impl Encode for bool {}
+impl Encode for int {}
+impl Encode for float {}
+impl Encode for str {}
+impl Encode for bytes {}
+impl Encode for duration {}
+impl Encode for Range {}
+impl<T: Encode> Encode for [T] {}
+impl<T: Encode> Encode for Set<T> {}
+impl<K: Encode, V: Encode> Encode for [K: V] {}
+impl Decode for () {}
+impl Decode for bool {}
+impl Decode for int {}
+impl Decode for float {}
+impl Decode for str {}
+impl Decode for bytes {}
+impl Decode for duration {}
+impl Decode for Range {}
+impl<T: Decode> Decode for [T] {}
+impl<T: Decode + Hash> Decode for Set<T> {}
+impl<K: Decode + Hash, V: Decode> Decode for [K: V] {}
+
+/// Encodes an argument of a native function that takes a host `Value`.
+native fn encode_arg<T: Encode>(value: T) -> EncodedArg
+
+extend Encoder {
+    /// Writes `value` as the single value of this encoder. Fails with kind
+    /// `"invalid"` if the encoder already has a value, or if its `encode`
+    /// call has returned.
+    pub native fn encode<T: Encode>(self, value: T) -> Result<()>
+}
+
+extend Decoder {
+    /// Reads the single value of this decoder as a `T`. Fails with kind
+    /// `"invalid"` if the decoder already gave its value, or if its `decode`
+    /// call has returned.
+    pub native fn decode<T: Decode>(self) -> Result<T>
+
+    /// Returns the kind of the value that `decode` would read, without
+    /// reading it.
+    pub native fn kind(self) -> Result<InputKind>
+}
 
 /// Performs arithmetic on numeric types (`int` and `float`).
 pub trait Num: Ord + Encode {

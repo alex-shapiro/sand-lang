@@ -545,12 +545,22 @@ macro_rules! builtins {
                 const TRAITS: Builtins = A::TRAITS.union(B::TRAITS);
             }
 
+            /// A single built-in trait, whose dictionary a
+            /// [`TraitDict`](crate::native::ty::TraitDict) holds.
+            pub trait One: Set {
+                const BUILTIN: Builtin;
+            }
+
             $(
                 #[doc = concat!("Built-in trait marker for `", stringify!($name), "`.")]
                 pub struct $name;
 
                 impl Set for $name {
                     const TRAITS: Builtins = Builtins::of(Builtin::$name);
+                }
+
+                impl One for $name {
+                    const BUILTIN: Builtin = Builtin::$name;
                 }
             )*
         }
@@ -564,10 +574,10 @@ impl Builtin {
         Builtin::ALL.iter().copied().find(|b| b.name() == s)
     }
 
-    /// Returns `true` if the checker derives `self` from the structure of a type
-    /// (all built-in traits except `Num`).
+    /// Returns `true` if the checker verifies `self` from the structure of a
+    /// type, without a dictionary (`Eq`, `Ord`, and `Hash`).
     pub fn is_derived(self) -> bool {
-        self != Builtin::Num
+        matches!(self, Builtin::Eq | Builtin::Ord | Builtin::Hash)
     }
 }
 
@@ -610,7 +620,6 @@ pub struct ParamInfo {
     pub name: Symbol,
     /// Direct trait bounds declared on the type parameter, excluding supertraits.
     pub traits: Vec<TraitRef>,
-    pub reflect: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -734,6 +743,9 @@ pub struct TypeDef {
     pub is_pub: bool,
     pub doc: Option<Arc<str>>,
     pub span: Span,
+    /// The codec traits of a native type, or `None` for a type that Sand
+    /// source declares.
+    pub codecs: Option<crate::native::codec::NativeCodecs>,
 }
 
 impl TypeDef {

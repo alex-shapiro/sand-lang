@@ -95,7 +95,9 @@ pub(crate) struct ActiveNativeCall {
 impl ActiveNativeCall {
     /// Appends this call's rooted values to `roots`.
     pub fn trace(&self, roots: &mut Vec<VmValue>) {
-        roots.extend_from_slice(&self.call.state.lock().roots);
+        let state = self.call.state.lock();
+        roots.extend_from_slice(&state.roots);
+        state.kept.iter().for_each(|kept| roots.extend_from_slice(kept));
     }
 }
 
@@ -494,7 +496,7 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
         let (request, root_capacity) = {
             let mut state = active_call.call.state.lock();
             state.lent_vm = None;
-            (state.request.take(), state.roots.capacity())
+            (state.request.take(), state.roots.capacity() + state.kept.iter().map(Vec::capacity).sum::<usize>())
         };
         let polled = match polled {
             Ok(polled) => polled,

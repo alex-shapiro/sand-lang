@@ -115,7 +115,7 @@ impl CloseSignal {
 
 /// An IP address and port, formatted as `127.0.0.1:8080` or `[::1]:8080`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandValue)]
-#[sand(module = "net")]
+#[sand(module = "net", encode, decode)]
 pub(crate) struct SocketAddr(std::net::SocketAddr);
 
 impl From<std::net::SocketAddr> for SocketAddr {

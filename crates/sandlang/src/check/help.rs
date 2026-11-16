@@ -714,13 +714,34 @@ impl Checker {
             .collect();
         section(out, "Methods", &methods);
         let mut traits = self.derived_traits(c, arity);
-        for i in self.visible_impls(c, arity) {
+        let mut impls = self.visible_impls(c, arity);
+        impls.sort_by_key(|&i| self.traits[self.impls[i as usize].trait_ref.trait_id as usize].builtin.is_none());
+        for i in impls {
             let imp = &self.impls[i as usize];
-            let wheres = imp.evidence.iter().map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr))).collect();
-            traits.push(with_wheres(self.show_trait(&imp.trait_ref), wheres));
+            traits.push(with_wheres(self.show_trait(&imp.trait_ref), self.impl_wheres(i)));
         }
         let traits: Vec<(String, Option<Arc<str>>)> = traits.into_iter().map(|t| (t, None)).collect();
         section(out, "Implements", &traits);
+    }
+
+    /// Formats the bounds of impl `i` (`T: Encode`), except the bounds that its
+    /// target type declares.
+    fn impl_wheres(&self, i: ImplId) -> Vec<String> {
+        let imp = &self.impls[i as usize];
+        let hash = self.builtin_trait(Builtin::Hash);
+        let declared = |t: TypeId, tr: &TraitRef| match self.arena.get(imp.target) {
+            Ty::Named(d, args) => self.arena.list(args).iter().position(|&a| a == t).is_some_and(|k| {
+                let p = self.types[d as usize].generics[k];
+                self.params[p as usize].traits.contains(tr)
+            }),
+            Ty::Set(x) | Ty::Map(x, _) => x == t && Some(*tr) == hash,
+            _ => false,
+        };
+        imp.evidence
+            .iter()
+            .filter(|(t, tr)| !declared(*t, tr))
+            .map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr)))
+            .collect()
     }
 
     /// Formats the derived built-in traits of constructor `c` and their `where`
@@ -799,9 +820,10 @@ impl Checker {
                 }
             }
         }
-        for imp in self.impls.iter().filter(|i| i.trait_ref.trait_id == t) {
-            let wheres = imp.evidence.iter().map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr))).collect();
-            let shown = with_wheres(self.show(imp.target), wheres);
+        for i in (0..self.impls.len() as ImplId).filter(|&i| {
+            self.impls[i as usize].trait_ref.trait_id == t && !self.impls[i as usize].derived && !self.impls[i as usize].replaced
+        }) {
+            let shown = with_wheres(self.show(self.impls[i as usize].target), self.impl_wheres(i));
             if !impls.contains(&shown) {
                 impls.push(shown);
             }
@@ -1004,7 +1026,7 @@ impl Checker {
 
     fn param_text(&self, p: ParamId) -> String {
         let info = &self.params[p as usize];
-        let name = format!("{}{}", if info.reflect { "reflect " } else { "" }, self.name(info.name));
+        let name = self.name(info.name).to_string();
         let traits = self.traits_text(p, &[]);
         if traits.is_empty() { name } else { format!("{name}: {traits}") }
     }

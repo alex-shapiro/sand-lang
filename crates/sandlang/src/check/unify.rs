@@ -4,7 +4,6 @@
 //! Because types are hash-consed, equal types share a `TypeId`.
 
 use super::Checker;
-use super::expr::mk;
 use super::traits::is_const_dict;
 use crate::diag::Span;
 use crate::hir::*;
@@ -201,15 +200,6 @@ impl Checker {
                     self.hoist_dict(e, &mut fin.hoisted);
                 }
                 return;
-            }
-            HKind::TypeDesc { ty, args } => {
-                *ty = self.zonk(*ty);
-                if let Some(l) = self.reflect_local(*ty) {
-                    e.kind = HKind::Local(l);
-                    return;
-                }
-                let locals: Option<Vec<LocalId>> = self.arena.params_of(*ty).into_iter().map(|p| self.reflect_param_local(p)).collect();
-                *args = locals.unwrap_or_default().into_iter().map(|l| mk(HKind::Local(l), TypeId::UNIT, e.span)).collect();
             }
             HKind::CallTrait { args, impl_id, .. } => {
                 if let Some(HArg::Expr(HExpr { kind: HKind::Evidence(i), .. })) = args.first()

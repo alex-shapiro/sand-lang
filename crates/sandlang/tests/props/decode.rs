@@ -15,7 +15,7 @@ enum Ty {
     UnitEnum,
     Rec,
     Keyed,
-    /// `struct Valid { a: int }` with an `init` method (which does not implement `Decode`).
+    /// `struct Valid { a: int }` with an `init` method, which decoding calls.
     Valid,
     Fn,
     Task,
@@ -90,7 +90,7 @@ impl Ty {
 
     fn decodable(&self) -> bool {
         match self {
-            Ty::Fn | Ty::Task | Ty::Valid => false,
+            Ty::Fn | Ty::Task => false,
             Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.decodable(),
             Ty::Map(k, v) => k.decodable() && v.decodable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::decodable),
@@ -147,9 +147,9 @@ fn ty() -> impl Strategy<Value = Ty> {
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
-        4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec)],
+        4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec), Just(Ty::Valid)],
         1 => prop_oneof![Just(Ty::Range), Just(Ty::Keyed)],
-        bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task), Just(Ty::Valid)],
+        bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task)],
         param => Just(Ty::Param),
     ];
     leaf.prop_recursive(3, 12, 3, move |inner| {
@@ -219,8 +219,15 @@ proptest! {
                     else { None }
                 };
                 prop_assert!(ds.iter().all(|d| trait_of(d).is_some()), "{ds:?}\n{src}");
-                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(true)), !t.decodable(), "{:?}\n{}", ds, src);
-                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(false)), !t.well_formed(), "{:?}\n{}", ds, src);
+                // The checker reports the first missing bound of an impl, so a missing `Hash` can
+                // hide a missing `Decode`, and the reverse.
+                let (decode, hash) = (ds.iter().any(|d| trait_of(d) == Some(true)), ds.iter().any(|d| trait_of(d) == Some(false)));
+                if t.well_formed() {
+                    prop_assert!(decode && !hash, "{:?}\n{}", ds, src);
+                }
+                if t.decodable() {
+                    prop_assert!(hash && !decode, "{:?}\n{}", ds, src);
+                }
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),
@@ -302,14 +309,14 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn reflect_type_parameters_build_descriptions_of_types_that_contain_them(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
+    fn decode_dictionaries_build_on_the_dictionaries_of_type_parameters(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
         let full = ctx.subst(&arg);
         let mut rng = Rng(seed);
         let texts: Vec<String> = (0..8).map(|i| format!("{:?}", json_text(&full, &mut rng, 0, [1000, 12][i % 2]))).collect();
         let src = format!(
             "import json\n{TYPES}\n\
              fn direct(s: str) -> Result<{}> {{ json.decode(s) }}\n\
-             fn via<reflect T: Decode>(s: str) -> Result<{}> {{ json.decode(s) }}\n\
+             fn via<T: Decode>(s: str) -> Result<{}> {{ json.decode(s) }}\n\
              fn read(s: str) -> Result<{}> {{ via(s) }}\n\
              for s in [{}] {{\n    print(direct(s))\n    print(read(s))\n}}",
             full.sand(),
@@ -380,7 +387,7 @@ proptest! {
     fn json_decode_fills_missing_fields_with_constant_defaults(fields in prop::collection::vec(constant_default(), 1..6)) {
         let decls: Vec<String> = fields.iter().enumerate().map(|(i, (ty, e))| format!("    f{i}: {ty} = {e}")).collect();
         let src = format!(
-            "import json\n{CONSTANT_TYPES}\nstruct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nprint(s == S())\nprint(json.encode(s) == json.encode(S()))",
+            "import json\n{CONSTANT_TYPES}\nstruct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nprint(s == S())\nprint(json.encode(s)? == json.encode(S())?)",
             decls.join("\n")
         );
         check(&src, "true\ntrue\n", None)?;
@@ -399,7 +406,7 @@ proptest! {
         let src = format!(
             "import json\n{CONSTANT_TYPES}\nvar calls: [int] = []\nfn note<T>(i: int, x: T) -> T {{\n    calls.push(i)\n    x\n}}\n\
              struct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nlet decoded = calls\ncalls = []\nlet literal = S()\n\
-             print(s == literal)\nprint(decoded == calls)\ncalls = []\nlet full: S = json.decode(json.encode(literal))?\nprint(json.encode(full) == json.encode(literal))\nprint(calls)\nprint(decoded)",
+             print(s == literal)\nprint(decoded == calls)\ncalls = []\nlet full: S = json.decode(json.encode(literal)?)?\nprint(json.encode(full)? == json.encode(literal)?)\nprint(calls)\nprint(decoded)",
             decls.join("\n")
         );
         let order: Vec<String> = fields.iter().enumerate().filter(|(_, (_, computed))| *computed).map(|(i, _)| i.to_string()).collect();
@@ -511,7 +518,7 @@ proptest! {
         for i in 1..chain {
             src += &format!("struct S{i} {{ next: S{} = S{}() }}\n", i + 1, i + 1);
         }
-        src += &format!("struct S{chain} {{ v: int = 1 }}\nlet s: S0 = json.decode(\"{{}}\")?\nprint(s == S0())\nprint(json.encode(s) == json.encode(S0()))\n");
+        src += &format!("struct S{chain} {{ v: int = 1 }}\nlet s: S0 = json.decode(\"{{}}\")?\nprint(s == S0())\nprint(json.encode(s)? == json.encode(S0())?)\n");
         check(&src, "true\ntrue\n", None)?;
     }
 }

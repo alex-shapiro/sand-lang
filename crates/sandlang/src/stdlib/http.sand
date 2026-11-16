@@ -138,7 +138,8 @@ pub fn patch_json<T: Encode>(
 
 /// Sends an HTTP request with `value` encoded as JSON, setting
 /// `Content-Type: application/json` if `headers` does not specify a
-/// `Content-Type`.
+/// `Content-Type`. Fails with the error of `json.encode` if `value` cannot be
+/// encoded.
 pub fn request_json<T: Encode>(
     method: str,
     url: str,
@@ -156,7 +157,7 @@ pub fn request_json<T: Encode>(
         method,
         url,
         headers: headers + content_type,
-        body: json.encode(value).bytes(),
+        body: json.encode(value)?.bytes(),
         timeout: timeout,
         follow_redirects: follow_redirects,
     )

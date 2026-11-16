@@ -1,7 +1,9 @@
 //! VM access for the future of an async native call.
 
+use super::convert::HostError;
 use super::func::{NativeError, NativeReturn};
 use crate::policy::Capability;
+use crate::value::Value;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::value::VmValue;
 use crate::vm::{CtlKind, Fail, SharedVm, Vm, WaitKind};
@@ -70,6 +72,9 @@ pub(crate) struct NativeCallState {
     pub request: Option<VmRequest>,
     /// Rooted return value from the most recent [`VmRequest::Call`].
     pub callback_result: Option<RootedValue>,
+    /// Heap values that a native call keeps rooted during a request, such as
+    /// a callback of [`NativeContext::call_keeping`].
+    pub kept: Vec<Vec<VmValue>>,
 }
 
 impl NativeCallState {
@@ -175,6 +180,83 @@ impl NativeContext {
         };
         self.wait_for_request(request).await;
         self.state.lock().callback_result.take().expect("the scheduler stores the callback result before polling again")
+    }
+
+    /// Calls the Sand function `callee` with `args` as [`NativeContext::call`]
+    /// does, and keeps `kept` rooted during the call. Returns the callback's
+    /// return value, which is valid until the next wait. Unlike
+    /// [`NativeContext::call`], it does not add to the root table.
+    pub(crate) async fn call_keeping(&mut self, callee: VmValue, args: &[VmValue], kept: [&mut Vec<VmValue>; 2]) -> VmValue {
+        assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
+        let roots = self.state.lock().roots.len();
+        self.wait_keeping(VmRequest::Call { callee, args: args.to_vec() }, kept).await;
+        let mut state = self.state.lock();
+        let rooted = state.callback_result.take().expect("the scheduler stores the callback result before polling again");
+        let result = state.roots[rooted.0 as usize];
+        state.roots.truncate(roots);
+        result
+    }
+
+    /// Runs `f` as [`NativeContext::step`] does, and keeps the heap values of
+    /// `walk` rooted during the collection before a retry. `kept` returns
+    /// the heap values of `walk`. Permission requests are not supported.
+    pub(crate) async fn step_keeping<W, R>(
+        &mut self,
+        walk: &mut W,
+        kept: impl Fn(&mut W) -> [&mut Vec<VmValue>; 2],
+        mut f: impl FnMut(&mut Vm, &mut W) -> Result<R, HostError<Fail>>,
+    ) -> Result<R, HostError<Fail>> {
+        let mut collected = false;
+        loop {
+            let result = self.with_vm(|vm| {
+                vm.collected = collected;
+                let result = f(vm, walk);
+                vm.collected = false;
+                result
+            });
+            match result {
+                Err(e) if !collected && e.is_memory_limit() => {
+                    collected = true;
+                    self.wait_keeping(VmRequest::Collect, kept(walk)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// Submits `request` and keeps `kept` rooted until the scheduler answers.
+    async fn wait_keeping(&mut self, request: VmRequest, kept: [&mut Vec<VmValue>; 2]) {
+        let [a, b] = kept;
+        self.state.lock().kept = vec![std::mem::take(a), std::mem::take(b)];
+        self.wait_for_request(request).await;
+        let mut lists = std::mem::take(&mut self.state.lock().kept).into_iter();
+        (*a, *b) = (lists.next().unwrap_or_default(), lists.next().unwrap_or_default());
+    }
+
+    /// Encodes `value` as a [`Value`]. `encode` is the `Encode` dictionary of
+    /// the type of `value`, such as a [`TraitDict`](super::ty::TraitDict) of
+    /// the native function. Waits for the custom `encode` methods of Sand
+    /// code.
+    ///
+    /// Returns a `"limit"` error if `value` nests more than 512 levels, and
+    /// the error of a custom `encode` method that fails.
+    pub async fn to_value(&mut self, value: RootedValue, encode: RootedValue) -> Result<Value, HostError<Fail>> {
+        let (value, encode) = (self.value(value), self.value(encode));
+        crate::vm::codec::to_value(self, value, encode).await
+    }
+
+    /// Decodes `value` as the type whose `Decode` dictionary is `decode`,
+    /// such as a [`TraitDict`](super::ty::TraitDict) of the native function.
+    /// Returns the decoded value. Waits for the custom `decode` methods, the
+    /// `init` constructors, and the computed field defaults of Sand code.
+    ///
+    /// `value` must have the exact form of each Sand type. For example,
+    /// `bytes` accepts only `Value::Bytes`. Returns a `"parse"` error with the
+    /// path of the part that does not match, such as `$.items[2]`.
+    pub async fn from_value(&mut self, value: Value, decode: RootedValue) -> Result<RootedValue, HostError<Fail>> {
+        let decode = self.value(decode);
+        let decoded = crate::vm::codec::from_value(self, value, decode).await?;
+        Ok(self.root(decoded))
     }
 
     /// Runs `f` with `&mut Vm` under automatic retry for limit errors and

@@ -1,6 +1,6 @@
 //! Conversion between VM values and the arguments and results of native functions.
 
-use super::ty::{Never, Num, Param, Reflect, SandType, VmVal};
+use super::ty::{Never, Param, SandType, TraitDict, VmVal};
 use crate::types::traits;
 use crate::value::{NativeValue, Value, qualified_name, qualified_name_module};
 use crate::vm::meter::Scratch;
@@ -141,12 +141,37 @@ impl<C: From<Fail>> HostError<C> {
         }
     }
 
+    /// Returns the kind and the message of a recoverable error.
+    pub(crate) fn sand_error(&self) -> Option<(&str, &str)> {
+        match &*self.0 {
+            HostErrorKind::Error { kind, message } => Some((kind, message)),
+            HostErrorKind::Abort(_) => None,
+        }
+    }
+
     /// Splits `self` into a control signal `Ok(c)` or a recoverable
     /// `Err(HostError<Fail>)`.
     pub(crate) fn into_abort(self) -> Result<C, HostError<Fail>> {
         match *self.0 {
             HostErrorKind::Error { kind, message } => Err(HostError::new(kind, message)),
             HostErrorKind::Abort(c) => Ok(c),
+        }
+    }
+}
+
+impl HostError<Fail> {
+    /// Returns `true` if `self` stops the call at the memory limit, which a
+    /// collection can lift.
+    pub(crate) fn is_memory_limit(&self) -> bool {
+        matches!(&*self.0, HostErrorKind::Abort(f) if f.as_limit() == Some(crate::engine::LimitKind::Memory))
+    }
+
+    /// Converts `self` into the error of a native function that runs before a
+    /// wait.
+    pub(crate) fn into_ctl_error(self) -> HostError<Ctl> {
+        match *self.0 {
+            HostErrorKind::Error { kind, message } => HostError::new(kind, message),
+            HostErrorKind::Abort(fail) => HostError(Box::new(HostErrorKind::Abort(fail.into()))),
         }
     }
 }
@@ -575,8 +600,8 @@ macro_rules! __value_type_impls {
                 $crate::native::convert::value_type_into_vm_value(self, vm)
             }
         }
-        impl $crate::value::Encode for $t {
-            fn encode(&self) -> $crate::value::Value {
+        impl $crate::value::ToValue for $t {
+            fn to_value(&self) -> $crate::value::Value {
                 static SAND_TYPE_NAME: $crate::native::convert::TypeNameCell = $crate::native::convert::TypeNameCell::new();
                 $crate::native::convert::encode_value_type(&SAND_TYPE_NAME, self)
             }
@@ -628,21 +653,12 @@ handle! {
     [const N: u8, B: traits::Set] Param<N, B>,
 }
 
-impl<const N: u8> FromVmValue for Num<N> {
+impl<const N: u8, B: traits::One> FromVmValue for TraitDict<N, B> {
     type Item<'a> = Self;
     fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
         match vm.heap.get(v) {
-            Obj::Tuple(_) => Ok(Num::from_raw(v)),
+            Obj::Tuple(_) => Ok(TraitDict::from_raw(v)),
             _ => Err(mismatch::<Self>()),
         }
-    }
-}
-
-impl<const N: u8> FromVmValue for Reflect<N> {
-    type Item<'a> = Self;
-    fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
-        let r = Reflect::from_raw(v);
-        r.desc(&vm.heap)?;
-        Ok(r)
     }
 }

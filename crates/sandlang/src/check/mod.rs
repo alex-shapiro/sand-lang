@@ -1,6 +1,7 @@
 //! Name resolution and type checking: AST to typed HIR.
 
 pub mod budget;
+pub mod codec;
 mod derive;
 mod docs;
 mod expr;
@@ -16,6 +17,7 @@ pub(crate) mod verify;
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
+use crate::native::codec::NativeCodec;
 use crate::native::func::Signature;
 use crate::native::ty::Type;
 use crate::native::{BoundKind, EnumVariant, NativeDecl, StructField};
@@ -397,6 +399,11 @@ impl CheckedProgram {
         self.syms.str(s)
     }
 
+    /// Returns `true` if impl `id` uses the native default method of its trait.
+    pub fn is_structural_impl(&self, id: ImplId) -> bool {
+        codec::is_structural(&self.traits, &self.impls[id as usize])
+    }
+
     /// Returns the Rust `TypeId` bound to type definition `d`, if any.
     pub fn rust_type(&self, d: TypeDefId) -> Option<std::any::TypeId> {
         rust_type(&self.types[d as usize], &self.enum_bindings, &self.struct_bindings, d)
@@ -531,18 +538,9 @@ pub(crate) struct FnState {
     /// Deferred `+` operand checks on types that contained unresolved inference
     /// variables.
     pub plus_checks: Vec<(TypeId, Span)>,
-    /// Indicates that the checker is checking a struct field default, which
-    /// does not receive trait dictionaries.
-    pub field_default: bool,
     /// Enclosing type constructor if currently checking its `init` method
     /// (where `T(...)` constructs the struct field by field).
     pub init_of: Option<Ctor>,
-    /// `(type, span, call_kind)` triples for `reflect` type arguments, checked
-    /// after type inference completes.
-    pub reflect_checks: Vec<(TypeId, Span, &'static str)>,
-    /// Maps each `reflect` type parameter of the current function to the hidden
-    /// local that holds its runtime description.
-    pub reflect_locals: Vec<(ParamId, LocalId)>,
     pub infer_checks: Vec<(TypeId, Span)>,
     /// Inside a top-level statement of a module (lets become globals).
     pub top_level: bool,
@@ -637,6 +635,14 @@ pub struct Checker {
     /// Set while checking an expression for `Session::type_of`.
     pub(crate) type_query: Option<TypeQuery>,
     pub(crate) builtins: [Option<TraitId>; Builtin::ALL.len()],
+    /// The structural impl of each codec trait for `never`.
+    pub(crate) never_impls: [Option<ImplId>; Builtin::ALL.len()],
+    /// Why each type definition does not implement a codec trait
+    /// structurally, by trait and type definition.
+    pub(crate) codec_refuted: PMap<(TraitId, TypeDefId), Arc<str>>,
+    /// The bounds that the checker finds while it checks the parts of a
+    /// structural codec impl.
+    pub(crate) codec_reqs: Option<codec::CodecReqs>,
     /// The prelude's `Iterator` trait and `Iter` struct, which `for` loops use.
     pub(crate) iter_trait: Option<TraitId>,
     /// The prelude's `Close` trait, which `use` bindings call.
@@ -700,6 +706,9 @@ impl Default for Checker {
             type_query: None,
             budget: Arc::new(CompileBudget::default()),
             builtins: [None; Builtin::ALL.len()],
+            never_impls: [None; Builtin::ALL.len()],
+            codec_refuted: PMap::new(),
+            codec_reqs: None,
             iter_trait: None,
             close_trait: None,
             flows: PMap::new(),
@@ -974,8 +983,8 @@ impl Checker {
         format!("fn<{}>{}", generics.join(", "), shown.strip_prefix("fn").unwrap_or(&shown))
     }
 
-    pub fn new_param(&mut self, name: Symbol, reflect: bool) -> ParamId {
-        self.params.push(ParamInfo { name, traits: Vec::new(), reflect });
+    pub fn new_param(&mut self, name: Symbol) -> ParamId {
+        self.params.push(ParamInfo { name, traits: Vec::new() });
         (self.params.len() - 1) as ParamId
     }
 
@@ -1325,9 +1334,9 @@ impl Checker {
             }
         }
         self.infer_member_requirements(first_type);
-        // Derive `Decode` after method declarations because structs with `init` do not implement `Decode`.
-        let early: Vec<Builtin> = Builtin::ALL.iter().copied().filter(|&b| b.is_derived() && b != Builtin::Decode).collect();
-        self.derive_impls(first_type, &early);
+        self.add_field_default_dicts(first_type);
+        let derived: Vec<Builtin> = Builtin::ALL.iter().copied().filter(|b| b.is_derived()).collect();
+        self.derive_impls(first_type, &derived);
         if pm.kind == ModKind::Prelude {
             for name in ["Option", "Result"] {
                 if let Some(Def::Type(TyRef::Def(d))) = self.scope_def(mi, name) {
@@ -1362,8 +1371,8 @@ impl Checker {
                 _ => {}
             }
         }
-        self.derive_impls(first_type, &[Builtin::Decode]);
         // Impls, then the supertrait requirements of each.
+        let first_impl = self.impls.len();
         let mut impl_ids = Vec::new();
         for (idx, item) in items.iter().enumerate() {
             if let ItemKind::Impl(i) = &item.kind
@@ -1372,6 +1381,10 @@ impl Checker {
                 impl_ids.push(id);
             }
         }
+        if self.allows_native() {
+            self.declare_undeclared_natives(first_fn);
+        }
+        self.derive_codec_impls(first_type, first_impl);
         for id in impl_ids {
             self.check_impl_supertraits(id);
         }
@@ -1380,11 +1393,6 @@ impl Checker {
         }
         for d in bound_ids {
             self.check_bound_member_types(d);
-        }
-        if self.allows_native() {
-            self.declare_undeclared_natives(first_fn);
-            // Re-derive `Decode` after registering undeclared native `init` functions.
-            self.derive_impls(first_type, &[Builtin::Decode]);
         }
         // 5. Top-level code.
         let mod_name = self.name(self.mods[mi as usize].name).to_string();
@@ -1542,7 +1550,7 @@ impl Checker {
         gs.iter()
             .map(|g| {
                 let name = self.sym(&g.name.name);
-                self.new_param(name, g.reflect)
+                self.new_param(name)
             })
             .collect()
     }
@@ -1566,6 +1574,7 @@ impl Checker {
             is_pub,
             doc: doc.map(Arc::from),
             span: name.span,
+            codecs: None,
         });
         (self.types.len() - 1) as TypeDefId
     }
@@ -1639,6 +1648,23 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Struct { fields };
     }
 
+    /// Gives the default helper of each struct field from `first_type` the
+    /// dictionaries of the struct's type parameter bounds.
+    fn add_field_default_dicts(&mut self, first_type: usize) {
+        for d in first_type..self.types.len() {
+            let gens = self.types[d].generics.clone();
+            let mut dicts = Vec::new();
+            for &p in &gens {
+                let pt = self.param_ty(p);
+                dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
+            }
+            let helpers: Vec<FnId> = self.types[d].fields().iter().filter_map(|f| f.default).collect();
+            for h in helpers {
+                self.fns[h as usize].dicts = dicts.clone();
+            }
+        }
+    }
+
     /// Resolves the variants of enum `id` and appends their payload types to `written`.
     fn fill_enum(&mut self, id: TypeDefId, e: &ast::EnumDecl, written: &mut Vec<(TypeDefId, TypeId, Span)>) {
         let gens = self.types[id as usize].generics.clone();
@@ -1684,7 +1710,7 @@ impl Checker {
                 BoundKind::Value(_) | BoundKind::Object(_) => &[],
             };
             let ps = params.iter().map(|p| self.sym(p)).collect::<Vec<_>>();
-            let generics = ps.into_iter().map(|p| self.new_param(p, false)).collect();
+            let generics = ps.into_iter().map(|p| self.new_param(p)).collect();
             let kind = match &t.kind {
                 BoundKind::Value(v) => TypeDefKind::Opaque(Opaque::Value(*v)),
                 BoundKind::Object(id) => TypeDefKind::Opaque(Opaque::Object(*id)),
@@ -1693,6 +1719,7 @@ impl Checker {
                 BoundKind::Struct { .. } => TypeDefKind::Struct { fields: vec![] },
             };
             let id = self.new_typedef(&ident, generics, kind, t.public, doc);
+            self.types[id as usize].codecs = Some(t.codecs);
             self.define_ident(&ident, Def::Type(TyRef::Def(id)), t.public);
             match &t.kind {
                 BoundKind::Enum { rust, variants, .. } => {
@@ -1816,32 +1843,6 @@ impl Checker {
                 fields[field].const_default = Some(const_default);
             }
         }
-    }
-
-    /// Finds a struct reachable from `t` that has a field invisible to the current module.
-    fn private_field_in(&self, t: TypeId) -> Option<(TypeDefId, Symbol)> {
-        let mut seen = HashSet::new();
-        let mut todo = vec![t];
-        while let Some(t) = todo.pop() {
-            let mut found = None;
-            self.arena.any(t, &mut |ty| {
-                if let Ty::Named(d, _) = ty
-                    && seen.insert(d)
-                {
-                    if let Some(f) = self.hidden_field(d) {
-                        found = Some((d, f.name));
-                        return true;
-                    }
-                    let def = &self.types[d as usize];
-                    todo.extend(def.fields().iter().map(|f| f.ty).chain(def.variants().iter().flat_map(|v| v.fields.iter().copied())));
-                }
-                false
-            });
-            if found.is_some() {
-                return found;
-            }
-        }
-        None
     }
 
     /// Converts `value` into a [`ConstVal`] of type `ty`, or returns `None` if
@@ -2129,7 +2130,7 @@ impl Checker {
         }
         let mut generic = false;
         for t in sig.params.iter().chain([&sig.ret]) {
-            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::Reflect(..) | Type::Num(_)));
+            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::Dict(..) | Type::Encoded(_)));
         }
         if generic {
             let msg = format!("native `{key}` is generic, so the module must declare it with `native fn`");
@@ -2231,19 +2232,15 @@ impl Checker {
                 let r = self.host_type(r, generics, owner, span)?;
                 self.arena.func(&ps, r)
             }
-            Type::Param(i, _) => match generics.get(*i as usize) {
+            Type::Param(i, _) | Type::Encoded(i) => match generics.get(*i as usize) {
                 Some(&p) => self.param_ty(p),
                 None => {
                     self.error(span, format!("{owner} uses type parameter {i}, which its declaration does not have"));
                     return None;
                 }
             },
-            Type::Reflect(..) => {
-                self.error(span, format!("{owner} takes a type description that is not one of its first parameters"));
-                return None;
-            }
-            Type::Num(_) => {
-                self.error(span, format!("{owner} takes `Num` evidence that is not one of its first parameters"));
+            Type::Dict(..) => {
+                self.error(span, format!("{owner} takes a trait dictionary that is not one of its first parameters"));
                 return None;
             }
             Type::Named(n) => {
@@ -2293,9 +2290,8 @@ impl Checker {
 
     /// Verifies that a `native fn` declaration matches its registered Rust
     /// signature and declares each built-in trait that the Rust function
-    /// requires. Returns
-    /// the type parameter indices for which the Rust function accepts `Num`
-    /// evidence.
+    /// requires. Returns the trait dictionaries that the Rust function takes,
+    /// as type parameter indices and traits.
     fn check_native_signature(
         &mut self,
         f: &ast::FnDecl,
@@ -2304,28 +2300,26 @@ impl Checker {
         generics: &[ParamId],
         params: &[ParamSig],
         ret: TypeId,
-    ) -> Vec<u8> {
+    ) -> Vec<(u8, Builtin)> {
         let span = f.name.span;
         let owner = format!("the Rust function of native `{key}`");
-        let reflect: Vec<Type> =
-            generics.iter().enumerate().filter(|(_, p)| self.params[**p as usize].reflect).map(|(i, _)| Type::Reflect(i as u8)).collect();
-        let num_trait = self.builtins[Builtin::Num as usize];
-        let num: Vec<u8> =
-            (0..generics.len() as u8).filter(|&i| num_trait.is_some_and(|n| self.param_has_trait(generics[i as usize], n))).collect();
-        let lead_of = |t: &Type| match t {
-            Type::Reflect(i) => Some((false, *i)),
-            Type::Num(i) => Some((true, *i)),
-            _ => None,
-        };
-        let n = reflect.len().min(sig.params.len());
-        let (lead, rest) = sig.params.split_at(n);
-        let k = rest.iter().take_while(|t| matches!(t, Type::Num(_))).count();
-        let (evidence, rest) = rest.split_at(k);
-        let taken: Vec<u8> = evidence.iter().filter_map(|t| if let Type::Num(i) = t { Some(*i) } else { None }).collect();
+        let mut num: Vec<(u8, Builtin)> = Vec::new();
+        for i in 0..generics.len() as u8 {
+            for &b in Builtin::ALL {
+                if let Some(t) = self.builtins[b as usize]
+                    && self.traits[t as usize].has_dict
+                    && self.param_has_trait(generics[i as usize], t)
+                {
+                    num.push((i, b));
+                }
+            }
+        }
+        let k = sig.params.iter().take_while(|t| matches!(t, Type::Dict(..))).count();
+        let (evidence, rest) = sig.params.split_at(k);
+        let taken: Vec<(u8, Builtin)> =
+            evidence.iter().filter_map(|t| if let Type::Dict(i, b) = t { Some((*i, *b)) } else { None }).collect();
         let mut wanted = num.iter();
-        let leads_match = lead.iter().map(lead_of).eq(reflect.iter().map(lead_of))
-            && taken.iter().all(|i| wanted.any(|j| j == i))
-            && !rest.iter().any(|t| lead_of(t).is_some());
+        let leads_match = taken.iter().all(|i| wanted.any(|j| j == i)) && !rest.iter().any(|t| matches!(t, Type::Dict(..)));
         if leads_match {
             let mark = self.diags.len();
             let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
@@ -2339,7 +2333,7 @@ impl Checker {
                 return taken;
             }
         }
-        let leads: Vec<Type> = reflect.into_iter().chain(num.iter().map(|&i| Type::Num(i))).collect();
+        let leads: Vec<Type> = num.iter().map(|&(i, b)| Type::Dict(i, b)).collect();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let names: Vec<String> = generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect();
         let show_rust =
@@ -2363,10 +2357,13 @@ impl Checker {
         let mut required = vec![Builtins::NONE; generics.len()];
         for t in sig.params.iter().chain([&sig.ret]) {
             t.visit(&mut |t| {
-                if let Type::Param(i, b) = t
-                    && let Some(r) = required.get_mut(*i as usize)
-                {
-                    *r = r.union(*b);
+                let (i, b) = match t {
+                    Type::Param(i, b) => (*i, *b),
+                    Type::Encoded(i) => (*i, Builtins::of(Builtin::Encode)),
+                    _ => return,
+                };
+                if let Some(r) = required.get_mut(i as usize) {
+                    *r = r.union(b);
                 }
             });
         }
@@ -2674,7 +2671,7 @@ impl Checker {
             "members" => Some(Intrinsic::Members),
             _ => None,
         };
-        let mut num_evidence = Vec::new();
+        let mut taken_dicts = Vec::new();
         let kind = if let Some(i) = intrinsic.filter(|_| f.is_native && owner.is_none() && Some(self.cur_mod) == self.prelude) {
             FnKind::Intrinsic(i)
         } else if f.is_native {
@@ -2685,7 +2682,7 @@ impl Checker {
             };
             match self.natives.get(&key).cloned() {
                 Some(decl) => {
-                    num_evidence = self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
+                    taken_dicts = self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
                     if decl.names.is_some() || decl.doc.is_some() {
                         let msg =
                             format!("native `{key}` has `params` or `doc`, which apply only to a native that the module does not declare");
@@ -2712,8 +2709,10 @@ impl Checker {
                 self.error(f.name.span, "native functions can only require built-in traits");
             }
             dicts.clear();
-            if let Some(num) = self.builtin_trait(Builtin::Num) {
-                dicts = num_evidence.iter().map(|&i| (self.param_ty(generics[i as usize]), num)).collect();
+            for (i, b) in taken_dicts {
+                if let Some(tr) = self.builtin_trait(b) {
+                    dicts.push((self.param_ty(generics[i as usize]), tr));
+                }
             }
         }
         let name = self.sym(&f.name.name);
@@ -2784,7 +2783,7 @@ impl Checker {
         let mut outer = Vec::new();
         for p in &orig {
             let name = self.params[*p as usize].name;
-            outer.push((name, self.new_param(name, false)));
+            outer.push((name, self.new_param(name)));
         }
         let ps: Vec<ParamId> = outer.iter().map(|(_, p)| *p).collect();
         let self_ty = self.def_self_ty(def, &ps);
@@ -3004,11 +3003,9 @@ impl Checker {
             || fi.trait_of.is_some()
             || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. } | FnDeclRef::BoundDefault(_));
         self.begin_fn(generics, self_ty);
-        self.fs.field_default = matches!(decl, FnDeclRef::FieldDefault { .. });
         let fi = &self.fns[id as usize];
         self.fs.init_of = fi.owner.filter(|_| fi.is_init(&self.syms));
-        let mut param_locals = self.declare_reflect_params(id);
-        param_locals.extend(self.declare_dict_params(id));
+        let mut param_locals = self.declare_dict_params(id);
         let f = match decl {
             FnDeclRef::Fn(at) => Some(at.get(m)),
             _ => None,
@@ -3192,31 +3189,6 @@ impl Checker {
             let z = self.zonk(t);
             if self.arena.has_vars(z) {
                 self.infer_error(sp, "cannot infer type; add a type annotation");
-            }
-        }
-        let reflect = std::mem::take(&mut self.fs.reflect_checks);
-        for (t, sp, what) in reflect {
-            let z = self.zonk(t);
-            if self.reflect_local(z).is_some() {
-                continue;
-            }
-            if self.arena.has_vars(z) {
-                self.infer_error(sp, format!("cannot infer type for this {what}; add a type annotation"));
-            } else if let Some(p) =
-                self.arena.params_of(z).into_iter().find(|&p| !self.params[p as usize].reflect && self.reflect_param_local(p).is_none())
-            {
-                let msg = format!(
-                    "this {what} needs a description of `{}` at run time, so `{}` must be a `reflect` type parameter of this function",
-                    self.show(z),
-                    self.name(self.params[p as usize].name)
-                );
-                self.error(sp, msg);
-            } else if let Some((d, f)) = self.private_field_in(z) {
-                let (ty, field) = (self.ctor_name(Ctor::Def(d), 0), self.name(f));
-                self.error(sp, format!("this {what} cannot build `{ty}` here: its field `{field}` is private"));
-            } else if let Some(m) = self.first_unmet_requirement(z) {
-                let msg = format!("this {what} cannot build {}: {}", self.show(z), self.unmet_message(m, ""));
-                self.error(sp, msg);
             }
         }
         for info in self.fs.locals.iter_mut().filter(|l| l.mutable) {

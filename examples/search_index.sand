@@ -42,7 +42,7 @@ struct Index {
     fn save(self, path: str) -> Result<()> {
         // Write to a temporary file first so a crash never leaves a torn index.
         let tmp = path + ".tmp"
-        fs.write_text(tmp, json.encode(self))?
+        fs.write_text(tmp, json.encode(self)?)?
         fs.rename(tmp, path)
     }
 

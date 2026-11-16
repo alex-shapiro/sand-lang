@@ -79,11 +79,11 @@ const TYPES: &str = "struct Wrap<A> { v: A }\nstruct Keyed<A> { s: Set<A> }\nstr
 const PROBES: &str = "fn eqp<X: Eq>(x: X, y: X) -> str { \"\\(x == y)\" }
 fn hashp<X: Hash>(x: X, y: X) -> str { \"\\(Set([x, y, x]).len())\" }
 fn ordp<X: Ord>(x: X, y: X) -> str { \"\\(x < y) \\(x <= y)\" }
-fn rtp<reflect X: Decode + Eq>(x: X) -> str {
-    let r: Result<X> = json.decode(json.encode(x))
+fn rtp<X: Encode + Decode + Eq>(x: X) -> str {
+    let r: Result<X> = json.decode(json.encode(x).unwrap())
     \"\\(r == Ok(x))\"
 }
-fn jsonp<X: Encode>(x: X) -> str { \"\\(json.encode(json.to_json(x)) == json.encode(x))\" }
+fn jsonp<X: Encode>(x: X) -> str { \"\\(json.encode(json.to_json(x)).unwrap() == json.encode(x).unwrap())\" }
 fn countb<X: Eq + Ord + Hash + Encode>(xs: [X]) -> int { xs.len() }
 ";
 
@@ -360,8 +360,10 @@ impl World {
         out
     }
 
+    /// Returns `true` if trait `i` or a supertrait declares methods. The
+    /// built-in `Encode` declares `encode`.
     fn has_dict(&self, i: usize) -> bool {
-        self.closure(i).iter().any(|&j| self.traits[j].methods)
+        self.closure(i).iter().any(|&j| self.traits[j].methods || self.traits[j].builtin == Some(BuiltinTrait::Encode))
     }
 
     /// Returns the transitive supertraits of `i` that declare methods.

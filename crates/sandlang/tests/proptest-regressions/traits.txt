@@ -6,3 +6,5 @@
 # everyone who runs the test benefits from these saved cases.
 cc 992f81a81066c5bdb6ac17e8dab18ca067ef507de73d1fc330e8c24d7837c792 # shrinks to t = List(Range), tr = Ord
 cc 31a2d6537c361523ceb338631d62972c1688a453a39334f2b9bc90c9a4159a62 # shrinks to t = Map(Range, Int)
+cc 486eeb85062476d5bbe335010c940bf88572f5145e3003c64de46a3e7c361058 # shrinks to t = Tree(Fn), tr = Encode
+cc 669426c5cef62ddc5caa5dc42aeb2057f3f95dfa25e4c5b487401f5229363ed6 # shrinks to t = List(Map(Option(Int), Int))

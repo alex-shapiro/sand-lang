@@ -7,15 +7,16 @@
 
 mod init_order;
 mod inline;
-mod reflect;
 
 use crate::check::budget::CompileBudget;
+use crate::check::codec::CodecImpl;
 use crate::check::persist::{PMap, PVec};
-use crate::check::{CheckedProgram, FnKind};
+use crate::check::{CheckedProgram, DefaultArg, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::types::{FnId, Ty, TypeArena, TypeDefId, TypeId};
+use crate::native::codec::{NativeCodec, NativeCodecs};
+use crate::types::{Builtin, FnId, ImplId, Opaque, Ty, TypeArena, TypeDefId, TypeDefKind, TypeId};
 use crate::vm::bytecode::*;
 use crate::vm::value::FxHashMap;
 use init_order::{InitOrder, Time};
@@ -50,8 +51,6 @@ pub struct CompileInput<'a> {
 struct Compiler<'a> {
     cp: &'a CheckedProgram,
     optimize: bool,
-    /// The program's types, which `reflect` extends with the instances it
-    /// describes (a private copy: they are not needed after compiling).
     arena: TypeArena,
     budget: &'a CompileBudget,
     sm: &'a SourceMap,
@@ -62,8 +61,11 @@ struct Compiler<'a> {
     ctor_wrappers: PMap<CtorTarget, u32>,
     /// Constant trait dictionaries by their elements.
     dict_consts: PMap<Vec<u32>, u32>,
-    /// Shared type descriptions of `reflect` type arguments.
-    descs: reflect::DescCache,
+    /// The index in `Program::codec_shapes` of each structural impl.
+    codec_shapes: PMap<ImplId, u32>,
+    /// Shapes whose index exists and whose parts the compiler has yet to
+    /// lower.
+    pending_shapes: Vec<(ImplId, u32)>,
     errors: Vec<Diag>,
     recv_native: Option<u32>,
     /// Natives compiled to dedicated instructions.
@@ -257,7 +259,7 @@ pub(crate) struct Incremental {
     consts: ConstTable,
     ctor_wrappers: PMap<CtorTarget, u32>,
     dict_consts: PMap<Vec<u32>, u32>,
-    descs: reflect::DescCache,
+    codec_shapes: PMap<ImplId, u32>,
     /// Number of tests compiled.
     tests: usize,
     /// The bodies of the functions whose calls are inlined.
@@ -271,7 +273,7 @@ pub(crate) struct ProgramMark {
     types: usize,
     variants: usize,
     templates: usize,
-    desc_templates: usize,
+    codec_shapes: usize,
     switches: usize,
     tests: usize,
     nglobals: usize,
@@ -287,7 +289,7 @@ impl ProgramMark {
             types: p.types.len(),
             variants: p.variants.len(),
             templates: p.templates.len(),
-            desc_templates: p.desc_templates.len(),
+            codec_shapes: p.codec_shapes.len(),
             switches: p.switches.len(),
             tests: p.tests.len(),
             nglobals: p.nglobals,
@@ -305,7 +307,7 @@ impl ProgramMark {
         p.enum_types.retain(|_, &mut first| first < self.variants as u32);
         p.struct_types.retain(|_, &mut def| def < self.types as u32);
         p.templates.truncate(self.templates);
-        p.desc_templates.truncate(self.desc_templates);
+        p.codec_shapes.truncate(self.codec_shapes);
         p.switches.truncate(self.switches);
         p.tests.truncate(self.tests);
         p.nglobals = self.nglobals;
@@ -353,20 +355,20 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         consts: std::mem::take(&mut inc.consts),
         ctor_wrappers: std::mem::take(&mut inc.ctor_wrappers),
         dict_consts: std::mem::take(&mut inc.dict_consts),
-        descs: std::mem::take(&mut inc.descs),
+        codec_shapes: std::mem::take(&mut inc.codec_shapes),
+        pending_shapes: Vec::new(),
         errors: Vec::new(),
         recv_native: input.natives.id("prelude.Channel.recv"),
         inline: HashMap::new(),
         bodies,
         order,
     };
-    c.descs.start();
     let entry = c.compile_new(input, inits, &mut inc.tests);
     inc.fn_protos = c.fn_protos;
     inc.consts = c.consts;
     inc.ctor_wrappers = c.ctor_wrappers;
     inc.dict_consts = c.dict_consts;
-    inc.descs = c.descs;
+    inc.codec_shapes = c.codec_shapes;
     if c.errors.is_empty() { Ok(entry) } else { Err(c.errors) }
 }
 
@@ -475,6 +477,7 @@ impl<'a> Compiler<'a> {
                 self.compile_fn(i as FnId, p, body);
             }
         }
+        self.lower_codec_shapes();
         // Entry: run the module initializers in order.
         let mut code = Vec::new();
         for &init in inits {
@@ -761,7 +764,7 @@ impl<'a> Compiler<'a> {
             Const::Dur(d) => t.scalars.get_or_insert(ScalarConst::Dur(*d), next),
             Const::Fn(p) => t.scalars.get_or_insert(ScalarConst::Fn(*p), next),
             Const::Native(n) => t.scalars.get_or_insert(ScalarConst::Native(*n), next),
-            Const::TypeDesc(_) | Const::Tuple(_) => next,
+            Const::Tuple(_) => next,
         };
         if i == next {
             self.prog.consts.push(k);
@@ -1699,36 +1702,6 @@ impl<'a> Compiler<'a> {
                 };
                 self.emit(f, Op::LoadConst { dst, k });
             }
-            HKind::TypeDesc { ty, args } => {
-                let mut sink = DescCode { cp: self.cp, prog: &mut *self.prog, fn_protos: &self.fn_protos };
-                let params = self.arena.params_of(*ty);
-                if params.len() != args.len() {
-                    self.errors.push(Diag::error(e.span, "internal error: a type description has no argument for a type parameter"));
-                    return;
-                }
-                if params.is_empty() {
-                    match self.descs.const_for(self.cp, &mut self.arena, *ty, &mut sink) {
-                        Some(k) => {
-                            self.emit(f, Op::LoadConst { dst, k });
-                        }
-                        None => self.errors.push(Diag::error(e.span, "type too large to describe at runtime")),
-                    }
-                    return;
-                }
-                let Some(tmpl) = self.descs.template_for(self.cp, &mut self.arena, *ty, params, &mut sink) else {
-                    self.errors.push(Diag::error(e.span, "type too large to describe at runtime"));
-                    return;
-                };
-                let mark = f.next_reg;
-                let base = self.alloc_n(f, args.len());
-                for (i, a) in args.iter().enumerate() {
-                    self.expr_to(f, a, base + i as Reg);
-                }
-                self.set_line(f, e.span);
-                self.emit(f, Op::Describe { base, tmpl });
-                self.mv(f, dst, base);
-                f.next_reg = mark;
-            }
             HKind::CtorFn { target, arity } => {
                 let p = self.ctor_wrapper(*target, *arity, f.file);
                 let k = self.const_idx(Const::Fn(p));
@@ -2245,15 +2218,14 @@ impl<'a> Compiler<'a> {
                     return;
                 }
                 let mark = f.next_reg;
-                let slots = &self.cp.impls[*impl_id as usize].slots;
-                let n = slots.len() + args.len();
+                let heads = self.dict_heads(*impl_id);
+                let n = heads.len() + args.len();
                 let start = self.alloc_n(f, n);
-                for (i, &fid) in slots.iter().enumerate() {
-                    let k = self.fn_const(fid);
+                for (i, &k) in heads.iter().enumerate() {
                     self.emit(f, Op::LoadConst { dst: start + i as Reg, k });
                 }
                 for (i, a) in args.iter().enumerate() {
-                    self.expr_to(f, a, start + (slots.len() + i) as Reg);
+                    self.expr_to(f, a, start + (heads.len() + i) as Reg);
                 }
                 self.emit(f, Op::NewTuple { dst, start, count: n as u16 });
                 f.next_reg = mark;
@@ -2742,6 +2714,136 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Returns the constants that begin the dictionary of `impl_id`: its
+    /// methods, and the shape of a structural impl.
+    fn dict_heads(&mut self, impl_id: ImplId) -> Vec<u32> {
+        let slots = self.cp.impls[impl_id as usize].slots.clone();
+        let mut heads: Vec<u32> = slots.iter().map(|&fid| self.fn_const(fid)).collect();
+        if self.cp.is_structural_impl(impl_id) {
+            let shape = self.codec_shape(impl_id);
+            heads.push(self.const_idx(Const::Int(i64::from(shape))));
+        }
+        heads
+    }
+
+    /// Returns the index of the shape of structural impl `impl_id` in
+    /// `Program::codec_shapes`. [`Compiler::lower_codec_shapes`] lowers its
+    /// parts later, so that recursive types do not recurse here.
+    fn codec_shape(&mut self, impl_id: ImplId) -> u32 {
+        if let Some(&s) = self.codec_shapes.get(&impl_id) {
+            return s;
+        }
+        let s = self.prog.codec_shapes.len() as u32;
+        self.prog.codec_shapes.push(CodecShape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None });
+        self.codec_shapes.insert(impl_id, s);
+        self.pending_shapes.push((impl_id, s));
+        s
+    }
+
+    /// Lowers the parts of each shape that [`Compiler::codec_shape`] added.
+    fn lower_codec_shapes(&mut self) {
+        while let Some((impl_id, s)) = self.pending_shapes.pop() {
+            let shape = self.lower_codec_shape(impl_id);
+            self.prog.codec_shapes[s as usize] = shape;
+        }
+    }
+
+    fn lower_codec_shape(&mut self, impl_id: ImplId) -> CodecShape {
+        let cp = self.cp;
+        let imp = &cp.impls[impl_id as usize];
+        let decode = cp.traits[imp.trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
+        let codec: &'a CodecImpl = match imp.codec.as_deref() {
+            Some(c) => c,
+            None => {
+                self.errors.push(Diag::error(imp.span, "internal error: a structural impl has no parts"));
+                return CodecShape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None };
+            }
+        };
+        let parts = codec.parts.iter().map(|e| self.part_template(e)).collect();
+        let kind = match cp.arena.get(imp.target) {
+            Ty::Never => ShapeKind::Never,
+            Ty::Unit => ShapeKind::Unit,
+            Ty::Bool => ShapeKind::Bool,
+            Ty::Int => ShapeKind::Int,
+            Ty::Float => ShapeKind::Float,
+            Ty::Str => ShapeKind::Str,
+            Ty::Bytes => ShapeKind::Bytes,
+            Ty::Duration => ShapeKind::Duration,
+            Ty::Range => ShapeKind::Range,
+            Ty::List(_) => ShapeKind::List,
+            Ty::Set(_) => ShapeKind::Set,
+            Ty::Map(..) => ShapeKind::Map,
+            Ty::Tuple(_) => ShapeKind::Tuple,
+            Ty::Named(d, _) => {
+                let def = &cp.types[d as usize];
+                match (def.codecs, &def.kind) {
+                    (Some(NativeCodecs { encode: Some(NativeCodec::Manual(f)), .. }), _) if !decode => ShapeKind::ManualEncode(f),
+                    (Some(NativeCodecs { decode: Some(NativeCodec::Manual(f)), .. }), _) if decode => ShapeKind::ManualDecode(f),
+                    _ if d == cp.wk.option => ShapeKind::Option,
+                    (_, TypeDefKind::Opaque(Opaque::Value(info))) => ShapeKind::Native(d, info.parse),
+                    (_, TypeDefKind::Enum { .. }) => ShapeKind::Enum(d),
+                    (_, _) if codec.init.is_some() => ShapeKind::Init(d),
+                    _ => ShapeKind::Struct(d),
+                }
+            }
+            _ => ShapeKind::Never,
+        };
+        let mut fills = Vec::new();
+        let mut init = None;
+        if let (true, ShapeKind::Struct(d)) = (decode, &kind) {
+            for (i, field) in cp.types[*d as usize].fields().iter().enumerate() {
+                fills.push(match (&field.const_default, field.default) {
+                    (Some(c), _) => Fill::Const((**c).clone()),
+                    (None, Some(helper)) => {
+                        let dicts = codec.fills.get(i).map(|ds| ds.iter().map(|e| self.part_template(e)).collect()).unwrap_or_default();
+                        Fill::Call(self.fn_const(helper), dicts)
+                    }
+                    (None, None) => Fill::Required,
+                });
+            }
+        }
+        if let Some(ci) = &codec.init {
+            let fi = &cp.fns[ci.func as usize];
+            for (i, p) in fi.params.iter().enumerate() {
+                fills.push(match (&p.default, ci.consts.get(i).cloned().flatten()) {
+                    (_, Some(c)) => Fill::Const(c),
+                    (Some(DefaultArg::Helper(helper)), None) => {
+                        let dicts = codec.fills.get(i).map(|ds| ds.iter().map(|e| self.part_template(e)).collect()).unwrap_or_default();
+                        Fill::Call(self.fn_const(*helper), dicts)
+                    }
+                    _ => Fill::Required,
+                });
+            }
+            let dicts = ci.dicts.iter().map(|e| self.part_template(e)).collect();
+            let names = fi.params.iter().map(|p| cp.name(p.name).to_string()).collect();
+            init = Some(InitCall { func: self.fn_const(ci.func), dicts, names });
+        }
+        CodecShape { kind, parts, fills, init }
+    }
+
+    /// Lowers the dictionary evidence `e` of a part to a template over the
+    /// dictionary of the whole.
+    fn part_template(&mut self, e: &'a HExpr) -> PartTemplate {
+        if let Some(k) = self.const_dict(e) {
+            return PartTemplate::Const(k);
+        }
+        match &e.kind {
+            HKind::Dict { impl_id, args } => {
+                let mut items: Vec<PartTemplate> = self.dict_heads(*impl_id).into_iter().map(PartTemplate::Const).collect();
+                items.extend(args.iter().map(|a| self.part_template(a)));
+                PartTemplate::Dict(items)
+            }
+            HKind::Field { obj, index } => match obj.kind {
+                HKind::Local(_) => PartTemplate::Bound(*index),
+                _ => PartTemplate::Field(Box::new(self.part_template(obj)), *index),
+            },
+            _ => {
+                self.errors.push(Diag::error(e.span, "internal error: a codec part has no dictionary"));
+                PartTemplate::Const(0)
+            }
+        }
+    }
+
     /// A dictionary that does not depend on the function's own dictionaries
     /// is built once, as a constant.
     fn const_dict(&mut self, e: &'a HExpr) -> Option<u32> {
@@ -2750,8 +2852,7 @@ impl<'a> Compiler<'a> {
         for a in args {
             items.push(self.const_dict(a)?);
         }
-        let slots = self.cp.impls[*impl_id as usize].slots.clone();
-        let mut all: Vec<u32> = slots.iter().map(|&fid| self.fn_const(fid)).collect();
+        let mut all = self.dict_heads(*impl_id);
         all.extend(items);
         if let Some(&k) = self.dict_consts.get(&all) {
             return Some(k);
@@ -4247,7 +4348,7 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
                 }
             }
         }
-        HKind::Dict { args, .. } | HKind::TypeDesc { args, .. } => args.iter().for_each(|x| walk_pruned(x, f)),
+        HKind::Dict { args, .. } => args.iter().for_each(|x| walk_pruned(x, f)),
         HKind::CallValue { callee, args } => {
             walk_pruned(callee, f);
             args.iter().for_each(|x| walk_pruned(x, f));
@@ -4305,89 +4406,6 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
     }
 }
 
-/// Maximum number of computed field defaults per fill function, limited by
-/// the 31 non-negative bit positions of an `i32` `Op::LoadInt` mask.
-const FILL_BITS: usize = 31;
-
-/// Emits constants and helper functions for runtime type descriptors.
-struct DescCode<'p> {
-    cp: &'p CheckedProgram,
-    prog: &'p mut Program,
-    fn_protos: &'p PVec<Option<u32>>,
-}
-
-impl DescCode<'_> {
-    /// Emits a zero-parameter function prototype with `captures` captured values in its initial registers.
-    fn add(&mut self, file: u32, captures: usize, nregs: u16, code: Vec<Op>) -> u32 {
-        self.prog.protos.push(Proto {
-            name: FILL_PROTO.into(),
-            file,
-            nparams: 0,
-            nregs,
-            lines: vec![0; code.len()],
-            code,
-            captures: vec![NO_REG; captures],
-            cleanups: Vec::new(),
-            sites: Vec::new(),
-            inlined: Vec::new(),
-        });
-        (self.prog.protos.len() - 1) as u32
-    }
-}
-
-impl reflect::DescSink for DescCode<'_> {
-    fn constant(&mut self, desc: std::sync::Arc<crate::vm::value::TypeDesc>) -> u32 {
-        self.prog.consts.push(Const::TypeDesc(desc));
-        (self.prog.consts.len() - 1) as u32
-    }
-
-    fn template(&mut self, t: crate::vm::value::DescTemplate) -> u32 {
-        self.prog.desc_templates.push(t);
-        (self.prog.desc_templates.len() - 1) as u32
-    }
-
-    fn struct_fill(&mut self, def: TypeDefId, fields: &[(u32, FnId)]) -> Vec<Option<(u32, u8)>> {
-        let file = self.cp.types[def as usize].span.file;
-        let fills: Vec<_> =
-            fields.iter().map(|&(index, helper)| Some((u16::try_from(index).ok()?, (*self.fn_protos.get(helper as usize)?)?))).collect();
-        let mut out = vec![None; fields.len()];
-        let present: Vec<usize> = (0..fields.len()).filter(|&i| fills[i].is_some()).collect();
-        for group in present.chunks(FILL_BITS) {
-            // r0 holds the struct; r1 holds the field bitmask; r2 holds the masked bit; r3 holds the default value.
-            let mut code = Vec::with_capacity(5 * group.len() + 1);
-            for (bit, &i) in group.iter().enumerate() {
-                let (idx, proto) = fills[i].unwrap();
-                code.extend([
-                    Op::LoadInt { dst: 2, v: 1 << bit },
-                    Op::BitAnd { dst: 2, a: 1, b: 2 },
-                    Op::JNneIK { a: 2, k: 0, off: 2 },
-                    Op::CallDirect { base: 3, proto },
-                    Op::SetField { obj: 0, idx, src: 3 },
-                ]);
-            }
-            code.push(Op::RetUnit);
-            let fill = self.add(file, 2, 4, code);
-            for (bit, &i) in group.iter().enumerate() {
-                out[i] = Some((fill, bit as u8));
-            }
-        }
-        out
-    }
-
-    fn set_fill(&mut self) -> u32 {
-        // r0 holds the set; r1..=r3 hold the list, index, and length for ForList; r4 holds the element; r5 holds the SetAdd result.
-        let code = vec![
-            Op::LoadInt { dst: 2, v: 0 },
-            Op::Len { dst: 3, src: 1 },
-            Op::ForList { elem: 4, base: 1, off: 2 },
-            Op::SetAdd { dst: 5, set: 0, key: 4 },
-            Op::Loop { off: -3 },
-            Op::RetUnit,
-        ];
-        self.add(0, 2, 6, code)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::engine::{Config, Engine};
@@ -4426,7 +4444,7 @@ mod tests {
 
     #[test]
     fn traits_without_methods_take_no_dictionary() {
-        let src = "trait Marker {}\ntrait Describe: Ord { fn describe(self) -> str }\nimpl Marker for int {}\nimpl Describe for int { fn describe(self) -> str { \"i\" } }\nfn plain<T: Eq + Ord + Hash + Encode + Marker>(x: T) -> bool { x == x }\nfn described<T: Describe>(x: T) -> bool { x < x }\nfn num<T: Num>(x: T) -> T { x + x }\nprint(plain(1))\nprint(described(1))\nprint(num(1))\n";
+        let src = "trait Marker {}\ntrait Describe: Ord { fn describe(self) -> str }\nimpl Marker for int {}\nimpl Describe for int { fn describe(self) -> str { \"i\" } }\nfn plain<T: Eq + Ord + Hash + Marker>(x: T) -> bool { x == x }\nfn described<T: Describe>(x: T) -> bool { x < x }\nfn num<T: Num>(x: T) -> T { x + x }\nprint(plain(1))\nprint(described(1))\nprint(num(1))\n";
         let prog = compile(src);
         let nparams = |name: &str| prog.protos.iter().find(|p| p.name == name).unwrap().nparams;
         assert_eq!(nparams("plain"), 1);

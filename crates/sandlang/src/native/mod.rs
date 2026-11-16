@@ -1,5 +1,6 @@
 //! Native module registration and Rust-to-Sand type bindings.
 
+pub mod codec;
 pub mod context;
 pub mod convert;
 pub mod func;
@@ -11,7 +12,7 @@ use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::ValueTypeInfo;
 use crate::value::{StructDesc, StructValue, Value, VariantDesc, VariantValue, qualified_name, qualified_name_module};
 use crate::vm::heap::Heap;
-use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
+use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
 use convert::{Conversion, FromVmValue, mismatch};
 use func::{NativeFunction, Signature};
@@ -19,7 +20,7 @@ use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
-use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, VmVal};
+use ty::{Channel, Param, Range, SandType, Task, TraitDict, Type, VmVal};
 
 /// A Rust type bound to a nominal Sand type in a [`NativeModule`].
 ///
@@ -48,31 +49,38 @@ pub trait NamedType: Sized + 'static {
 }
 
 #[doc(hidden)]
-pub struct Binding<T>(BoundKind, PhantomData<fn() -> T>);
+pub struct Binding<T>(BoundKind, codec::NativeCodecs, PhantomData<fn() -> T>);
+
+impl<T> Binding<T> {
+    /// Declares the codec traits that the type implements.
+    pub fn codecs(self, codecs: codec::NativeCodecs) -> Binding<T> {
+        Binding(self.0, codecs, PhantomData)
+    }
+}
 
 impl<T: EnumType> Binding<T> {
     pub fn of_enum() -> Binding<T> {
-        Binding(BoundKind::Enum { rust: T::rust_type(), params: T::PARAMS, variants: T::VARIANTS }, PhantomData)
+        Binding(BoundKind::Enum { rust: T::rust_type(), params: T::PARAMS, variants: T::VARIANTS }, Default::default(), PhantomData)
     }
 }
 
 impl<T: ObjectType> Binding<T> {
     pub fn of_object() -> Binding<T> {
-        Binding(BoundKind::Object(T::rust_type()), PhantomData)
+        Binding(BoundKind::Object(T::rust_type()), Default::default(), PhantomData)
     }
 }
 
 impl<T: StructType> Binding<T> {
     pub fn of_struct() -> Binding<T> {
         let defaults = T::FIELDS.iter().map(|f| f.default.map(|default| default())).collect();
-        Binding(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults }, PhantomData)
+        Binding(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults }, Default::default(), PhantomData)
     }
 }
 
 impl<T: ValueType> Binding<T> {
     pub fn of_value() -> Binding<T> {
         let info = ValueTypeInfo { ord: T::ORDER.is_some(), parse: crate::vm::value::parse_value::<T>, type_id: T::rust_type() };
-        Binding(BoundKind::Value(info), PhantomData)
+        Binding(BoundKind::Value(info), Default::default(), PhantomData)
     }
 }
 
@@ -577,19 +585,10 @@ impl<T: ObjectType> VmVal<T> {
     }
 }
 
-impl<const N: u8> Reflect<N> {
-    pub fn desc(self, heap: &Heap) -> Result<&Arc<TypeDesc>, Fail> {
-        match heap.get(self.raw()) {
-            Obj::TypeDesc(d) => Ok(&d.desc),
-            _ => Err(Fail::internal("a native function expected a type description")),
-        }
-    }
-}
-
 /// Method names of the prelude `Num` trait in dictionary slot order.
 pub(crate) const NUM_METHODS: [&str; 2] = ["zero", "one"];
 
-impl<const N: u8> Num<N> {
+impl<const N: u8> TraitDict<N, crate::types::traits::Num> {
     /// Returns the additive identity (`0` or `0.0`) for type parameter `N`.
     pub fn zero(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
         self.call_method(vm, 0)
@@ -696,6 +695,7 @@ pub(crate) struct BoundType {
     pub doc: &'static str,
     pub public: bool,
     pub kind: BoundKind,
+    pub codecs: codec::NativeCodecs,
 }
 
 #[derive(Clone, Debug)]
@@ -902,7 +902,7 @@ impl NativeModule {
     /// variant, field, or type parameter names of `T` are invalid or
     /// duplicated, or if `T::NAME` is already registered in this module.
     pub fn bind<T: NamedType>(&mut self) -> &mut Self {
-        let kind = T::binding().0;
+        let Binding(kind, codecs, _) = T::binding();
         let names = |what: &str, owner: &str, names: &[&str], type_names: bool| {
             for (i, n) in names.iter().enumerate() {
                 match type_names {
@@ -936,12 +936,19 @@ impl NativeModule {
             }
             _ => {}
         }
-        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: T::PUBLIC, kind })
+        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: T::PUBLIC, kind, codecs })
     }
 
     pub(crate) fn builtin_type(&mut self, name: &'static str, doc: &'static str, params: &'static [&'static str]) -> &mut Self {
         assert!(self.kind == ModKind::Prelude, "only the prelude has built-in types");
-        self.add_type(BoundType { module: "prelude", name, doc, public: true, kind: BoundKind::Builtin(params) })
+        self.add_type(BoundType {
+            module: "prelude",
+            name,
+            doc,
+            public: true,
+            kind: BoundKind::Builtin(params),
+            codecs: Default::default(),
+        })
     }
 
     fn add_type(&mut self, t: BoundType) -> &mut Self {

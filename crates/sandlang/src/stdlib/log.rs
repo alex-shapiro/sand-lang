@@ -11,7 +11,7 @@ use std::fmt;
 
 /// Severity level of a log record, ordered from lowest to highest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandEnum)]
-#[sand(module = "log", name = "Level")]
+#[sand(module = "log", name = "Level", encode, decode)]
 pub enum LogLevel {
     Debug,
     Info,

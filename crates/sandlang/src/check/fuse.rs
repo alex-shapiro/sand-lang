@@ -141,7 +141,6 @@ fn is_inert(e: &HExpr) -> bool {
             | HKind::Local(_)
             | HKind::Global(_)
             | HKind::FnValue { .. }
-            | HKind::TypeDesc { .. }
             | HKind::CtorFn { .. }
             | HKind::Int(_)
             | HKind::Float(_)

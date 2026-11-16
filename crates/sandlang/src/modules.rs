@@ -551,9 +551,8 @@ pub(crate) fn native_info(checked: &crate::check::CheckedProgram, registry: &Reg
         {
             let n = n as usize;
             info.names[n] = f.runtime_name(&checked.types, &checked.syms);
-            let reflect = f.generics.iter().filter(|g| checked.params[**g as usize].reflect).count();
             // A native implementing a trait method also receives its impl's dictionary.
-            info.argc[n] = (f.dicts.len() + f.params.len() + reflect) as u16;
+            info.argc[n] = (f.dicts.len() + f.params.len()) as u16;
         }
     }
     info

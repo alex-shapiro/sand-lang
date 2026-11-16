@@ -3,7 +3,7 @@
 //! Every instruction is 8 bytes. Registers are frame-relative `u16` slots.
 //! Jump offsets are relative to the instruction *after* the jump.
 
-use super::value::{DescTemplate, FxHashMap, TypeDesc};
+use super::value::FxHashMap;
 use crate::hir::FormatSpec;
 use crate::value::{StructDesc, VariantDesc, qualified_name};
 use std::sync::{Arc, OnceLock};
@@ -904,12 +904,6 @@ pub enum Op {
         dst: Reg,
         tmpl: u32,
     },
-    /// Instantiates `Program::desc_templates[tmpl]` with the type descriptors
-    /// in `base..` and writes the result to `base`.
-    Describe {
-        base: Reg,
-        tmpl: u32,
-    },
     /// `local += "..."` (an interpolation) for a string builder local (see
     /// `AppendStr`): formats the template and appends it in place.
     AppendInterp {
@@ -1221,7 +1215,6 @@ pub enum Const {
     /// A script function (closure without captures).
     Fn(u32),
     Native(u32),
-    TypeDesc(Arc<TypeDesc>),
     /// An immutable tuple of earlier constants (constant trait dictionaries).
     Tuple(Vec<u32>),
 }
@@ -1295,6 +1288,92 @@ pub struct VariantRt {
     pub desc: OnceLock<Arc<VariantDesc>>,
 }
 
+/// How the codec walker visits one level of a type for a structural
+/// `Encode` or `Decode` dictionary. Slot 1 of the dictionary holds the index
+/// of its shape in [`Program::codec_shapes`].
+#[derive(Clone, Debug)]
+pub struct CodecShape {
+    pub kind: ShapeKind,
+    /// The dictionary of each part, from the dictionary of the whole.
+    pub parts: Vec<PartTemplate>,
+    /// For `Decode` of a struct or an enum: how to fill each field, `init`
+    /// parameter, or named payload value that the input omits.
+    pub fills: Vec<Fill>,
+    /// For `Decode` through `init`.
+    pub init: Option<InitCall>,
+}
+
+/// A call of `init` that ends the decode of a struct.
+#[derive(Clone, Debug)]
+pub struct InitCall {
+    /// The constant of the `init` function.
+    pub func: u32,
+    /// The dictionaries that `init` requires.
+    pub dicts: Vec<PartTemplate>,
+    /// The parameter names of `init`.
+    pub names: std::sync::Arc<[String]>,
+}
+
+/// The type constructor of a [`CodecShape`].
+#[derive(Clone, Debug)]
+pub enum ShapeKind {
+    Never,
+    Unit,
+    Bool,
+    Int,
+    Float,
+    Str,
+    Bytes,
+    Duration,
+    Range,
+    /// Part 0 is the element.
+    List,
+    /// Part 0 is the element.
+    Set,
+    /// Part 0 is the key, and part 1 is the value.
+    Map,
+    /// The parts are the elements.
+    Tuple,
+    /// The prelude `Option`. Part 0 is the payload of `Some`.
+    Option,
+    /// The parts are the fields of struct `def`.
+    Struct(u32),
+    /// The parts are the payload values of the variants of enum `def`, in
+    /// order.
+    Enum(u32),
+    /// The parts are the parameters of `init` of struct `def`.
+    Init(u32),
+    /// A native value type `def`, encoded as its text.
+    Native(u32, crate::vm::value::ParseValue),
+    ManualEncode(crate::native::codec::EncodeFn),
+    ManualDecode(crate::native::codec::DecodeFn),
+}
+
+/// Builds the dictionary of a part from the dictionary of the whole.
+#[derive(Clone, Debug)]
+pub enum PartTemplate {
+    /// A constant dictionary.
+    Const(u32),
+    /// Slot `i` of the dictionary of the whole.
+    Bound(u32),
+    /// Slot `i` of the dictionary that the inner template builds.
+    Field(Box<PartTemplate>, u32),
+    /// A tuple of the slots that the inner templates build.
+    Dict(Vec<PartTemplate>),
+}
+
+/// How the decode walker fills a field or `init` parameter that the input
+/// omits.
+#[derive(Clone, Debug)]
+pub enum Fill {
+    /// `None` for an `Option`, or else a missing field error.
+    Required,
+    /// A constant default.
+    Const(crate::types::ConstVal),
+    /// A call of the default helper function constant with dictionaries.
+    Call(u32, Vec<PartTemplate>),
+}
+
 /// Well-known runtime ids.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RtIds {
@@ -1331,8 +1410,8 @@ pub struct Program {
     pub native_argc: Arc<[u16]>,
     /// Templates for string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
-    /// Templates for parameterized type descriptors (`Op::Describe`).
-    pub desc_templates: Vec<DescTemplate>,
+    /// The shapes of structural `Encode` and `Decode` dictionaries.
+    pub codec_shapes: Vec<CodecShape>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,
 }
