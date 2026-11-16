@@ -548,7 +548,13 @@ fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValu
                     stack.push(Open::Obj(b.start_map(), String::new(), 0));
                     None
                 }
-                InputKind::Duration | InputKind::Bytes | InputKind::Variant => {
+                InputKind::Duration
+                | InputKind::Bytes
+                | InputKind::Tuple
+                | InputKind::Struct
+                | InputKind::Range
+                | InputKind::Native
+                | InputKind::Variant => {
                     return Err(HostError::new("parse", format!("{}: expected JSON data", source.path())));
                 }
             };

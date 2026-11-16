@@ -2222,6 +2222,46 @@ fn async_natives_encode_and_decode_host_values() {
 }
 
 #[test]
+fn a_decoder_reports_the_kind_of_each_host_value() {
+    use sandlang::native::convert::HostError;
+    use sandlang::native::func::Later;
+    use sandlang::native::ty::{Param, TraitDict};
+    use sandlang::types::traits;
+    use sandlang::value::{StructValue, ToValue};
+    use sandlang::vm::WaitKind;
+    let mut m = NativeModule::new("host");
+    m.source("pub native fn kinds<T: Decode>() -> Result<T>");
+    m.function("kinds", |decode: TraitDict<0, traits::Decode>| -> Result<Later<Param<0>, HostError>, HostError> {
+        Ok(Later::new(WaitKind::Io, move |mut cx| {
+            let decode = cx.root(decode.raw());
+            async move {
+                let value = Value::List(vec![
+                    Value::Tuple(vec![Value::Int(1)]),
+                    Value::Struct(StructValue::new("main.P", [("x", Value::Int(1))])),
+                    Value::Range { start: 0, end: 2, inclusive: false },
+                    jiff::Timestamp::UNIX_EPOCH.to_value(),
+                    Value::List(vec![]),
+                    Value::Map(vec![]),
+                ]);
+                let decoded = cx.from_value(value, decode).await?;
+                Ok(Param::from_raw(cx.value(decoded)))
+            }
+        }))
+    });
+    let src = "import host\nstruct K { kind: str }\n\
+               impl Decode for K {\n    fn decode(decoder: Decoder) -> Result<K> { Ok(K(kind: \"\\(decoder.kind()?)\")) }\n}\n\
+               let ks: [K] = host.kinds()?\nprint(ks.map(k => k.kind))\n\
+               let j: Result<[json.Json]> = host.kinds()\nprint(j)";
+    let src = format!("import json\n{src}");
+    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
+    r.unwrap();
+    assert_eq!(
+        out,
+        "[\"Tuple\", \"Struct\", \"Range\", \"Native\", \"List\", \"Map\"]\nErr(Error(message: \"$[0]: expected JSON data\", kind: \"parse\"))\n"
+    );
+}
+
+#[test]
 fn host_functions_take_and_return_durations_and_never() {
     use jiff::SignedDuration;
     use sandlang::native::ty::Never;

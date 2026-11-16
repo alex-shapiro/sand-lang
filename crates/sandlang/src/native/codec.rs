@@ -103,13 +103,17 @@ pub enum InputKind {
     Int,
     Float,
     Duration,
-    /// A string, or the text of a native value.
     Str,
     Bytes,
-    /// A list, set, or tuple, or a JSON array.
+    /// A list or a set, or a JSON array.
     List,
-    /// A map, struct, or range, or a JSON object.
+    /// A map, or a JSON object.
     Map,
+    Tuple,
+    Struct,
+    Range,
+    /// A native value, such as a `time.Instant`.
+    Native,
     /// An enum variant other than `None`.
     Variant,
 }

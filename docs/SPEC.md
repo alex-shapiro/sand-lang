@@ -737,7 +737,9 @@ write, or a write after the method returns, fails with kind `"invalid"`. An
 A `decode` method reads at most one value from its `Decoder`. If the method
 reads no value, the decoder skips the input value. `decoder.kind()` returns
 the `InputKind` of the input value without reading it: `Null`, `Bool`, `Int`,
-`Float`, `Duration`, `Str`, `Bytes`, `List`, `Map`, or `Variant`.
+`Float`, `Duration`, `Str`, `Bytes`, `List`, `Map`, `Tuple`, `Struct`, `Range`,
+`Native`, or `Variant`. JSON text gives only `Null`, `Bool`, `Int`, `Float`,
+`Str`, `List`, and `Map`.
 
 A struct that declares `init` (§4.2) decodes the parameters of `init` and
 calls `init`. A missing `Option` parameter is `None`, and a missing parameter
