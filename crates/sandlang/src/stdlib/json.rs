@@ -12,7 +12,7 @@ use crate::types::traits;
 use crate::value::{StructDesc, VariantDesc};
 use crate::vm::bytecode::Program;
 use crate::vm::codec::MAX_NESTING_DEPTH;
-use crate::vm::codec::{self, DecodeShared, EncodeShared};
+use crate::vm::codec::{self, Shared};
 use crate::vm::compare::str_hash;
 use crate::vm::heap::Staging;
 use crate::vm::meter::{Meter, SLOW_BYTES_PER_UNIT};
@@ -96,7 +96,7 @@ pub(crate) fn module() -> NativeModule {
     });
     m.function("encode", |vm: &mut Vm, dict: TraitDict<0, traits::Encode>, value: Param<0>, indent: i64| {
         let indent = indent.clamp(0, 1 << 16) as usize;
-        let shared = EncodeShared::new(JsonSink::new(TextOut::new(indent)));
+        let shared = Shared::new(JsonSink::new(TextOut::new(indent)));
         codec::encode::<_, _, HostError>(vm, shared, value.raw(), dict.raw(), |vm, sink| {
             Ok(VmVal::<String>::from_raw(vm.new_str(std::mem::take(&mut sink.out.out))))
         })
@@ -105,7 +105,7 @@ pub(crate) fn module() -> NativeModule {
         "decode",
         |vm: &mut Vm, dict: TraitDict<0, traits::Decode>, text: VmVal<String>| -> Result<Later<Param<0>, HostError>, HostError> {
             let source = JsonSource::new(vm, text.raw())?;
-            codec::decode::<_, _, HostError>(vm, DecodeShared::new(source), dict.raw(), |_, v, source| {
+            codec::decode::<_, _, HostError>(vm, Shared::new(source), dict.raw(), |_, v, source| {
                 source.finish()?;
                 Ok(Param::from_raw(v))
             })

@@ -597,19 +597,19 @@ macro_rules! __value_type_impls {
         impl $crate::value::ToValue for $t {
             fn to_value(&self) -> $crate::value::Value {
                 static SAND_TYPE_NAME: $crate::native::convert::TypeNameCell = $crate::native::convert::TypeNameCell::new();
-                $crate::native::convert::encode_value_type(&SAND_TYPE_NAME, self)
+                $crate::native::convert::value_type_to_value(&SAND_TYPE_NAME, self)
             }
         }
     };
 }
 
-/// Cached qualified type name shared across values from a derived `Encode`
+/// Cached qualified type name shared across values from a derived `ToValue`
 /// implementation.
 #[doc(hidden)]
 pub type TypeNameCell = std::sync::OnceLock<std::sync::Arc<str>>;
 
 #[doc(hidden)]
-pub fn encode_value_type<T: ValueType>(type_name: &TypeNameCell, x: &T) -> Value {
+pub fn value_type_to_value<T: ValueType>(type_name: &TypeNameCell, x: &T) -> Value {
     let type_name = type_name.get_or_init(|| qualified_name(qualified_name_module(T::MODULE), T::NAME).into()).clone();
     Value::Native(Box::new(NativeValue { type_name, text: x.to_string() }))
 }

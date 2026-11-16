@@ -381,23 +381,23 @@ impl<K: ToValue + Ord, V: ToValue> ToValue for HashMap<K, V> {
     fn to_value(&self) -> Value {
         let mut entries: Vec<(&K, &V)> = self.iter().collect();
         entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        encode_map(entries)
+        map_to_value(entries)
     }
 }
 
 impl<K: ToValue, V: ToValue> ToValue for BTreeMap<K, V> {
     fn to_value(&self) -> Value {
-        encode_map(self)
+        map_to_value(self)
     }
 }
 
 impl<K: ToValue, V: ToValue> ToValue for indexmap::IndexMap<K, V> {
     fn to_value(&self) -> Value {
-        encode_map(self)
+        map_to_value(self)
     }
 }
 
-fn encode_map<'a, K: ToValue + 'a, V: ToValue + 'a>(entries: impl IntoIterator<Item = (&'a K, &'a V)>) -> Value {
+fn map_to_value<'a, K: ToValue + 'a, V: ToValue + 'a>(entries: impl IntoIterator<Item = (&'a K, &'a V)>) -> Value {
     Value::Map(entries.into_iter().map(|(k, v)| (k.to_value(), v.to_value())).collect())
 }
 
@@ -416,7 +416,7 @@ impl<T: ToValue> ToValue for BTreeSet<T> {
     }
 }
 
-macro_rules! encode_tuples {
+macro_rules! tuples_to_value {
     ($(($($n:ident $i:tt),+)),* $(,)?) => {$(
         impl<$($n: ToValue),+> ToValue for ($($n,)+) {
             fn to_value(&self) -> Value {
@@ -425,7 +425,7 @@ macro_rules! encode_tuples {
         }
     )*};
 }
-encode_tuples! {
+tuples_to_value! {
     (A 0, B 1),
     (A 0, B 1, C 2),
     (A 0, B 1, C 2, D 3),

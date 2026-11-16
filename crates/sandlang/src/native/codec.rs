@@ -93,7 +93,7 @@ pub trait EncodeSink: Send {
     fn allocated(&self) -> usize;
 }
 
-/// The kind of the next input value of a [`DecodeSource`].
+/// The kind of the value that a `Decoder` reads next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, crate::SandEnum)]
 #[sand(module = "prelude")]
 pub enum InputKind {

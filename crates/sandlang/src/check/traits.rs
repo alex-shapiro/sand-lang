@@ -132,9 +132,8 @@ pub(crate) fn impl_key(arena: &TypeArena, t: TypeId) -> Option<(Ctor, u32)> {
     }
 }
 
-/// The maximum nesting of the type arguments that the checker resolves
-/// trait evidence through, which is also the nesting limit of a value that
-/// the codec walkers encode or decode.
+/// The deepest nesting of type arguments through which the checker resolves
+/// a trait bound, such as `Encode` of `[[[int]]]`.
 const MAX_EVIDENCE_DEPTH: u32 = 512;
 
 fn dict_expr(kind: HKind, span: Span) -> HExpr {

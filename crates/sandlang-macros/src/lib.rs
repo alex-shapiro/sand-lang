@@ -397,7 +397,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut indexes = Vec::new();
     let mut reads = Vec::new();
     let mut writes = Vec::new();
-    let mut encodes = Vec::new();
+    let mut to_values = Vec::new();
     let mut checks = Vec::new();
     for (i, v) in data.variants.iter().enumerate() {
         let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), doc_expr(&v.attrs));
@@ -461,21 +461,21 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             false => quote!(move |vm| ::std::result::Result::Ok([#(#puts),*])),
         };
         writes.push(quote! { #pattern => #krate::native::variant_into_vm_value::<Self, _>(vm, #i, #write) });
-        encodes.push(quote! { #pattern => #krate::native::encode_variant::<Self>(&SAND_VARIANT_DESCS, #i, [#(#krate::value::ToValue::to_value(#names)),*]) });
+        to_values.push(quote! { #pattern => #krate::native::variant_to_value::<Self>(&SAND_VARIANT_DESCS, #i, [#(#krate::value::ToValue::to_value(#names)),*]) });
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
     let sand_type = expand_sand_type(input, krate, &type_params);
     let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where } =
         ConversionGenerics::new(input, krate, &type_params);
     let count = data.variants.len();
-    let encode = (!attrs.no_value).then(|| {
+    let to_value_impl = (!attrs.no_value).then(|| {
         quote! {
             impl #params #krate::value::ToValue for #ty #args #encode_where {
                 fn to_value(&self) -> #krate::value::Value {
                     static SAND_VARIANT_DESCS: [#krate::native::VariantDescCell; #count] =
                         [const { #krate::native::VariantDescCell::new() }; #count];
                     match self {
-                        #(#encodes),*
+                        #(#to_values),*
                     }
                 }
             }
@@ -521,7 +521,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             }
         }
         #conversion
-        #encode
+        #to_value_impl
     })
 }
 
@@ -580,7 +580,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut reads = Vec::new();
     let mut writes = Vec::new();
     let mut names = Vec::new();
-    let mut encodes = Vec::new();
+    let mut to_values = Vec::new();
     let mut checks = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         let ident = f.ident.as_ref().expect("named field");
@@ -635,18 +635,18 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         });
         reads.push(quote! { #ident: #krate::native::field_from_vm_value::<#fty>(vm, fields[#i], conv)? });
         writes.push(quote! { #krate::native::convert::IntoVmValue::into_vm_value(self.#ident, vm)? });
-        encodes.push(quote! { #krate::value::ToValue::to_value(&self.#ident) });
+        to_values.push(quote! { #krate::value::ToValue::to_value(&self.#ident) });
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
     let sand_type = expand_sand_type(input, krate, &type_params);
     let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where } =
         ConversionGenerics::new(input, krate, &type_params);
-    let encode = (!attrs.no_value).then(|| {
+    let to_value_impl = (!attrs.no_value).then(|| {
         quote! {
             impl #params #krate::value::ToValue for #ty #args #encode_where {
                 fn to_value(&self) -> #krate::value::Value {
                     static SAND_STRUCT_DESC: #krate::native::StructDescCell = #krate::native::StructDescCell::new();
-                    #krate::native::encode_struct::<Self>(&SAND_STRUCT_DESC, [#(#encodes),*])
+                    #krate::native::struct_to_value::<Self>(&SAND_STRUCT_DESC, [#(#to_values),*])
                 }
             }
         }
@@ -679,7 +679,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
             const FIELDS: &'static [#krate::native::StructField] = &[#(#infos),*];
         }
         #conversion
-        #encode
+        #to_value_impl
     })
 }
 
@@ -921,15 +921,15 @@ mod tests {
     #[test]
     fn to_value_converts_each_field_and_variant_payload() {
         let out = expand(sand_struct, "#[sand(module = \"m\")] struct S<T> { x: i64, y: T }");
-        assert!(out.contains(":: sandlang :: native :: encode_struct :: < Self > (& SAND_STRUCT_DESC , [:: sandlang :: value :: ToValue :: to_value (& self . x) , :: sandlang :: value :: ToValue :: to_value (& self . y)])"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: struct_to_value :: < Self > (& SAND_STRUCT_DESC , [:: sandlang :: value :: ToValue :: to_value (& self . x) , :: sandlang :: value :: ToValue :: to_value (& self . y)])"), "{out}");
         assert!(out.contains("static SAND_STRUCT_DESC : :: sandlang :: native :: StructDescCell"), "{out}");
         assert!(out.contains("T : 'static + :: sandlang :: native :: ty :: SandType + :: sandlang :: value :: ToValue"), "{out}");
         let out = expand(sand_enum, "#[sand(module = \"m\")] enum E { A, B(i64), C { w: f64 } }");
         assert!(out.contains("static SAND_VARIANT_DESCS : [:: sandlang :: native :: VariantDescCell ; 3usize]"), "{out}");
         assert!(
-            out.contains("E :: A => :: sandlang :: native :: encode_variant :: < Self > (& SAND_VARIANT_DESCS , 0usize , [])"),
+            out.contains("E :: A => :: sandlang :: native :: variant_to_value :: < Self > (& SAND_VARIANT_DESCS , 0usize , [])"),
             "{out}"
         );
-        assert!(out.contains("E :: C { w : f0 } => :: sandlang :: native :: encode_variant :: < Self > (& SAND_VARIANT_DESCS , 2usize , [:: sandlang :: value :: ToValue :: to_value (f0)])"), "{out}");
+        assert!(out.contains("E :: C { w : f0 } => :: sandlang :: native :: variant_to_value :: < Self > (& SAND_VARIANT_DESCS , 2usize , [:: sandlang :: value :: ToValue :: to_value (f0)])"), "{out}");
     }
 }

@@ -194,25 +194,25 @@ pub struct StructField {
     pub default: Option<fn() -> Value>,
 }
 
-/// Cached [`StructDesc`] shared across values from a derived `Encode`
+/// Cached [`StructDesc`] shared across values from a derived `ToValue`
 /// implementation.
 #[doc(hidden)]
 pub type StructDescCell = OnceLock<Arc<StructDesc>>;
 
-/// Cached [`VariantDesc`] shared across values from a derived `Encode`
+/// Cached [`VariantDesc`] shared across values from a derived `ToValue`
 /// implementation.
 #[doc(hidden)]
 pub type VariantDescCell = OnceLock<Arc<VariantDesc>>;
 
 #[doc(hidden)]
-pub fn encode_struct<T: StructType>(ty: &StructDescCell, fields: impl IntoIterator<Item = Value>) -> Value {
+pub fn struct_to_value<T: StructType>(ty: &StructDescCell, fields: impl IntoIterator<Item = Value>) -> Value {
     let ty =
         ty.get_or_init(|| StructDesc::new(qualified_name(qualified_name_module(T::MODULE), T::NAME), T::FIELDS.iter().map(|f| f.name)));
     Value::Struct(StructValue { ty: ty.clone(), fields: fields.into_iter().collect() })
 }
 
 #[doc(hidden)]
-pub fn encode_variant<T: EnumType>(variants: &[VariantDescCell], index: usize, payload: impl IntoIterator<Item = Value>) -> Value {
+pub fn variant_to_value<T: EnumType>(variants: &[VariantDescCell], index: usize, payload: impl IntoIterator<Item = Value>) -> Value {
     let desc = variants[index].get_or_init(|| {
         let (type_name, variant) = (qualified_name(qualified_name_module(T::MODULE), T::NAME), &T::VARIANTS[index]);
         let field_names: Option<Vec<&str>> = variant.fields.iter().map(|f| f.name).collect();
