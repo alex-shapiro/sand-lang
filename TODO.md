@@ -40,6 +40,12 @@ The host cannot rely on engine limits, stability, or control.
       passes a `RootedValue` to another call's context, `value` reads the wrong
       root slot. Either wrap host values in a handle that borrows the context or
       check a generation counter on each heap slot.
+- [ ] ❓ _Embedding._ Bound every recursive engine path by one stack budget.
+      In an unoptimized build on a 512 KiB thread, `json.parse` of 300 nested
+      arrays overflows the Rust stack and aborts the process, which stops every
+      engine in it. Only nested synchronous callbacks compare the stack address
+      with a budget. Let the host declare its thread stack size in `Config`,
+      and check the same budget in every recursive path.
 - [ ] ❓ _Embedding._ Check the arguments of a Sand callback.
       `CallContext::call` and `NativeContext::call` take a raw callee and
       argument slice, so a host can pass the wrong number of arguments. The
