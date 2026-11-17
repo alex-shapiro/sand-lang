@@ -748,12 +748,12 @@ struct FnDef {
 /// declarations against the registered Rust signatures.
 ///
 /// The VM reruns a plain synchronous or `&mut Vm` function after a permission
-/// prompt or limit-triggered garbage collection. Check permissions with
-/// [`Vm::require`], memory limits, and resource limits before any side effect.
-/// The VM runs a [`CallContext`](context::CallContext) function once per call.
-/// [`CallContext::step`](context::CallContext::step) retries limit checks in
-/// place. Return an error on invalid script input. The engine catches Rust
-/// panics. It then aborts the run with
+/// prompt or limit-triggered garbage collection. Check permissions, memory
+/// limits, and resource limits before any side effect. [`Vm::require`] checks a
+/// sandbox capability. The VM runs a [`CallContext`](context::CallContext)
+/// function once per call. [`CallContext::step`](context::CallContext::step)
+/// retries limit checks in place. Return an error on invalid script input. The
+/// engine catches Rust panics. It then aborts the run with
 /// [`Error::Internal`](crate::engine::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {

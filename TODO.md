@@ -41,11 +41,11 @@ The host cannot rely on engine limits, stability, or control.
       reads the wrong root slot.
 - [ ] ❓ _Embedding._ Bound every recursive engine path with a stack budget.
       Let the host set its thread stack size in `Config`. Enforce that budget
-      across all recursive engine paths. The engine currently checks remaining
-      Rust stack space only before nested synchronous callbacks. In an
-      unoptimized build on a 512 KiB thread, `json.parse` on 300 nested arrays
-      overflows the Rust stack. The Rust runtime then aborts the host process.
-      The host loses every engine in that process.
+      across all recursive engine paths. The engine checks Rust stack growth
+      only before synchronous callbacks. In an unoptimized build on a 512 KiB
+      thread, `json.parse` overflows the Rust stack on 300 nested arrays. The
+      Rust runtime then aborts the host process. The host loses every engine in
+      that process.
 - [ ] ❓ _Embedding._ Check the arguments of a Sand callback. Derive a typed
       `call` method from `VmVal<fn(..) -> R>`. `CallContext::call` and
       `NativeContext::call` take an untyped callee and a raw argument slice. A

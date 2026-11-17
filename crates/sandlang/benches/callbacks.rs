@@ -5,8 +5,8 @@
 //!
 //! Each benchmark calls `fn inc(x: int) -> int { x + 1 }` 1,000,000 times
 //! through a different call path. By default, the harness runs each benchmark
-//! five times. `BENCH_RUNS` sets the run count. Total time includes
-//! compilation. The harness reports the lowest total time.
+//! five times. `BENCH_RUNS` sets the run count. The harness includes script
+//! compilation in each timed run. It reports the fastest run.
 
 use sandlang::engine::{Config, Engine, HostModules, MemorySink};
 use sandlang::native::NativeModule;

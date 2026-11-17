@@ -2144,11 +2144,11 @@ values. `NativeModule` and `HostModules::new` panic if a module, type, or
 function name is invalid or duplicated. `NativeModule::new` also panics if a
 module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 
-| Method                       | Registered item                                                             |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| `function(name, f)`          | Rust function or closure `f`                                                |
-| `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                    |
-| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function |
+| Method                       | Registered item                                         |
+| ---------------------------- | ------------------------------------------------------- |
+| `function(name, f)`          | Rust function or closure `f`                            |
+| `bind::<T>()`                | Rust type `T` with a derived `NamedType`                |
+| `params(names)`, `doc(text)` | parameter names and documentation for the last function |
 
 `NativeModule::function` selects from four kinds of Rust function by signature:
 
@@ -2159,8 +2159,8 @@ module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
   such as `VmVal<T>`.
 - **Synchronous with `&mut CallContext` first.** The function can call Sand
   functions synchronously on the calling task. Each parameter after
-  `&mut CallContext` is an owned type or a VM handle. Its error type is `Fail`
-  or `HostError<Fail>`.
+  `&mut CallContext` is an owned type or a VM handle. It returns an
+  `IntoVmValue` type, `Result<T, Fail>`, or `Result<T, HostError<Fail>>`.
 - **Asynchronous.** The function returns a future. The engine suspends only the
   calling task. Its parameters, future, and future output are owned `Send`
   types.
@@ -2206,8 +2206,8 @@ On task cancellation during an async callback, the engine runs the callee's
 `NativeContext` keeps rooted values and callback results alive until the native
 call returns.
 
-The engine runs a `CallContext` function once per call on the calling task.
-Outside `CallContext::step`, the engine ends the run on the first limit error.
+The engine runs a `CallContext` function once per call on the calling task. If
+the function returns a limit error, the engine ends the run immediately.
 `CallContext` provides four operations:
 
 - `vm()` returns `&Vm` for shared read access.
@@ -2225,16 +2225,16 @@ Outside `CallContext::step`, the engine ends the run on the first limit error.
   rejects task waits, permission prompts, and self-cancellation with an
   `"invalid"` error.
 
-On an uncaught error, limit, or `exit` in `callee` or `step`, `CallContext`
-records that outcome and its stack trace. Later `call` and `step` calls return
-that recorded `Fail`. After the native function returns, the engine ends the
-run with that recorded outcome.
+`CallContext` records any run-ending outcome from `call` and any prompt error
+from `step`. Later `call` and `step` calls return that recorded `Fail`. After
+the native function returns, the engine ends the run with that recorded
+outcome.
 
 In both `NativeContext` and `CallContext`, the engine counts two frames toward
 `max_call_depth` for a Sand closure callback. It counts a single frame for a
-native function callback. The engine also caps nested synchronous callbacks at
-256 KiB of Rust stack. If a call exceeds either limit, the engine ends the run
-with `limit: stack overflow`. Build the engine with optimizations. Run it on a
+native function callback. The engine also caps synchronous callbacks at 256 KiB
+of Rust stack. If a call exceeds either limit, the engine ends the run with
+`limit: stack overflow`. Build the engine with optimizations. Run it on a
 thread with at least 512 KiB of stack.
 
 Bound the recursion depth of any async native function. The engine charges only

@@ -245,9 +245,9 @@ calls.function("twice", |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) 
 
 `CallContext::call` returns an unrooted `VmValue`. `CallContext::root` keeps a `VmValue` alive across `CallContext::call` and `CallContext::step`. The garbage collector can free unrooted heap values during either method. Allocate heap values and resources inside `CallContext::step`. On a memory or resource limit, `CallContext::step` collects garbage in place. It then runs its closure again.
 
-The engine runs each callback to completion on the host thread. Set `max_wall_time` or `max_cpu_time` for untrusted scripts. During a `CallContext` call, the engine rejects task waits, permission prompts, and self-cancellation with a runtime error. Return a `Later` future if the call awaits host I/O or permission prompts. Inside that future, `NativeContext::call` runs Sand callbacks.
+The engine runs each callback to completion on the host thread. Set `max_wall_time` or `max_cpu_time` for untrusted scripts. During a `CallContext` call, the engine rejects task waits, permission prompts, and self-cancellation with a runtime error. Use `Later::new` if the call awaits host I/O or permission prompts. Inside the `Later::new` future, `NativeContext::call` runs Sand callbacks.
 
-Build the engine with optimizations. Run it on a thread with at least 512 KiB of stack. The engine caps nested callbacks at 256 KiB of Rust stack. An optimized build supports about 100 nested callbacks within 256 KiB. An unoptimized build supports fewer than 10.
+Build the engine with optimizations. Run it on a thread with at least 512 KiB of stack. The engine caps synchronous callbacks at 256 KiB of Rust stack. An optimized build supports about 100 nested callbacks within 256 KiB. An unoptimized build supports fewer than 10.
 
 ### Checking permissions
 

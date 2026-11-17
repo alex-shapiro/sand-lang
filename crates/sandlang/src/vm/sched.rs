@@ -106,7 +106,7 @@ impl Fiber {
     }
 }
 
-/// Rust stack budget in bytes for nested synchronous callbacks.
+/// Rust stack budget in bytes for synchronous callbacks.
 const MAX_CALLBACK_STACK_BYTES: usize = 256 << 10;
 
 /// Returns an address on the current Rust stack.
@@ -399,7 +399,7 @@ impl Vm {
         };
         let mut grow_result = grow_buffers(self, fiber);
         if grow_result.as_ref().is_err_and(|fail| fail.as_limit() == Some(LimitKind::Memory)) {
-            // `fiber.stack` does not yet hold `callee` or `args` during stack growth.
+            // Root `callee` and `args` before writing them to `fiber.stack`.
             let roots_len = fiber.native_roots.len();
             fiber.native_roots.push(callee);
             fiber.native_roots.extend_from_slice(args);
@@ -426,8 +426,9 @@ impl Vm {
     /// native call.
     ///
     /// `frame_base` is the first stack slot above the active native caller's
-    /// registers. Returns an `"invalid"` error if the callback suspends or
-    /// cancels `fiber`. Restores `fiber.frames` and `self.caller_site` on exit.
+    /// registers. Rejects task suspension and self-cancellation with an
+    /// `"invalid"` error. Restores `fiber.frames` and `self.caller_site` on
+    /// exit.
     pub(crate) fn run_callback(
         &mut self,
         code: &ProgramCode,
