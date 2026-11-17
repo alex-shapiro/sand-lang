@@ -26,34 +26,35 @@ Untrusted code violates a valid policy.
 The host cannot rely on engine limits, stability, or control.
 
 - [ ] ❓ _Embedding._ Reject stale raw `VmValue` handles and cross-call
-      `RootedValue` handles. Either wrap host values in a handle that borrows
-      the context or check a generation counter on each heap slot. Garbage
-      collection during `CallContext::call` or `NativeContext::call` invalidates
-      raw `VmValue` handles. Typed VM handles are `!Send`. The compiler rejects
-      them in a future. `VmValue` implements `Send` for heap storage. A future
-      or a synchronous native function can keep an unrooted `VmValue` across a
-      callback. After garbage collection, the VM returns an unrelated object
-      from a reused heap slot. If collection shrank the heap, the VM panics on
-      an out-of-bounds slot. The engine reports a caught panic as an internal
-      error. Under `panic = "abort"`, the Rust runtime aborts the process on a
-      panic. If a caller passes a `RootedValue` to another call's context,
-      `value` reads the wrong root slot.
-- [ ] ❓ _Embedding._ Bound every recursive engine path with a single stack
-      budget. Let the host set its thread stack size in `Config`. Check that
-      budget in every recursive engine path. Today, only nested synchronous
-      callbacks check the remaining Rust stack. In an unoptimized build on a
-      512 KiB thread, `json.parse` on 300 nested arrays overflows the Rust
-      stack. The Rust runtime then aborts the host process. That abort stops
-      every engine in the process.
+      `RootedValue` handles. Wrap host values in a handle with the context's
+      lifetime. Alternatively, check a generation counter on each heap slot.
+      The garbage collector can invalidate raw `VmValue` handles during
+      `CallContext::call` or `NativeContext::call`. Typed VM handles are
+      `!Send`. The compiler rejects them in a future. `VmValue` implements
+      `Send` for heap storage. A future or a synchronous native function can
+      keep an unrooted `VmValue` across a callback. After garbage collection,
+      the VM returns an unrelated object from a reused heap slot. If the
+      collector shrinks the heap, the VM panics on an out-of-bounds slot. The
+      engine reports a caught panic as an internal error. Under
+      `panic = "abort"`, the Rust runtime aborts the process on a panic. If a
+      caller passes a `RootedValue` to another call's context, that context
+      reads the wrong root slot.
+- [ ] ❓ _Embedding._ Bound every recursive engine path with a stack budget.
+      Let the host set its thread stack size in `Config`. Enforce that budget
+      across all recursive engine paths. The engine currently checks remaining
+      Rust stack space only before nested synchronous callbacks. In an
+      unoptimized build on a 512 KiB thread, `json.parse` on 300 nested arrays
+      overflows the Rust stack. The Rust runtime then aborts the host process.
+      The host loses every engine in that process.
 - [ ] ❓ _Embedding._ Check the arguments of a Sand callback. Derive a typed
       `call` method from `VmVal<fn(..) -> R>`. `CallContext::call` and
       `NativeContext::call` take an untyped callee and a raw argument slice. A
       host caller can pass the wrong number of arguments. The callee then reads
       a stale register.
-- [ ] ❓ _Embedding._ Detect collection changes during a native walk. Either
-      fail on mutation as in CPython or iterate over a snapshot. A Sand callback
-      in `CallContext::call` or `NativeContext::call` can mutate a collection
-      during iteration.
+- [ ] ❓ _Embedding._ Detect collection changes during a native walk. Fail on
+      mutation as in CPython. Alternatively, iterate over a snapshot. A Sand
+      callback in `CallContext::call` or `NativeContext::call` can mutate a
+      collection during iteration.
 - [ ] ❓ _Embedding._ Let an async native function release roots during a call.
       `NativeContext::root` and `NativeContext::call` keep every rooted object
       graph in the call's root table until the call returns. If a native future

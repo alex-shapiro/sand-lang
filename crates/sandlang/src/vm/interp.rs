@@ -63,8 +63,8 @@ pub enum FiberStop {
     AsyncNative(AsyncNativeCall),
     /// Finished a Sand callback for the innermost native call.
     CallbackReturn(VmValue),
-    /// A native call needs a permission prompt. Boxes the capability to keep
-    /// `FiberStop` small.
+    /// A native call requested a permission prompt.
+    // `Box<Capability>` keeps `FiberStop` at 40 bytes.
     Prompt(Box<Capability>),
     /// `task.yield_now()`.
     YieldNow,
@@ -602,7 +602,7 @@ impl Vm {
         Err(Trap::Limit(k).into())
     }
 
-    /// Runs `fiber` until it finishes, blocks, or exhausts `fuel`.
+    /// Runs `fiber` until it stops or exhausts `fuel_out`.
     pub(crate) fn interp(
         &mut self,
         prog: &Arc<Program>,
@@ -1749,9 +1749,9 @@ impl Vm {
 
     /// Calls native function `n` with arguments on `fiber.stack`.
     ///
-    /// Returns `Ok(None)` to continue bytecode execution or `Ok(Some(stop))` to
-    /// stop the slice. Returns `Ok(Some(FiberStop::Preempt))` if the call
-    /// exhausts the slice's fuel.
+    /// Returns `Ok(None)` if bytecode execution continues in this slice.
+    /// Returns `Ok(Some(stop))` if the call stops the slice. Preempts the task
+    /// with `FiberStop::Preempt` if the call exhausts slice fuel.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn call_native(
@@ -2002,11 +2002,10 @@ impl Vm {
         self.heap.append_text(cur, &s).map_err(Fail::limit)
     }
 
-    /// Calls native function `n`. The scheduler catches panics around each
-    /// fiber turn in `crate::unwind`.
+    /// Calls native function `native_index`.
     #[inline(always)]
-    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, fiber: &mut Fiber, args_end: usize) -> Result<VmValue, Ctl> {
-        let entry = &natives[n as usize];
+    fn invoke_native(&mut self, natives: &[NativeEntry], native_index: u32, fiber: &mut Fiber, args_end: usize) -> Result<VmValue, Ctl> {
+        let entry = &natives[native_index as usize];
         entry.f.call(self, fiber, args_end)
     }
 

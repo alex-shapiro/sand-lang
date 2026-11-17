@@ -737,23 +737,24 @@ struct FnDef {
 /// `import <name>`.
 ///
 /// The engine infers the Sand signature of each registered function from its
-/// Rust parameter and return types. It exports functions that are absent from
-/// [`NativeModule::source`] as `pub native fn`. [`NativeModule::params`] sets
-/// their parameter names, which default to `arg1`, `arg2`, and so on.
-/// Registering a function as `"Type.name"` defines a method on `Type`. The
-/// method takes `self` if its first parameter has type `Type`. Use `native fn`
-/// declarations in [`NativeModule::source`] to specify default parameter
+/// Rust parameter and return types. It exports functions absent from
+/// [`NativeModule::source`] as `pub native fn`. Default parameter names are
+/// `arg1`, `arg2`, and higher. [`NativeModule::params`] overrides those
+/// parameter names. A function name of `"Type.name"` defines a method on
+/// `Type`. The method takes `self` if its first parameter has type `Type`.
+/// Declare `native fn` items in [`NativeModule::source`] for default parameter
 /// values or generic type parameters.
 /// [`HostModules::new`](crate::engine::HostModules::new) checks all
 /// declarations against the registered Rust signatures.
 ///
-/// The VM restarts a synchronous or `&mut Vm` function from the start after a
-/// permission prompt or a limit-triggered garbage collection. Check permissions
-/// with [`Vm::require`], reserve memory, and acquire resource slots before any
-/// side effect. A [`CallContext`](context::CallContext) function runs once per
-/// call. Use [`CallContext::step`](context::CallContext::step) to retry limit
-/// checks in place. Avoid panicking on script input. The engine catches panics
-/// and aborts the run with [`Error::Internal`](crate::engine::Error::Internal).
+/// The VM reruns a plain synchronous or `&mut Vm` function after a permission
+/// prompt or limit-triggered garbage collection. Check permissions with
+/// [`Vm::require`], memory limits, and resource limits before any side effect.
+/// The VM runs a [`CallContext`](context::CallContext) function once per call.
+/// [`CallContext::step`](context::CallContext::step) retries limit checks in
+/// place. Return an error on invalid script input. The engine catches Rust
+/// panics. It then aborts the run with
+/// [`Error::Internal`](crate::engine::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {
     name: String,

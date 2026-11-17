@@ -1,13 +1,12 @@
 //! Benchmarks for native functions that call Sand functions.
 //!
-//! Run `cargo bench --bench callbacks` to measure wall time and time per call.
-//! Run `cargo test --benches` to verify each benchmark's output in a single
-//! pass.
+//! `cargo bench --bench callbacks` measures wall time and time per call.
+//! `cargo test --benches` verifies each benchmark's output in a single pass.
 //!
 //! Each benchmark calls `fn inc(x: int) -> int { x + 1 }` 1,000,000 times
 //! through a different call path. By default, the harness runs each benchmark
-//! five times and reports the lowest total time, including compilation. Set
-//! `BENCH_RUNS` to change the run count.
+//! five times. `BENCH_RUNS` sets the run count. Total time includes
+//! compilation. The harness reports the lowest total time.
 
 use sandlang::engine::{Config, Engine, HostModules, MemorySink};
 use sandlang::native::NativeModule;
@@ -17,11 +16,11 @@ use sandlang::native::ty::{Param, VmVal};
 use sandlang::vm::{Fail, WaitKind};
 use std::time::{Duration, Instant};
 
-const CALLS: u64 = 1_000_000;
+const CALL_COUNT: u64 = 1_000_000;
 
 struct Bench {
     name: &'static str,
-    /// Sand expression that calls `inc` `CALLS` times starting from `0`.
+    /// Sand expression that applies `inc` `CALL_COUNT` times to `0`.
     call_expr: &'static str,
 }
 
@@ -31,9 +30,9 @@ const BENCHES: &[Bench] = &[
     Bench { name: "async native call", call_expr: "calls.apply_async(inc, 0, 1000000)" },
 ];
 
-const PRELUDE: &str = "import calls\n\
-                       fn inc(x: int) -> int { x + 1 }\n\
-                       fn apply<T>(f: fn(T) -> T, x: T, times: int) -> T {\n    var y = x\n    for _ in 0..times { y = f(y) }\n    y\n}\n";
+const SHARED_SOURCE: &str = "import calls\n\
+                             fn inc(x: int) -> int { x + 1 }\n\
+                             fn apply<T>(f: fn(T) -> T, x: T, times: int) -> T {\n    var y = x\n    for _ in 0..times { y = f(y) }\n    y\n}\n";
 
 /// Builds the `calls` host module with synchronous and async callback functions.
 fn calls_module() -> NativeModule {
@@ -81,19 +80,25 @@ fn run_once(source: &str) -> (Duration, String) {
 
 fn main() {
     let filter = std::env::args().skip(1).find(|arg| !arg.starts_with('-'));
-    let quick = std::env::var("BENCH_QUICK").is_ok() || !std::env::args().any(|arg| arg == "--bench");
-    let runs = if quick { 1 } else { std::env::var("BENCH_RUNS").ok().and_then(|raw| raw.parse().ok()).unwrap_or(5usize).max(1) };
+    let is_quick = std::env::var("BENCH_QUICK").is_ok() || !std::env::args().any(|arg| arg == "--bench");
+    let run_count =
+        if is_quick { 1 } else { std::env::var("BENCH_RUNS").ok().and_then(|env_value| env_value.parse().ok()).unwrap_or(5usize).max(1) };
     println!("{:<38} {:>10} {:>8}", "benchmark", "best", "ns/call");
     for bench in BENCHES.iter().filter(|bench| filter.as_ref().is_none_or(|pattern| bench.name.contains(pattern.as_str()))) {
-        let source = format!("{PRELUDE}print({})", bench.call_expr);
-        let best = (0..runs)
+        let source = format!("{SHARED_SOURCE}print({})", bench.call_expr);
+        let min_elapsed = (0..run_count)
             .map(|_| {
                 let (elapsed, stdout) = run_once(&source);
-                assert_eq!(stdout, format!("{CALLS}\n"), "{}", bench.name);
+                assert_eq!(stdout, format!("{CALL_COUNT}\n"), "{}", bench.name);
                 elapsed
             })
             .min()
             .unwrap();
-        println!("{:<38} {:>8.1}ms {:>8.1}", bench.name, best.as_secs_f64() * 1e3, best.as_secs_f64() * 1e9 / CALLS as f64);
+        println!(
+            "{:<38} {:>8.1}ms {:>8.1}",
+            bench.name,
+            min_elapsed.as_secs_f64() * 1e3,
+            min_elapsed.as_secs_f64() * 1e9 / CALL_COUNT as f64
+        );
     }
 }

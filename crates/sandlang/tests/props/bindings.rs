@@ -242,20 +242,20 @@ fn json_layers() -> impl Strategy<Value = Vec<JsonLayer>> {
 }
 
 fn sum_module() -> NativeModule {
-    let mut m = NativeModule::new("nums");
-    m.function("total", |context: &mut CallContext, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Fail> {
-        let mut acc = num.zero(context)?.raw();
-        for &x in xs.items(&context.vm().heap) {
-            acc = match (acc, x) {
+    let mut module = NativeModule::new("nums");
+    module.function("total", |context: &mut CallContext, num: Num<0>, list: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Fail> {
+        let mut accumulator = num.zero(context)?.raw();
+        for &item in list.items(&context.vm().heap) {
+            accumulator = match (accumulator, item) {
                 (VmValue::Int(a), VmValue::Int(b)) => VmValue::Int(a.wrapping_add(b)),
                 (VmValue::Float(a), VmValue::Float(b)) => VmValue::Float(a + b),
                 _ => return Err(Fail::internal("not a number")),
             };
         }
-        Ok(Param::from_raw(acc))
+        Ok(Param::from_raw(accumulator))
     });
-    m.source("pub native fn total<T: Num>(xs: [T]) -> T");
-    m
+    module.source("pub native fn total<T: Num>(xs: [T]) -> T");
+    module
 }
 
 proptest! {

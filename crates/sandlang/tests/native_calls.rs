@@ -104,12 +104,12 @@ fn calls_module(log: &EventLog) -> NativeModule {
     module.function(
         "collect_sync",
         |context: &mut CallContext, callback: VmVal<fn(i64) -> String>, count: i64| -> Result<Vec<String>, Fail> {
-            let mut results = Vec::new();
+            let mut rooted_results = Vec::new();
             for i in 0..count {
                 let result = context.call(callback.raw(), &[VmValue::Int(i)])?;
-                results.push(context.root(result));
+                rooted_results.push(context.root(result));
             }
-            Ok(results.into_iter().map(|result| context.vm().str(context.value(result)).to_string()).collect())
+            Ok(rooted_results.into_iter().map(|rooted| context.vm().str(context.value(rooted)).to_string()).collect())
         },
     );
     module.function("knock_and_ignore", |context: &mut CallContext| -> i64 {
@@ -120,8 +120,8 @@ fn calls_module(log: &EventLog) -> NativeModule {
         let _ = context.call(callback.raw(), &[]);
         7
     });
-    // `Heap::new_str` allocates directly without a limit check. Under
-    // `retry_stress`, growing the callback stack triggers the first collection.
+    // `Heap::new_str` skips the heap limit check. Under `retry_stress`,
+    // `Vm::begin_callback` triggers the first collection during stack growth.
     module.function("call_with_fresh", |context: &mut CallContext, callback: VmVal<fn(String) -> String>| -> Result<String, Fail> {
         let fresh = context.step(|vm| -> Result<_, Fail> { Ok(vm.heap.new_str("fresh")) })?;
         let result = context.call(callback.raw(), &[fresh])?;
@@ -449,12 +449,12 @@ fn sessions_run_callbacks_in_inputs_and_in_background_tasks() {
 }
 
 #[test]
-fn synchronous_callbacks_return_their_results_to_the_native_call() {
+fn call_context_returns_callback_results() {
     assert_eq!(run_ok(Config::new(), "print(calls.apply_sync((s) => s + \"!\", \"hi\", 1000).len())"), "1002\n");
 }
 
 #[test]
-fn synchronous_callbacks_nest_through_native_calls() {
+fn call_context_runs_nested_callbacks() {
     let source = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply_sync(down, n - 1, 1) + 1 } }\nprint(down(4))";
     assert_eq!(run_ok(Config::new().gc_stress(true), source), "4\n");
 
@@ -473,28 +473,28 @@ fn engine_enforces_rust_stack_budget_across_nested_synchronous_callbacks() {
 }
 
 #[test]
-fn call_context_step_collects_garbage_in_place_without_rerunning_callbacks() {
-    // `strings = []` leaves 8 MB unreachable. The 10 MB allocation fits within
-    // the 16 MB limit only if `CallContext::step` collects garbage in place.
+fn call_context_step_collects_garbage_in_place() {
+    // The script drops 8 MB of strings before the 10 MB allocation.
+    // Under the 16 MB limit, `CallContext::step` must collect that garbage in place.
     let source = "var block = \"x\"\n\
                   for _ in 0..10 { block = block + block }\n\
                   var strings: [str] = []\n\
                   for i in 0..8000 { strings.push(\"\\(i)\" + block) }\n\
                   strings = []\n\
                   print(calls.allocate_after(() => calls.log(\"callback\"), 10 << 20))";
-    for stress in [false, true] {
+    for retry_stress in [false, true] {
         let log = EventLog::default();
-        let (result, stdout) = run(memory_limit(16 << 20).retry_stress(stress), &log, source);
+        let (result, stdout) = run(memory_limit(16 << 20).retry_stress(retry_stress), &log, source);
         result.unwrap();
         assert_eq!(stdout, "10485760\n");
-        assert_eq!(*log.lock(), ["callback"], "retry stress: {stress}");
+        assert_eq!(*log.lock(), ["callback"], "retry stress: {retry_stress}");
     }
 }
 
 #[test]
 fn collector_reclaims_garbage_inside_synchronous_callbacks() {
-    // Each callback leaves 1 MB of garbage. 100 callbacks fit within the 16 MB
-    // limit only if the collector runs during the native call.
+    // 100 callbacks allocate 100 MB of temporary strings in total.
+    // The collector reclaims those strings during the native call under the 16 MB limit.
     let source = "var block = \"x\"\n\
                   for _ in 0..20 { block = block + block }\n\
                   print(calls.apply_sync((n) => (block + \"y\").len() - block.len() + n, 0, 100))";
@@ -511,19 +511,21 @@ fn engine_rejects_suspensions_inside_synchronous_callbacks() {
         ("let _ = calls.knock(\"front\")", "prompt for a permission"),
     ];
     for (body, action) in cases {
-        let prompted = Arc::new(AtomicBool::new(false));
-        let prompted_by_engine = prompted.clone();
+        let was_prompted = Arc::new(AtomicBool::new(false));
+        let was_prompted_flag = was_prompted.clone();
         let config = Config::new()
-            .custom_policy(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow })
+            .custom_policy(
+                |capability: &Capability| if matches!(capability, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow },
+            )
             .prompter(move |_: Capability| {
-                prompted_by_engine.store(true, Ordering::SeqCst);
+                was_prompted_flag.store(true, Ordering::SeqCst);
                 async { PromptAnswer::AllowOnce }
             });
         let source = format!("calls.apply_sync((x) => {{\n{body}\nx\n}}, 0, 1)");
         let (result, _) = run(config, &EventLog::default(), &source);
         let expected = format!("invalid: cannot {action} inside a synchronous native call");
         assert!(matches!(&result, Err(Error::Runtime { message, .. }) if message.contains(&expected)), "{body}: {result:?}");
-        assert!(!prompted.load(Ordering::SeqCst), "{body}");
+        assert!(!was_prompted.load(Ordering::SeqCst), "{body}");
     }
 }
 
@@ -545,18 +547,18 @@ fn engine_rejects_self_cancellation_inside_synchronous_callback() {
 }
 
 #[test]
-fn synchronous_callbacks_continue_after_yield_now() {
+fn engine_continues_synchronous_callback_after_yield_now() {
     assert_eq!(run_ok(Config::new(), "print(calls.apply_sync((x) => {\ntask.yield_now()\nx + 1\n}, 0, 3))"), "3\n");
 }
 
 #[test]
 fn engine_enforces_instruction_and_wall_time_limits_inside_synchronous_callbacks() {
     let source = "calls.apply_sync((x) => {\nvar i = 0\nwhile i >= 0 { i += 1 }\nx\n}, 0, 1)";
-    let limits = [
+    let limit_cases = [
         (Limits { max_instructions: Some(1_000_000), ..Limits::default() }, LimitKind::Instructions),
         (Limits { max_wall_time: Some(Duration::from_millis(50)), ..Limits::default() }, LimitKind::WallTime),
     ];
-    for (limits, kind) in limits {
+    for (limits, kind) in limit_cases {
         let (result, _) = run(Config::new().limits(limits), &EventLog::default(), source);
         assert!(matches!(result, Err(Error::Limit(kind_out)) if kind_out == kind), "{result:?}");
     }
@@ -604,7 +606,9 @@ fn engine_ends_run_if_synchronous_native_call_ignores_callback_error() {
 #[test]
 fn engine_ends_run_if_synchronous_native_call_ignores_step_prompt() {
     let config = Config::new()
-        .custom_policy(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow })
+        .custom_policy(
+            |capability: &Capability| if matches!(capability, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow },
+        )
         .prompter(|_: Capability| async { PromptAnswer::AllowOnce });
     let (result, stdout) = run(config, &EventLog::default(), "calls.knock_and_ignore()\nprint(\"after\")");
     let expected = "invalid: cannot prompt for a permission inside a synchronous native call";
@@ -613,16 +617,17 @@ fn engine_ends_run_if_synchronous_native_call_ignores_step_prompt() {
 }
 
 #[test]
-fn synchronous_callback_loop_uses_constant_memory() {
-    // Rooting every result at 16 bytes per callback would retain 3.2 MB.
+fn call_context_runs_callback_loop_in_constant_memory() {
+    // If `CallContext::call` rooted each 16-byte result, it would retain 3.2 MB.
     let source = "print(calls.apply_sync((x) => x + 1, 0, 200000))";
     assert_eq!(run_ok(memory_limit(2 << 20), source), "200000\n");
 }
 
 #[test]
 fn call_context_releases_roots_on_return() {
-    // 200,000 root slots allocate 4 MiB. Releasing them on return leaves room
-    // for the 2 MiB string under the 5 MiB limit.
+    // `calls.root_many` allocates 4 MiB of root slots. `CallContext::finish`
+    // frees those slots on return. The script can then allocate a 2 MiB string
+    // under the 5 MiB limit.
     let source = "calls.root_many(200000)\n\
                   var block = \"x\"\n\
                   for _ in 0..21 { block = block + block }\n\
@@ -649,15 +654,15 @@ fn scheduler_preempts_task_after_long_synchronous_callback() {
                       junk = \"a\\(i)\" + \"y\"\n\
                   }\n\
                   print(\"main\")";
-    for stress in [false, true] {
-        assert_eq!(run_ok(Config::new().retry_stress(stress), source), "other\nmain\n", "retry stress: {stress}");
+    for retry_stress in [false, true] {
+        assert_eq!(run_ok(Config::new().retry_stress(retry_stress), source), "other\nmain\n", "retry stress: {retry_stress}");
     }
 }
 
-/// Clock that advances by 1 microsecond per reported unit of fuel.
+/// Test clock that adds 1 microsecond per reported unit of fuel.
 struct WorkClock {
     origin: sandlang::platform::Instant,
-    work: std::sync::atomic::AtomicU64,
+    reported_fuel: std::sync::atomic::AtomicU64,
 }
 
 impl sandlang::platform::Clock for WorkClock {
@@ -665,7 +670,7 @@ impl sandlang::platform::Clock for WorkClock {
         sandlang::platform::UNIX_EPOCH
     }
     fn now(&self) -> sandlang::platform::Instant {
-        self.origin + Duration::from_micros(self.work.load(Ordering::SeqCst))
+        self.origin + Duration::from_micros(self.reported_fuel.load(Ordering::SeqCst))
     }
     fn cpu_time(&self) -> Duration {
         Duration::ZERO
@@ -677,13 +682,13 @@ impl sandlang::platform::Clock for WorkClock {
         Box::pin(std::future::ready(()))
     }
     fn work(&self, fuel: u64) {
-        self.work.fetch_add(fuel, Ordering::SeqCst);
+        self.reported_fuel.fetch_add(fuel, Ordering::SeqCst);
     }
 }
 
 #[test]
 fn engine_enforces_wall_time_limit_inside_callbacks_under_host_clock() {
-    let clock = Arc::new(WorkClock { origin: sandlang::platform::Instant::now(), work: Default::default() });
+    let clock = Arc::new(WorkClock { origin: sandlang::platform::Instant::now(), reported_fuel: Default::default() });
     let limits = Limits { max_wall_time: Some(Duration::from_millis(50)), max_instructions: Some(100_000_000), ..Limits::default() };
     let source = "calls.apply_sync((x) => {\nvar i = 0\nwhile i >= 0 { i += 1 }\nx\n}, 0, 1)";
     let (result, _) = run(Config::new().clock(clock).limits(limits), &EventLog::default(), source);

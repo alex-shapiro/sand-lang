@@ -106,8 +106,8 @@ impl Fiber {
     }
 }
 
-/// Maximum Rust stack bytes that nested synchronous callbacks can consume.
-const CALLBACK_STACK_BYTES: usize = 256 << 10;
+/// Rust stack budget in bytes for nested synchronous callbacks.
+const MAX_CALLBACK_STACK_BYTES: usize = 256 << 10;
 
 /// Returns an address on the current Rust stack.
 #[inline(always)]
@@ -118,7 +118,7 @@ fn stack_address() -> usize {
 
 /// The program and native functions that [`Vm::interp`] runs.
 pub(crate) struct ProgramCode {
-    pub prog: Arc<Program>,
+    pub program: Arc<Program>,
     pub natives: Arc<Vec<NativeEntry>>,
 }
 
@@ -322,7 +322,7 @@ impl Vm {
 
     /// Clones the shared program and native-function handles for [`Vm::interp`].
     pub(crate) fn program_code(&self) -> ProgramCode {
-        ProgramCode { prog: self.prog.clone(), natives: self.natives.clone() }
+        ProgramCode { program: self.prog.clone(), natives: self.natives.clone() }
     }
 
     /// Runs `fiber` until it stops or spends `fuel`.
@@ -334,7 +334,7 @@ impl Vm {
         let mut last_retry_site = None;
         loop {
             let used_at_entry = self.meter.used_with_fuel_left(*fuel);
-            let stop = self.interp(&code.prog, &code.natives, fiber, fuel);
+            let stop = self.interp(&code.program, &code.natives, fiber, fuel);
             let Ok(FiberStop::CollectAndRetry(frame)) = stop else { return stop };
             let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
             // Reaching this instruction again crosses a back edge or call that spends fuel.
@@ -382,7 +382,7 @@ impl Vm {
         }
     }
 
-    /// Pushes a [`CALLBACK_PROTO`] frame on `fiber` at `frame_base` to call `callee` with `args`.
+    /// Pushes a [`CALLBACK_PROTO`] frame on `fiber` at `frame_base` for `callee` and `args`.
     fn begin_callback(&mut self, fiber: &mut Fiber, frame_base: usize, callee: VmValue, args: &[VmValue]) -> Result<(), RunEnding> {
         if fiber.frames.len() >= self.host.limits.max_call_depth {
             return Err(self.stack_overflow(fiber));
@@ -399,7 +399,7 @@ impl Vm {
         };
         let mut grow_result = grow_buffers(self, fiber);
         if grow_result.as_ref().is_err_and(|fail| fail.as_limit() == Some(LimitKind::Memory)) {
-            // Root `callee` and `args` across collection before writing them to the stack.
+            // `fiber.stack` does not yet hold `callee` or `args` during stack growth.
             let roots_len = fiber.native_roots.len();
             fiber.native_roots.push(callee);
             fiber.native_roots.extend_from_slice(args);
@@ -426,8 +426,8 @@ impl Vm {
     /// native call.
     ///
     /// `frame_base` is the first stack slot above the active native caller's
-    /// registers. Returns an `"invalid"` run ending if `callee` tries to suspend
-    /// `fiber`. Restores `fiber.frames` and `self.caller_site` before returning.
+    /// registers. Returns an `"invalid"` error if the callback suspends or
+    /// cancels `fiber`. Restores `fiber.frames` and `self.caller_site` on exit.
     pub(crate) fn run_callback(
         &mut self,
         code: &ProgramCode,
@@ -436,7 +436,7 @@ impl Vm {
         callee: VmValue,
         args: &[VmValue],
     ) -> Result<VmValue, RunEnding> {
-        if self.turn_stack_address.saturating_sub(stack_address()) > CALLBACK_STACK_BYTES {
+        if self.turn_stack_address.saturating_sub(stack_address()) > MAX_CALLBACK_STACK_BYTES {
             return Err(self.stack_overflow(fiber));
         }
         let frame_count = fiber.frames.len();
@@ -448,7 +448,7 @@ impl Vm {
         result
     }
 
-    /// Drives bytecode slices on `fiber` until the callback from [`Vm::begin_callback`] returns.
+    /// Drives bytecode slices on `fiber` for the active synchronous callback.
     fn run_callback_slices(&mut self, code: &ProgramCode, fiber: &mut Fiber) -> Result<VmValue, RunEnding> {
         let mut fuel = self.meter.resync();
         let result = loop {
@@ -468,11 +468,11 @@ impl Vm {
                 }
                 FiberStop::YieldNow => continue,
                 FiberStop::Blocked | FiberStop::AsyncNative(_) => ("wait", None),
-                // `call_native` rewinds `frame.ip` to the call instruction before returning `Prompt`.
+                // `call_native` rewound `frame.ip` to the call instruction for `Prompt`.
                 FiberStop::Prompt(_) => ("prompt for a permission", fiber.frames.last().map(|frame| frame.ip + 1)),
                 FiberStop::Cancelled => ("cancel the running task", None),
                 FiberStop::Done(_) | FiberStop::Unwound | FiberStop::CollectAndRetry(_) => {
-                    unreachable!("`CALLBACK_PROTO` catches top-level returns; `run_slice` handles `CollectAndRetry`")
+                    unreachable!("`CALLBACK_PROTO` catches top-level returns. `run_slice` handles `CollectAndRetry`.")
                 }
             };
             break Err(self.synchronous_call_error(fiber, forbidden_action, trace_ip));
@@ -490,7 +490,7 @@ impl Vm {
         .into()
     }
 
-    /// Returns the error for a call that exceeds a call depth limit.
+    /// Builds the `"limit: stack overflow"` trap for `fiber`.
     fn stack_overflow(&self, fiber: &Fiber) -> RunEnding {
         Trap::Error { message: "limit: stack overflow".into(), trace: self.trace_of(fiber, None) }.into()
     }
@@ -623,8 +623,8 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
                 return Ok(Some(FiberStop::Blocked));
             }
             Some(VmRequest::Call { callee, args }) => {
-                let base = fiber.live_top(&vm.prog);
-                vm.begin_callback(fiber, base, callee, &args)?;
+                let frame_base = fiber.live_top(&vm.prog);
+                vm.begin_callback(fiber, frame_base, callee, &args)?;
                 return Ok(None);
             }
             Some(VmRequest::Collect) => {
@@ -701,13 +701,13 @@ fn run_ready<U: DriveUntil>(
                 fiber.state = FiberState::Waiting;
                 vm.fibers[fiber_id as usize] = Some(fiber);
             }
-            FiberStop::Prompt(cap) => {
+            FiberStop::Prompt(capability) => {
                 fiber.state = FiberState::Ready;
                 vm.fibers[fiber_id as usize] = Some(fiber);
                 vm.ready.push_front(fiber_id);
-                return Ok(match stop_policy.stop_on_prompt(&cap) {
+                return Ok(match stop_policy.stop_on_prompt(&capability) {
                     Some(stop) => Pause::Stop(stop),
-                    None => Pause::Prompt(*cap),
+                    None => Pause::Prompt(*capability),
                 });
             }
             FiberStop::Cancelled => {
