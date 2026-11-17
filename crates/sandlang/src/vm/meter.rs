@@ -164,8 +164,7 @@ impl VmMeter {
         self.prior_slices_fuel.get().saturating_add(self.slice_fuel_spent())
     }
 
-    /// Sets the CPU and wall-clock deadlines for the turn. Returns the fuel for
-    /// the first slice.
+    /// Starts a turn's first fuel slice with `cpu_deadline` and `wall_deadline`.
     ///
     /// The scheduler calls this before each fiber turn. The fiber yields
     /// after `SLICE_FUEL` units or stops at `max_instructions`.
@@ -175,15 +174,15 @@ impl VmMeter {
         self.refill_slice()
     }
 
-    /// Reports the current slice's work to the clock. Allocates fuel for the
-    /// next slice under the active deadlines.
+    /// Starts the next fuel slice under the active deadlines. Reports spent
+    /// slice work to the clock.
     pub(crate) fn next_slice(&self) -> i64 {
         self.clock.work(self.slice_fuel_spent());
         self.refill_slice()
     }
 
-    /// Reports the current slice's work to the clock. Sets the remaining slice
-    /// fuel to zero to trigger preemption.
+    /// Ends the current slice with zero remaining fuel. Reports spent slice work
+    /// to the clock.
     pub(crate) fn end_slice(&self) {
         self.clock.work(self.slice_fuel_spent());
         self.prior_slices_fuel.set(self.total_fuel_used());
@@ -198,8 +197,7 @@ impl VmMeter {
         self.prior_slices_fuel.get()
     }
 
-    /// Returns the total fuel spent by the run if the interpreter holds
-    /// `fuel_left` in the current slice.
+    /// Computes total run fuel spent from the interpreter's `fuel_left`.
     pub(crate) fn used_with_fuel_left(&self, fuel_left: i64) -> u64 {
         let remaining = self.remaining_slice_fuel.get() - (self.interpreter_fuel_baseline.get() - fuel_left);
         self.prior_slices_fuel.get().saturating_add(self.slice_initial_fuel.get().saturating_sub(remaining).max(0) as u64)

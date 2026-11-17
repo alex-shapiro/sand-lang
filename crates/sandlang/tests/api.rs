@@ -1857,10 +1857,10 @@ fn natives_take_num_evidence() {
     use sandlang::vm::Fail;
     let module = |decl: &str| {
         let mut m = NativeModule::new("nums");
-        m.function("total", |context: &mut CallContext, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Fail> {
-            let mut acc = num.zero(context)?.raw();
-            for &x in xs.items(&context.vm().heap) {
-                acc = match (acc, x) {
+        m.function("total", |context: &mut CallContext, num: Num<0>, list: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Fail> {
+            let mut accumulator = num.zero(context)?.raw();
+            for &item in list.items(&context.vm().heap) {
+                accumulator = match (accumulator, item) {
                     (sandlang::vm::value::VmValue::Int(a), sandlang::vm::value::VmValue::Int(b)) => {
                         sandlang::vm::value::VmValue::Int(a + b)
                     }
@@ -1870,7 +1870,7 @@ fn natives_take_num_evidence() {
                     _ => return Err(Fail::internal("not a number")),
                 };
             }
-            Ok(Param::from_raw(acc))
+            Ok(Param::from_raw(accumulator))
         });
         m.function("unit", |context: &mut CallContext, num: Num<1>, _: Param<0>, _: Param<1>| num.one(context));
         m.source(decl);

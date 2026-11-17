@@ -32,7 +32,7 @@ impl Signature {
 /// Rust function that [`NativeModule::function`](super::NativeModule::function) registers.
 ///
 /// [`NativeModule::function`](super::NativeModule::function) selects from four
-/// kinds of Rust function based on the signature:
+/// kinds of Rust function by signature:
 ///
 /// ```
 /// # use sandlang::native::NativeModule;
@@ -40,13 +40,13 @@ impl Signature {
 /// # use sandlang::native::ty::VmVal;
 /// # use sandlang::vm::{Fail, Vm};
 /// let mut module = NativeModule::new("text");
-/// module.function("len", |s: &str| s.len() as i64);
-/// module.function("reserve", |vm: &mut Vm, s: String| -> Result<i64, Fail> {
-///     vm.check_memory(s.len())?;
-///     Ok(s.len() as i64)
+/// module.function("len", |text: &str| text.len() as i64);
+/// module.function("reserve", |vm: &mut Vm, text: String| -> Result<i64, Fail> {
+///     vm.check_memory(text.len())?;
+///     Ok(text.len() as i64)
 /// });
-/// module.function("call", |context: &mut CallContext, f: VmVal<fn() -> i64>| -> Result<VmVal<i64>, Fail> {
-///     Ok(VmVal::from_raw(context.call(f.raw(), &[])?))
+/// module.function("call", |context: &mut CallContext, sand_fn: VmVal<fn() -> i64>| -> Result<VmVal<i64>, Fail> {
+///     Ok(VmVal::from_raw(context.call(sand_fn.raw(), &[])?))
 /// });
 /// module.function("fetch", |url: String| async move { url.len() as i64 });
 /// ```
@@ -57,19 +57,18 @@ impl Signature {
 /// - **Synchronous with `&mut Vm` first.** Each parameter after `&mut Vm` is an
 ///   owned [`NativeParam`] type. The return type implements
 ///   [`NativeReturn<Ctl>`]. Check permissions and limits before any side
-///   effect. The engine restarts the function from the start after a
-///   permission prompt or limit-triggered garbage collection. Return a
-///   [`Later`] to suspend the calling task on a future. That future can await
-///   host events or Sand callbacks.
+///   effect. The engine reruns the function after a permission prompt or
+///   limit-triggered garbage collection. [`Later`] suspends the calling task on
+///   a future. That future can await host events or Sand callbacks.
 /// - **Synchronous with `&mut CallContext` first.** The function can call Sand
 ///   functions on the calling task through [`CallContext::call`]. Each
 ///   parameter after `&mut CallContext` is an owned [`NativeParam`] type. The
 ///   return type implements [`NativeReturn<Fail>`]. The engine runs the
-///   function once per call. Use [`CallContext::step`] for in-place garbage
-///   collection on limit errors.
-/// - **Asynchronous.** A function that returns a future suspends only the
-///   calling Sand task. Each parameter is an owned `Send` [`NativeParam`] type.
-///   The future and its output are `Send`. The output implements
+///   function once per call. [`CallContext::step`] retries limit checks in
+///   place after garbage collection.
+/// - **Asynchronous.** The function returns a future. The engine suspends only
+///   the calling Sand task. Each parameter is an owned `Send` [`NativeParam`]
+///   type. The future and its output are `Send`. The output implements
 ///   [`NativeReturn<Fail>`].
 ///
 /// The compiler rejects borrowed parameters in a `&mut Vm` function:
@@ -110,10 +109,12 @@ impl Signature {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a native function",
     note = "each parameter must implement `NativeParam`",
-    note = "`&mut Vm` or `&mut CallContext` must come first, followed by owned parameter types",
-    note = "return `Later` from a `&mut Vm` function to suspend the calling task",
+    note = "place `&mut Vm` or `&mut CallContext` first",
+    note = "parameters after `&mut Vm` or `&mut CallContext` must be owned types",
+    note = "a `&mut Vm` function suspends the calling task with `Later`",
     note = "an async function requires `Send` parameters, future, and output",
-    note = "synchronous functions return `HostError`; `&mut CallContext` functions and futures return `HostError<Fail>`",
+    note = "plain synchronous and `&mut Vm` functions return `HostError`",
+    note = "`&mut CallContext` functions and futures return `HostError<Fail>`",
     note = "a function takes at most 12 parameters"
 )]
 pub trait NativeFunction<Kind>: Send + Sync + 'static {

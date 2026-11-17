@@ -39,8 +39,8 @@ impl HostFn {
     #[inline(always)]
     pub fn call(&self, vm: &mut Vm, fiber: &mut Fiber, args_end: usize) -> Result<VmValue, Ctl> {
         match self {
-            HostFn::Static(f) => f(vm, fiber, args_end),
-            HostFn::Shared(f) => f(vm, fiber, args_end),
+            HostFn::Static(native_fn) => native_fn(vm, fiber, args_end),
+            HostFn::Shared(native_fn) => native_fn(vm, fiber, args_end),
         }
     }
 }
@@ -153,10 +153,11 @@ impl Fail {
 
     /// Reports that the run exceeded `kind`.
     ///
-    /// On [`LimitKind::Memory`], the engine collects garbage before retrying a
-    /// `&mut Vm` function or a `step` closure once. A
-    /// [`CallContext`](crate::native::context::CallContext) function outside
-    /// `step` runs once without retry.
+    /// On [`LimitKind::Memory`], the engine collects garbage. It then retries a
+    /// plain synchronous function, a `&mut Vm` function, or a `step` closure
+    /// once. Outside `step`, the engine ends a
+    /// [`CallContext`](crate::native::context::CallContext) call on the first
+    /// limit error.
     #[cold]
     pub fn limit(kind: LimitKind) -> Fail {
         Fail(Box::new(FailKind::Limit(kind)))
@@ -366,7 +367,7 @@ pub struct Fiber {
     pub waiters_prune_at: usize,
     /// Active async native calls on this fiber, ordered from outermost to innermost.
     pub(crate) native_calls: Vec<sched::ActiveNativeCall>,
-    /// Heap values rooted by active [`CallContext`](crate::native::context::CallContext) calls on this fiber.
+    /// Garbage-collection roots for active [`CallContext`](crate::native::context::CallContext) calls on this fiber.
     pub(crate) native_roots: Vec<VmValue>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
