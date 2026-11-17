@@ -747,14 +747,13 @@ struct FnDef {
 /// [`HostModules::new`](crate::engine::HostModules::new) checks all
 /// declarations against the registered Rust signatures.
 ///
-/// The VM re-runs a registered function from the start after a permission
-/// prompt or after a garbage collection triggered by a memory or resource
-/// limit. Check permissions with [`Vm::require`], reserve memory, and acquire
-/// resource slots before performing any side effect. The VM never re-runs a
-/// function that takes [`CallContext`](context::CallContext), because that
-/// function can call Sand. Avoid panicking on script input. The engine catches
-/// panics and aborts the run with
-/// [`Error::Internal`](crate::engine::Error::Internal).
+/// The VM restarts a synchronous or `&mut Vm` function from the start after a
+/// permission prompt or a limit-triggered garbage collection. Check permissions
+/// with [`Vm::require`], reserve memory, and acquire resource slots before any
+/// side effect. A [`CallContext`](context::CallContext) function runs once per
+/// call. Use [`CallContext::step`](context::CallContext::step) to retry limit
+/// checks in place. Avoid panicking on script input. The engine catches panics
+/// and aborts the run with [`Error::Internal`](crate::engine::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {
     name: String,

@@ -2166,10 +2166,10 @@ function signature:
   calling task. Its parameters, future, and future output are owned `Send`
   types.
 
-The compiler rejects a borrowed parameter in a function that takes `&mut Vm` or
-returns a future. The garbage collector can free a heap object during a wait.
-Each VM handle type is therefore `!Send`. The compiler rejects VM handles in
-these places:
+The compiler rejects a borrowed parameter in a function that takes `&mut Vm`,
+takes `&mut CallContext`, or returns a future. The garbage collector can free a
+heap object during a wait. Each VM handle type is therefore `!Send`. The
+compiler rejects VM handles in these places:
 
 - a parameter or output of an async native function
 - the future of `Later::new`
@@ -2206,25 +2206,35 @@ blocks.
 `NativeContext` keeps rooted values and callback results alive until the native
 call returns.
 
-`CallContext::call` runs a Sand function on the Rust stack of the calling
-task. The callee runs to completion and blocks the host thread until it
-returns. It cannot suspend: if it waits for a timer, a task, a channel, or an
-async native function, prompts for a permission, or cancels its own task, the
-run ends with an `invalid` error. `task.yield_now()` returns at once. An error,
-a limit, or `exit` in the callee ends the run with the trace of the callee and
-its callers, even if the native function ignores the error. The result of
-`call` stays valid until the next `call` or `step`. `CallContext::root` keeps a
-value until the native function returns. `CallContext::vm` gives read access.
-Changes to the VM happen in `CallContext::step`, which retries a memory or
-resource check after an in-place garbage collection.
+A function with `&mut CallContext` first runs once per call on the calling
+task. A limit error outside `CallContext::step` ends the run without retrying
+the function. `CallContext` provides four operations:
 
-The engine runs a `CallContext` function only once, because the function can
-have called Sand. A limit error outside `step` therefore ends the run, and the
-function cannot prompt for a permission. In both contexts, a callback of a
-closure uses two frames toward `max_call_depth`, and a callback of a native
-function uses one. Nested callbacks can use 256 KiB of the Rust stack. A
-deeper callback fails with `limit: stack overflow`. An optimized build of the
-engine needs a thread with at least 512 KiB of stack.
+- `vm()` returns `&Vm` for shared read access.
+- `root(value)` keeps a heap value alive until the native call returns. It
+  returns a `RootedValue` handle. `value(rooted)` reads that `VmValue` from the
+  call's root stack.
+- `step(f)` runs `f` with `&mut Vm` under automatic retry for limit errors.
+  After a memory or resource limit error, the engine collects garbage in place
+  before running `f` again. A permission request inside `f` ends the run with
+  an `"invalid"` error.
+- `call(callee, args)` runs a Sand function with at most 255 arguments to
+  completion on the host thread. Its returned `VmValue` stays valid until the
+  next `call` or `step`. `task.yield_now()` inside `callee` returns
+  immediately. `callee` must complete without suspending the task. If `callee`
+  waits, prompts for a permission, or cancels the running task, the engine ends
+  the run with an `"invalid"` error.
+
+If `callee` or `step` ends the run through an error, a limit, or `exit`,
+`CallContext` records that outcome and its stack trace. Subsequent `call` and
+`step` calls return the same error. After the native function returns, the
+engine ends the run with that recorded outcome.
+
+In both `NativeContext` and `CallContext`, calling a Sand closure uses two
+frames toward `max_call_depth`. Calling a native function uses a single frame.
+Nested synchronous callbacks can consume up to 256 KiB of the Rust stack.
+Exceeding either limit fails the run with `limit: stack overflow`. Run an
+optimized build of the engine on a thread with at least 512 KiB of stack.
 
 Bound the recursion depth of any async native function. The engine charges only
 the top-level future and its root table against `max_memory`. A recursive async

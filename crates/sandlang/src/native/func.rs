@@ -65,7 +65,8 @@ impl Signature {
 ///   functions on the calling task through [`CallContext::call`]. Each
 ///   parameter after `&mut CallContext` is an owned [`NativeParam`] type. The
 ///   return type implements [`NativeReturn<Fail>`]. The engine runs the
-///   function only once: it can neither suspend nor prompt for a permission.
+///   function once per call. Use [`CallContext::step`] for in-place garbage
+///   collection on limit errors.
 /// - **Asynchronous.** A function that returns a future suspends only the
 ///   calling Sand task. Each parameter is an owned `Send` [`NativeParam`] type.
 ///   The future and its output are `Send`. The output implements
@@ -108,10 +109,11 @@ impl Signature {
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a native function",
-    note = "each parameter must implement `NativeParam`, and the return type must implement `NativeReturn<Ctl>`",
-    note = "`&mut Vm` or `&mut CallContext` must be the first parameter, each parameter after it must be an owned type, and the function must return a `Later` to wait",
-    note = "an async function must have `Send` parameters, future, and output, and cannot hold a VM handle such as `VmVal` across a wait",
-    note = "a `&mut Vm` function returns `HostError`, and a `&mut CallContext` function or a future returns `HostError<Fail>`",
+    note = "each parameter must implement `NativeParam`",
+    note = "`&mut Vm` or `&mut CallContext` must come first, followed by owned parameter types",
+    note = "return `Later` from a `&mut Vm` function to suspend the calling task",
+    note = "an async function requires `Send` parameters, future, and output",
+    note = "synchronous functions return `HostError`; `&mut CallContext` functions and futures return `HostError<Fail>`",
     note = "a function takes at most 12 parameters"
 )]
 pub trait NativeFunction<Kind>: Send + Sync + 'static {

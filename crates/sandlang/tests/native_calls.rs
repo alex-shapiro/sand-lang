@@ -120,8 +120,8 @@ fn calls_module(log: &EventLog) -> NativeModule {
         let _ = context.call(callback.raw(), &[]);
         7
     });
-    // `Heap::new_str` makes no memory check, so under `retry_stress` the first
-    // check is the stack growth for the callback frame.
+    // `Heap::new_str` allocates directly without a limit check. Under
+    // `retry_stress`, growing the callback stack triggers the first collection.
     module.function("call_with_fresh", |context: &mut CallContext, callback: VmVal<fn(String) -> String>| -> Result<String, Fail> {
         let fresh = context.step(|vm| -> Result<_, Fail> { Ok(vm.heap.new_str("fresh")) })?;
         let result = context.call(callback.raw(), &[fresh])?;
@@ -464,7 +464,7 @@ fn synchronous_callbacks_nest_through_native_calls() {
 }
 
 #[test]
-fn deep_synchronous_callbacks_end_with_a_limit_error_on_a_small_stack() {
+fn engine_enforces_rust_stack_budget_across_nested_synchronous_callbacks() {
     let source = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply_sync(down, n - 1, 1) + 1 } }\nprint(down(100000))";
     let limits = Limits { max_call_depth: 1_000_000, ..Limits::default() };
     let deep_run = move || run(Config::new().limits(limits), &EventLog::default(), source).0;
@@ -473,7 +473,7 @@ fn deep_synchronous_callbacks_end_with_a_limit_error_on_a_small_stack() {
 }
 
 #[test]
-fn synchronous_native_allocates_after_in_place_collection_and_runs_callbacks_once() {
+fn call_context_step_collects_garbage_in_place_without_rerunning_callbacks() {
     // `strings = []` leaves 8 MB unreachable. The 10 MB allocation fits within
     // the 16 MB limit only if `CallContext::step` collects garbage in place.
     let source = "var block = \"x\"\n\
@@ -492,7 +492,7 @@ fn synchronous_native_allocates_after_in_place_collection_and_runs_callbacks_onc
 }
 
 #[test]
-fn collector_runs_inside_synchronous_callbacks_under_a_memory_limit() {
+fn collector_reclaims_garbage_inside_synchronous_callbacks() {
     // Each callback leaves 1 MB of garbage. 100 callbacks fit within the 16 MB
     // limit only if the collector runs during the native call.
     let source = "var block = \"x\"\n\
@@ -502,7 +502,7 @@ fn collector_runs_inside_synchronous_callbacks_under_a_memory_limit() {
 }
 
 #[test]
-fn every_suspension_in_a_synchronous_callback_ends_the_run() {
+fn engine_rejects_suspensions_inside_synchronous_callbacks() {
     let cases = [
         ("task.sleep(1ms)", "wait"),
         ("calls.wait_ms(1)", "wait"),
@@ -528,7 +528,7 @@ fn every_suspension_in_a_synchronous_callback_ends_the_run() {
 }
 
 #[test]
-fn self_cancellation_in_a_synchronous_callback_ends_the_run() {
+fn engine_rejects_self_cancellation_inside_synchronous_callback() {
     let source = "let ch: Channel<Task<int>> = Channel()\n\
                   let t = spawn {\n\
                       let me = ch.recv().unwrap()\n\
@@ -550,7 +550,7 @@ fn synchronous_callbacks_continue_after_yield_now() {
 }
 
 #[test]
-fn instruction_and_wall_time_limits_hold_inside_synchronous_callbacks() {
+fn engine_enforces_instruction_and_wall_time_limits_inside_synchronous_callbacks() {
     let source = "calls.apply_sync((x) => {\nvar i = 0\nwhile i >= 0 { i += 1 }\nx\n}, 0, 1)";
     let limits = [
         (Limits { max_instructions: Some(1_000_000), ..Limits::default() }, LimitKind::Instructions),
@@ -558,12 +558,12 @@ fn instruction_and_wall_time_limits_hold_inside_synchronous_callbacks() {
     ];
     for (limits, kind) in limits {
         let (result, _) = run(Config::new().limits(limits), &EventLog::default(), source);
-        assert!(matches!(result, Err(Error::Limit(k)) if k == kind), "{result:?}");
+        assert!(matches!(result, Err(Error::Limit(kind_out)) if kind_out == kind), "{result:?}");
     }
 }
 
 #[test]
-fn synchronous_callback_errors_include_the_outer_caller_in_the_trace() {
+fn engine_includes_outer_caller_in_synchronous_callback_error_trace() {
     let source = "fn divide(x: int) -> int { x / 0 }\nfn outer() -> int { calls.apply_sync(divide, 1, 1) }\nprint(outer())";
     let (result, _) = run(Config::new(), &EventLog::default(), source);
     let Err(Error::Runtime { trace, .. }) = result else { panic!("{result:?}") };
@@ -580,7 +580,7 @@ fn engine_exits_run_from_synchronous_callback() {
 }
 
 #[test]
-fn rooted_callback_results_stay_alive_until_the_native_returns() {
+fn collector_keeps_rooted_values_across_synchronous_callbacks() {
     let source = "print(calls.collect_sync((i) => {\n\
                       var junk: [str] = []\n\
                       for j in 0..200 { junk.push(\"garbage \\(j)\") }\n\
@@ -592,7 +592,7 @@ fn rooted_callback_results_stay_alive_until_the_native_returns() {
 }
 
 #[test]
-fn engine_ends_the_run_when_a_native_ignores_a_callback_run_ending() {
+fn engine_ends_run_if_synchronous_native_call_ignores_callback_error() {
     let (result, stdout) = run(Config::new(), &EventLog::default(), "calls.ignore_errors(() => exit(3))\nprint(\"after\")");
     assert_eq!((result.unwrap(), stdout.as_str()), (3, ""));
 
@@ -602,7 +602,7 @@ fn engine_ends_the_run_when_a_native_ignores_a_callback_run_ending() {
 }
 
 #[test]
-fn engine_ends_the_run_when_a_native_ignores_a_prompt_in_step() {
+fn engine_ends_run_if_synchronous_native_call_ignores_step_prompt() {
     let config = Config::new()
         .custom_policy(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow })
         .prompter(|_: Capability| async { PromptAnswer::AllowOnce });
@@ -613,15 +613,16 @@ fn engine_ends_the_run_when_a_native_ignores_a_prompt_in_step() {
 }
 
 #[test]
-fn callback_loops_in_a_native_use_constant_memory() {
-    // Rooting each result would hold 16 bytes per callback, 3.2 MB in all.
+fn synchronous_callback_loop_uses_constant_memory() {
+    // Rooting every result at 16 bytes per callback would retain 3.2 MB.
     let source = "print(calls.apply_sync((x) => x + 1, 0, 200000))";
     assert_eq!(run_ok(memory_limit(2 << 20), source), "200000\n");
 }
 
 #[test]
-fn a_native_frees_its_roots_when_it_returns() {
-    // 200,000 roots take 4 MiB, which leaves too little of the limit for the string.
+fn call_context_releases_roots_on_return() {
+    // 200,000 root slots allocate 4 MiB. Releasing them on return leaves room
+    // for the 2 MiB string under the 5 MiB limit.
     let source = "calls.root_many(200000)\n\
                   var block = \"x\"\n\
                   for _ in 0..21 { block = block + block }\n\
@@ -630,12 +631,12 @@ fn a_native_frees_its_roots_when_it_returns() {
 }
 
 #[test]
-fn callback_arguments_stay_alive_while_the_callback_frame_grows() {
+fn collector_keeps_callback_arguments_alive_during_stack_growth() {
     assert_eq!(run_ok(Config::new().retry_stress(true), "print(calls.call_with_fresh((s) => s + \"!\"))"), "fresh!\n");
 }
 
 #[test]
-fn long_synchronous_callbacks_let_other_tasks_run() {
+fn scheduler_preempts_task_after_long_synchronous_callback() {
     let source = "fn spin(n: int) -> int {\n\
                       var i = 0\n\
                       while i < n { i += 1 }\n\
@@ -653,7 +654,7 @@ fn long_synchronous_callbacks_let_other_tasks_run() {
     }
 }
 
-/// A clock that advances by 1 µs for each unit of fuel that the engine reports.
+/// Clock that advances by 1 microsecond per reported unit of fuel.
 struct WorkClock {
     origin: sandlang::platform::Instant,
     work: std::sync::atomic::AtomicU64,
@@ -681,7 +682,7 @@ impl sandlang::platform::Clock for WorkClock {
 }
 
 #[test]
-fn wall_time_limit_holds_inside_callbacks_under_a_host_clock() {
+fn engine_enforces_wall_time_limit_inside_callbacks_under_host_clock() {
     let clock = Arc::new(WorkClock { origin: sandlang::platform::Instant::now(), work: Default::default() });
     let limits = Limits { max_wall_time: Some(Duration::from_millis(50)), max_instructions: Some(100_000_000), ..Limits::default() };
     let source = "calls.apply_sync((x) => {\nvar i = 0\nwhile i >= 0 { i += 1 }\nx\n}, 0, 1)";

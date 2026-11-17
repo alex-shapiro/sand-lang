@@ -227,7 +227,7 @@ stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::R
 
 ### Calling Sand functions
 
-A native function can call a Sand function that the script passes to it. Take `&mut CallContext` as the first parameter and call `CallContext::call`. The Sand function runs on the calling task and returns before the native function continues:
+A native function can call a Sand function that the script passes to it. Take `&mut CallContext` as the first parameter. Call `CallContext::call` to run the Sand function on the calling task:
 
 ```rust
 use sandlang::native::NativeModule;
@@ -237,17 +237,17 @@ use sandlang::vm::Fail;
 
 let mut calls = NativeModule::new("calls");
 calls.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
-calls.function("twice", |cx: &mut CallContext, f: VmVal<fn(Param<0>) -> Param<0>>, x: Param<0>| -> Result<Param<0>, Fail> {
-    let once = cx.call(f.raw(), &[x.raw()])?;
-    Ok(Param::from_raw(cx.call(f.raw(), &[once])?))
+calls.function("twice", |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, input: Param<0>| -> Result<Param<0>, Fail> {
+    let once = context.call(sand_fn.raw(), &[input.raw()])?;
+    Ok(Param::from_raw(context.call(sand_fn.raw(), &[once])?))
 });
 ```
 
-The garbage collector can free any heap value during `call`, including the result of an earlier `call`. Keep values across a call with `CallContext::root`. Change the VM inside `CallContext::step`, which collects garbage and retries if the heap is full.
+Pass a `VmValue` to `CallContext::root` to keep it across `CallContext::call` or `CallContext::step`. Garbage collection during either method can free any unrooted heap value, including an earlier callback result. Allocate heap values or resources inside `CallContext::step`. On a memory or resource limit, `step` collects garbage before running its closure again.
 
-The Sand function runs to completion and blocks the host thread until it returns, so set `max_wall_time` or `max_cpu_time` for untrusted scripts. It cannot wait for I/O, a timer, or another task, prompt for a permission, or cancel its own task. If it tries, the run ends with an error. The engine never runs a `CallContext` function a second time, so the function itself cannot prompt for a permission either. A native function that must wait or prompt while Sand code runs can return a `Later` future and call Sand through `NativeContext::call`.
+Each callback runs to completion on the host thread. Set `max_wall_time` or `max_cpu_time` for untrusted scripts. A `CallContext` function and its callbacks must complete without suspending the task. Waiting, prompting for a permission, or cancelling the running task ends the run with an error. To await host I/O or permission prompts between Sand callbacks, return a `Later` future and use `NativeContext::call`.
 
-Nested callbacks can use 256 KiB of the Rust stack: about 100 levels in an optimized build, and fewer than 10 in an unoptimized build. Build the engine with optimizations, and run it on a thread with at least 512 KiB of stack.
+Build the engine with optimizations. Run it on a thread with at least 512 KiB of stack. Nested callbacks can use up to 256 KiB of the Rust stack. That budget fits about 100 nested callbacks in an optimized build and fewer than 10 in an unoptimized build.
 
 ### Checking permissions
 

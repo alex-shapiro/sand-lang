@@ -1749,10 +1749,11 @@ impl Vm {
         None
     }
 
-    /// Calls a native; `Ok(None)` to continue, `Ok(Some(exit))` to suspend.
-    /// The native reads its arguments from the fiber's stack. The running
-    /// fiber is not in `self.fibers`. A native that exhausts the slice's fuel
-    /// preempts the task once it returns.
+    /// Calls native function `n` with arguments on `fiber.stack`.
+    ///
+    /// Returns `Ok(None)` to continue bytecode execution or `Ok(Some(stop))` to
+    /// stop the slice. Returns `Ok(Some(FiberStop::Preempt))` if the call
+    /// exhausts the slice's fuel.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn call_native(
@@ -2001,7 +2002,8 @@ impl Vm {
         self.heap.append_text(cur, &s).map_err(Fail::limit)
     }
 
-    /// Invokes a native function.
+    /// Calls native function `n`. The scheduler catches panics around each
+    /// fiber turn in `crate::unwind`.
     #[inline(always)]
     fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, fiber: &mut Fiber, args_end: usize) -> Result<VmValue, Ctl> {
         let entry = &natives[n as usize];

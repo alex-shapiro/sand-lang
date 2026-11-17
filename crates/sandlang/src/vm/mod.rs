@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use value::*;
 
-/// Type-erased native function. Its arguments are the stack slots of the
-/// calling fiber that end before slot `args_end`.
+/// Type-erased native function. The third argument is the exclusive end index
+/// of the call's arguments on [`Fiber::stack`].
 pub type NativeFn = dyn Fn(&mut Vm, &mut Fiber, usize) -> Result<VmValue, Ctl> + Send + Sync;
 
 #[derive(Clone)]
@@ -131,8 +131,9 @@ pub(crate) enum FailKind {
     /// Host interrupt (see `VmMeter::check_limits`).
     Interrupted,
     Exit(i32),
-    /// Run ending of a Sand callback, with its trace (see
-    /// [`CallContext::call`](crate::native::context::CallContext::call)).
+    /// Terminal run ending recorded during
+    /// [`CallContext::call`](crate::native::context::CallContext::call) or
+    /// [`CallContext::step`](crate::native::context::CallContext::step).
     Ended(RunEnding),
 }
 
@@ -150,12 +151,15 @@ impl Fail {
         Fail(Box::new(FailKind::Internal(msg.into())))
     }
 
-    /// Reports that the run exceeded limit `k`. If a native call or a `step`
-    /// returns [`LimitKind::Memory`], the engine collects garbage and retries
-    /// it once. A `CallContext` function runs only once.
+    /// Reports that the run exceeded `kind`.
+    ///
+    /// On [`LimitKind::Memory`], the engine collects garbage before retrying a
+    /// `&mut Vm` function or a `step` closure once. A
+    /// [`CallContext`](crate::native::context::CallContext) function outside
+    /// `step` runs once without retry.
     #[cold]
-    pub fn limit(k: LimitKind) -> Fail {
-        Fail(Box::new(FailKind::Limit(k)))
+    pub fn limit(kind: LimitKind) -> Fail {
+        Fail(Box::new(FailKind::Limit(kind)))
     }
 
     /// Reports that the host interrupted the engine.
@@ -362,8 +366,7 @@ pub struct Fiber {
     pub waiters_prune_at: usize,
     /// Active async native calls on this fiber, ordered from outermost to innermost.
     pub(crate) native_calls: Vec<sched::ActiveNativeCall>,
-    /// Values that the active synchronous native calls on this fiber keep
-    /// alive (see [`CallContext::root`](crate::native::context::CallContext::root)).
+    /// Heap values rooted by active [`CallContext`](crate::native::context::CallContext) calls on this fiber.
     pub(crate) native_roots: Vec<VmValue>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
