@@ -409,6 +409,7 @@ impl<'a> CallContext<'a> {
         if let Some(ending) = &self.run_ending {
             return Err(Fail::from(ending.clone()).into());
         }
+        let stress_armed = self.vm.heap.fail_next_check.get();
         let mut has_collected = false;
         let result = loop {
             self.vm.heap.fail_next_check.set(self.vm.retry_stress && !has_collected);
@@ -425,7 +426,7 @@ impl<'a> CallContext<'a> {
                 }
             }
         };
-        self.vm.heap.fail_next_check.set(false);
+        self.vm.heap.fail_next_check.set(stress_armed);
         result
     }
 
