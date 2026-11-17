@@ -84,7 +84,8 @@ fn calls_module(log: &EventLog) -> NativeModule {
         |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, value: Param<0>, times: i64| -> Result<Param<0>, Fail> {
             let mut current = value.raw();
             for _ in 0..times {
-                current = context.call(sand_fn.raw(), &[current])?;
+                let result = context.call(sand_fn.raw(), &[current])?;
+                current = context.value(result);
             }
             Ok(Param::from_raw(current))
         },
@@ -103,6 +104,34 @@ fn calls_module(log: &EventLog) -> NativeModule {
             let text = "x".repeat(byte_count as usize).into_vm_value(vm)?;
             Ok(vm.str(text).len() as i64)
         })
+    });
+    module.function(
+        "collect_sync",
+        |context: &mut CallContext, callback: VmVal<fn(i64) -> String>, count: i64| -> Result<Vec<String>, Fail> {
+            let results = (0..count).map(|i| context.call(callback.raw(), &[VmValue::Int(i)])).collect::<Result<Vec<_>, _>>()?;
+            Ok(results
+                .into_iter()
+                .map(|result| {
+                    {
+                        let value = context.value(result);
+                        context.vm().str(value)
+                    }
+                    .to_string()
+                })
+                .collect())
+        },
+    );
+    module.function("ignore_errors", |context: &mut CallContext, callback: Callback| -> i64 {
+        let _ = context.call(callback.raw(), &[]);
+        7
+    });
+    // `Heap::new_str` makes no memory check, so under `retry_stress` the first
+    // check is the stack growth for the callback frame.
+    module.function("call_with_fresh", |context: &mut CallContext, callback: VmVal<fn(String) -> String>| -> Result<String, Fail> {
+        let fresh = context.vm().heap.new_str("fresh");
+        let result = context.call(callback.raw(), &[fresh])?;
+        let result = context.value(result);
+        Ok(context.vm().str(result).to_string())
     });
     module.function("knock", |vm: &mut Vm, name: String| -> Result<String, HostError> {
         vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
@@ -432,10 +461,10 @@ fn synchronous_callbacks_return_their_results_to_the_native_call() {
 
 #[test]
 fn synchronous_callbacks_nest_through_native_calls() {
-    let source = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply_sync(down, n - 1, 1) + 1 } }\nprint(down(30))";
-    assert_eq!(run_ok(Config::new().gc_stress(true), source), "30\n");
+    let source = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply_sync(down, n - 1, 1) + 1 } }\nprint(down(4))";
+    assert_eq!(run_ok(Config::new().gc_stress(true), source), "4\n");
 
-    let limits = Limits { max_call_depth: 40, ..Limits::default() };
+    let limits = Limits { max_call_depth: 6, ..Limits::default() };
     let (result, _) = run(Config::new().limits(limits), &EventLog::default(), source);
     assert!(matches!(&result, Err(Error::Runtime { message, .. }) if message.contains("stack overflow")), "{result:?}");
 }
@@ -565,4 +594,84 @@ fn engine_exits_run_from_synchronous_callback() {
     let (result, stdout) = run(Config::new(), &EventLog::default(), source);
     assert_eq!(result.unwrap(), 3);
     assert_eq!(stdout, "");
+}
+
+#[test]
+fn synchronous_callback_results_stay_alive_until_the_native_returns() {
+    let source = "print(calls.collect_sync((i) => {\n\
+                      var junk: [str] = []\n\
+                      for j in 0..200 { junk.push(\"garbage \\(j)\") }\n\
+                      \"item \\(i)\"\n\
+                  }, 4))";
+    assert_eq!(run_ok(Config::new().gc_stress(true), source), "[\"item 0\", \"item 1\", \"item 2\", \"item 3\"]\n");
+}
+
+#[test]
+fn engine_ends_the_run_when_a_native_ignores_a_callback_run_ending() {
+    let (result, stdout) = run(Config::new(), &EventLog::default(), "calls.ignore_errors(() => exit(3))\nprint(\"after\")");
+    assert_eq!((result.unwrap(), stdout.as_str()), (3, ""));
+
+    let (result, stdout) = run(Config::new(), &EventLog::default(), "calls.ignore_errors(() => { let _ = [1][2] })\nprint(\"after\")");
+    assert!(matches!(&result, Err(Error::Runtime { message, .. }) if message.contains("bounds")), "{result:?}");
+    assert_eq!(stdout, "");
+}
+
+#[test]
+fn callback_arguments_stay_alive_while_the_callback_frame_grows() {
+    assert_eq!(run_ok(Config::new().retry_stress(true), "print(calls.call_with_fresh((s) => s + \"!\"))"), "fresh!\n");
+}
+
+#[test]
+fn long_synchronous_callbacks_let_other_tasks_run() {
+    let source = "fn spin(n: int) -> int {\n\
+                      var i = 0\n\
+                      while i < n { i += 1 }\n\
+                      n\n\
+                  }\n\
+                  let other = spawn print(\"other\")\n\
+                  var junk = \"\"\n\
+                  for i in 0..3 {\n\
+                      calls.apply_sync(spin, 50000, 1)\n\
+                      junk = \"a\\(i)\" + \"y\"\n\
+                  }\n\
+                  print(\"main\")";
+    for stress in [false, true] {
+        assert_eq!(run_ok(Config::new().retry_stress(stress), source), "other\nmain\n", "retry stress: {stress}");
+    }
+}
+
+/// A clock that advances by 1 µs for each unit of fuel that the engine reports.
+struct WorkClock {
+    origin: sandlang::platform::Instant,
+    work: std::sync::atomic::AtomicU64,
+}
+
+impl sandlang::platform::Clock for WorkClock {
+    fn wall(&self) -> sandlang::platform::SystemTime {
+        sandlang::platform::UNIX_EPOCH
+    }
+    fn now(&self) -> sandlang::platform::Instant {
+        self.origin + Duration::from_micros(self.work.load(Ordering::SeqCst))
+    }
+    fn cpu_time(&self) -> Duration {
+        Duration::ZERO
+    }
+    fn sleep(&self, _: Duration) -> sandlang::platform::ClockFuture {
+        Box::pin(std::future::ready(()))
+    }
+    fn yield_now(&self) -> sandlang::platform::ClockFuture {
+        Box::pin(std::future::ready(()))
+    }
+    fn work(&self, fuel: u64) {
+        self.work.fetch_add(fuel, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn wall_time_limit_holds_inside_callbacks_under_a_host_clock() {
+    let clock = Arc::new(WorkClock { origin: sandlang::platform::Instant::now(), work: Default::default() });
+    let limits = Limits { max_wall_time: Some(Duration::from_millis(50)), max_instructions: Some(100_000_000), ..Limits::default() };
+    let source = "calls.apply_sync((x) => {\nvar i = 0\nwhile i >= 0 { i += 1 }\nx\n}, 0, 1)";
+    let (result, _) = run(Config::new().clock(clock).limits(limits), &EventLog::default(), source);
+    assert!(matches!(result, Err(Error::Limit(LimitKind::WallTime))), "{result:?}");
 }

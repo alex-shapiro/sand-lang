@@ -107,19 +107,22 @@ impl Fiber {
     }
 }
 
+/// Rust stack bytes that nested synchronous callbacks can use: half of a
+/// 512 KiB thread stack.
+const CALLBACK_STACK_BYTES: usize = 256 << 10;
+
+/// Returns an address on the current Rust stack.
+#[inline(always)]
+fn stack_address() -> usize {
+    let marker = 0u8;
+    std::ptr::from_ref(std::hint::black_box(&marker)).addr()
+}
+
 /// The program and native functions that [`Vm::interp`] runs.
 pub(crate) struct ProgramCode {
     pub program: Arc<Program>,
     pub natives: Arc<Vec<NativeEntry>>,
 }
-
-/// Maximum number of Sand callbacks that synchronous native calls nest on the
-/// Rust stack. Nested callbacks use at most half of a 512 KiB thread stack.
-pub(crate) const MAX_NESTED_CALLBACKS: usize = (256 << 10) / NESTED_CALLBACK_STACK_BYTES;
-
-/// Rust stack bytes for each nested callback, measured in a release build.
-/// The test profile uses 2,320 bytes.
-const NESTED_CALLBACK_STACK_BYTES: usize = 2368;
 
 /// Maximum interpreter slices between clock readings.
 const CLOCK_SLICES: u32 = 32;
@@ -332,14 +335,14 @@ impl Vm {
     fn run_slice(&mut self, code: &ProgramCode, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
         let mut last_retry_site = None;
         loop {
-            let entry_fuel = *fuel;
+            let used_at_entry = self.meter.used_with(*fuel);
             let stop = self.interp(&code.program, &code.natives, fiber, fuel);
             let Ok(FiberStop::CollectAndRetry(frame)) = stop else { return stop };
             let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
             // Reaching this instruction again crosses a back edge or call that spends fuel.
             // Equal fuel here means the retry itself exceeded `max_memory`.
             let retry_site = (fiber.frames.len(), frame.ip);
-            if last_retry_site == Some(retry_site) && entry_fuel - *fuel <= tick {
+            if last_retry_site == Some(retry_site) && self.meter.used_with(*fuel) - used_at_entry <= tick as u64 {
                 return Err(Trap::Limit(LimitKind::Memory).into());
             }
             last_retry_site = Some(retry_site);
@@ -412,7 +415,12 @@ impl Vm {
         };
         let mut grown = grow(self, fiber);
         if grown.as_ref().is_err_and(|fail| fail.as_limit() == Some(LimitKind::Memory)) {
+            // The callee and the arguments are not on the stack yet.
+            let roots_len = fiber.native_roots.len();
+            fiber.native_roots.push(callee);
+            fiber.native_roots.extend_from_slice(args);
             self.collect_all_garbage(Some(fiber));
+            fiber.native_roots.truncate(roots_len);
             grown = grow(self, fiber);
         }
         if let Err(fail) = grown {
@@ -456,19 +464,17 @@ impl Vm {
         callee: VmValue,
         args: &[VmValue],
     ) -> Result<VmValue, Fail> {
-        if self.nested_callbacks >= MAX_NESTED_CALLBACKS {
+        if self.turn_stack_address.saturating_sub(stack_address()) > CALLBACK_STACK_BYTES {
             return Err(self.stack_overflow(fiber).into());
         }
         let frame_count = fiber.frames.len();
-        // The native calls of the callee replace the state of the active native call.
-        let (collected, caller_site) = (std::mem::take(&mut self.collected), self.caller_site);
-        self.nested_callbacks += 1;
+        // The native calls of the callee replace the call site of the active native call.
+        let caller_site = self.caller_site;
         let result = match self.begin_callback(fiber, base, callee, args) {
             Ok(()) => self.finish_callback(code, fiber),
             Err(ending) => Err(ending.into()),
         };
-        self.nested_callbacks -= 1;
-        (self.collected, self.caller_site) = (collected, caller_site);
+        self.caller_site = caller_site;
         fiber.frames.truncate(frame_count);
         result
     }
@@ -682,7 +688,7 @@ fn run_ready<U: DriveUntil>(
             continue;
         }
         vm.current = fiber_id;
-        let used_before = vm.meter.total_fuel_used();
+        vm.turn_stack_address = stack_address();
         // Set meter deadlines for time-limit checks inside long native calls.
         let mut fuel = vm.meter.start_slice(timer.cpu_deadline(vm.host.limits.max_cpu_time), vm.deadline);
         // Catch panics once per turn. Report each panic as an internal error.
@@ -691,8 +697,7 @@ fn run_ready<U: DriveUntil>(
             Err(Trap::Internal { message, trace: vm.trace_of(&fiber, None) }.into())
         });
         vm.meter.flush_interpreter_fuel(fuel);
-        // Synchronous native calls can start more slices during the turn.
-        timer.ran(vm.meter.total_fuel_used() - used_before);
+        timer.ran(vm.meter.slice_fuel_spent());
         // Share current heap usage with background I/O readers for `max_memory` checks.
         let used = vm.heap.used_bytes();
         vm.heap.io_memory.publish_heap(used);

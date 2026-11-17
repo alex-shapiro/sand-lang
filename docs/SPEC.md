@@ -2199,36 +2199,29 @@ operations:
   native future again. The engine polls timers or other `select!` branches
   inside the native future only after `callee` returns.
 
-Each callback uses two frames toward `max_call_depth`. On task cancellation
-during a callback, the engine runs the callee's `defer` blocks before dropping
-the native future. It then runs the caller's `defer` blocks.
+On task cancellation during a callback, the engine runs the callee's `defer`
+blocks before dropping the native future. It then runs the caller's `defer`
+blocks.
 
 The engine keeps rooted values and callback results alive until the native call
 returns.
 
-`CallContext` gives a synchronous native function the VM and the calling
-task:
+`CallContext::call` runs a Sand function on the Rust stack of the calling
+task. The callee runs to completion and blocks the host thread until it
+returns. It cannot suspend: if it waits for a timer, a task, a channel, or an
+async native function, prompts for a permission, or cancels its own task, the
+run ends with an `invalid` error. `task.yield_now()` returns at once. An error,
+a limit, or `exit` in the callee ends the run with the trace of the callee and
+its callers, even if the native function ignores the error. `call` roots its
+result until the native function returns. `CallContext::step` retries a memory
+or resource check after an in-place garbage collection.
 
-- `vm()` returns `&mut Vm`.
-- `call(callee, args)` runs a Sand function with at most 255 arguments on the
-  Rust stack and returns its result. The callee cannot suspend. If it waits for
-  a timer, a task, a channel, or an async native function, prompts for a
-  permission, or cancels its own task, the run ends with an `invalid` error.
-  `task.yield_now()` returns at once. The callee runs under the same limits as
-  other code. An error or `exit` in the callee ends the run with the stack
-  trace of the callee and its callers.
-- `root(value)` and `value(rooted)` keep a heap value alive until the native
-  function returns, as in `NativeContext`.
-- `step(f)` runs `f` with `&mut Vm`. After a memory or resource limit error,
-  the engine collects garbage and runs `f` again. A permission request ends the
-  run with an `invalid` error.
-
-The engine runs a `CallContext` function only once. It does not run it again
-after a permission prompt or a garbage collection, because the function can
-have called Sand. A limit error from the function therefore ends the run. Each
-callback uses two frames toward `max_call_depth`. Callbacks of synchronous
-native functions nest at most 110 levels deep on the Rust stack. A deeper
-callback fails with `limit: stack overflow`.
+The engine runs a `CallContext` function only once, because the function can
+have called Sand. A limit error outside `step` therefore ends the run, and the
+function cannot prompt for a permission. In both contexts, a callback of a
+closure uses two frames toward `max_call_depth`, and a callback of a native
+function uses one. Nested callbacks can use 256 KiB of the Rust stack. A
+deeper callback fails with `limit: stack overflow`.
 
 Bound the recursion depth of any async native function. The engine charges only
 the top-level future and its root table against `max_memory`. A recursive async

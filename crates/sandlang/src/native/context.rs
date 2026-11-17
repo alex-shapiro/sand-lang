@@ -8,7 +8,7 @@ use crate::policy::Capability;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::sched::ProgramCode;
 use crate::vm::value::{Obj, VmValue};
-use crate::vm::{Ctl, CtlKind, Fail, Fiber, SharedVm, Vm, WaitKind};
+use crate::vm::{Ctl, CtlKind, Fail, Fiber, RunEnding, SharedVm, Vm, WaitKind};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
@@ -311,7 +311,9 @@ fn attempt_step<R, E: NativeError>(
 /// module.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
 /// module.function("twice", |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, input: Param<0>| -> Result<Param<0>, Fail> {
 ///     let once = context.call(sand_fn.raw(), &[input.raw()])?;
-///     Ok(Param::from_raw(context.call(sand_fn.raw(), &[once])?))
+///     let once = context.value(once);
+///     let twice = context.call(sand_fn.raw(), &[once])?;
+///     Ok(Param::from_raw(context.value(twice)))
 /// });
 /// ```
 pub struct CallContext<'a> {
@@ -319,15 +321,22 @@ pub struct CallContext<'a> {
     fiber: &'a mut Fiber,
     /// Length of `fiber.native_roots` at the start of the call.
     roots_start: usize,
+    /// Fuel that the run used before the slice of the call started.
+    slice_base: u64,
     /// The VM code and the first stack slot of each callback frame. The first
     /// callback sets them, because they stay the same during the call.
     callbacks: Option<(ProgramCode, usize)>,
+    /// Run ending of the first callback that ended the run.
+    ending: Option<RunEnding>,
 }
 
 impl<'a> CallContext<'a> {
     pub(crate) fn new(vm: &'a mut Vm, fiber: &'a mut Fiber) -> CallContext<'a> {
-        let roots_start = fiber.native_roots.len();
-        CallContext { vm, fiber, roots_start, callbacks: None }
+        // A retry after a failed argument conversion sets `collected`, which
+        // callbacks and `step` must not see.
+        vm.collected = false;
+        let (roots_start, slice_base) = (fiber.native_roots.len(), vm.meter.slice_base());
+        CallContext { vm, fiber, roots_start, slice_base, callbacks: None, ending: None }
     }
 
     /// Returns the [`Vm`].
@@ -342,22 +351,33 @@ impl<'a> CallContext<'a> {
     }
 
     /// Calls the Sand function `callee` with `args` on the calling task, and
-    /// returns its result.
+    /// returns its rooted result.
     ///
-    /// `callee` runs until it returns. It cannot suspend: if it waits, prompts
-    /// for a permission, or cancels its own task, the run ends with an error.
-    /// Propagate the error with `?`. It holds the run ending of `callee`, with
-    /// its stack trace.
+    /// `callee` runs until it returns, and blocks the host thread until then.
+    /// It cannot suspend: if it waits, prompts for a permission, or cancels
+    /// its own task, the run ends with an error. The error holds the run
+    /// ending of `callee`, with its stack trace. After a run ending, every
+    /// later `call` and `step` returns it, and the engine ends the run with
+    /// it whatever the native function returns.
     ///
     /// # Panics
     ///
     /// Panics if `args.len()` exceeds 255.
     #[inline]
-    pub fn call(&mut self, callee: VmValue, args: &[VmValue]) -> Result<VmValue, Fail> {
+    pub fn call(&mut self, callee: VmValue, args: &[VmValue]) -> Result<RootedValue, Fail> {
         assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
+        if let Some(ending) = &self.ending {
+            return Err(ending.clone().into());
+        }
         let (vm, fiber) = (&mut *self.vm, &mut *self.fiber);
         let (code, base) = self.callbacks.get_or_insert_with(|| (vm.program_code(), fiber.live_top(&vm.prog)));
-        vm.run_callback(code, fiber, *base, callee, args)
+        match vm.run_callback(code, fiber, *base, callee, args) {
+            Ok(result) => Ok(self.root(result)),
+            Err(fail) => {
+                self.ending = fail.ending().cloned();
+                Err(fail)
+            }
+        }
     }
 
     /// Keeps `value` alive until this native call returns. Returns its handle.
@@ -369,11 +389,7 @@ impl<'a> CallContext<'a> {
         RootedValue((roots.len() - 1) as u32)
     }
 
-    /// Returns the [`VmValue`] for `rooted`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `rooted` comes from a native call that returned.
+    /// Returns the [`VmValue`] for `rooted`, a handle from this context.
     pub fn value(&self, rooted: RootedValue) -> VmValue {
         self.fiber.native_roots[rooted.0 as usize]
     }
@@ -385,6 +401,9 @@ impl<'a> CallContext<'a> {
     /// again. A permission request ends the run with an error, because the
     /// engine cannot prompt the user inside a synchronous native call.
     pub fn step<R, E: NativeError>(&mut self, mut f: impl FnMut(&mut Vm) -> Result<R, E>) -> Result<R, E::FutureError> {
+        if let Some(ending) = &self.ending {
+            return Err(Fail::from(ending.clone()).into());
+        }
         let mut collected = false;
         let result = loop {
             self.vm.heap.fail_next_check.set(self.vm.retry_stress && !collected);
@@ -407,10 +426,17 @@ impl<'a> CallContext<'a> {
     /// Converts the `output` of the native function into its Sand return value.
     ///
     /// Converts an error into a run ending, so that the engine does not run
-    /// the native function again.
+    /// the native function again. If a callback started a slice, ends that
+    /// slice, so that the scheduler preempts the calling task.
     pub(crate) fn finish(self, output: impl NativeReturn<Fail>) -> Result<VmValue, Ctl> {
-        let CallContext { vm, fiber, roots_start, .. } = self;
+        let CallContext { vm, fiber, roots_start, slice_base, ending, .. } = self;
         fiber.native_roots.truncate(roots_start);
+        if vm.meter.slice_base() != slice_base {
+            vm.meter.end_slice();
+        }
+        if let Some(ending) = ending {
+            return Err(Fail::from(ending).into());
+        }
         vm.unchecked(|vm| output.into_call_result(vm))
             .map_err(|fail| Fail::from(vm.run_ending_of(fail, |vm| vm.trace_of(fiber, None))).into())
     }
@@ -427,7 +453,9 @@ impl<const N: u8> Num<N> {
         self.call_method(context, 1)
     }
 
-    /// Calls the native function in `slot` of the `Num` dictionary.
+    /// Calls the native function in `slot` of the `Num` dictionary. The checker
+    /// allows only the prelude's native `Num` impls, which cannot fail or
+    /// suspend, so the call skips the checks of a call from bytecode.
     fn call_method(self, context: &mut CallContext, slot: usize) -> Result<Param<N>, Fail> {
         let vm = &mut *context.vm;
         let method = match vm.heap.get(self.raw()) {

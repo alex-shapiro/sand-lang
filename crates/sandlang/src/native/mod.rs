@@ -752,8 +752,8 @@ struct FnDef {
 /// limit. Check permissions with [`Vm::require`], reserve memory, and acquire
 /// resource slots before performing any side effect. The VM never re-runs a
 /// function that takes [`CallContext`](context::CallContext), because that
-/// function can call Sand. Avoid panicking on script
-/// input. The engine catches panics and aborts the run with
+/// function can call Sand. Avoid panicking on script input. The engine catches
+/// panics and aborts the run with
 /// [`Error::Internal`](crate::engine::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {
