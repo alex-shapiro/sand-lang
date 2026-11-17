@@ -337,8 +337,8 @@ impl Vm {
             let stop = self.interp(&code.program, &code.natives, fiber, fuel);
             let Ok(FiberStop::CollectAndRetry(frame)) = stop else { return stop };
             let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
-            // Reaching this instruction again crosses a back edge or call that spends fuel.
-            // Equal fuel here means the retry itself exceeded `max_memory`.
+            // The interpreter spends more than `tick` fuel to reach `retry_site` again through a loop or call.
+            // Otherwise, the retried instruction hit `max_memory` again.
             let retry_site = (fiber.frames.len(), frame.ip);
             if last_retry_site == Some(retry_site) && self.meter.used_with_fuel_left(*fuel) - used_at_entry <= tick as u64 {
                 return Err(Trap::Limit(LimitKind::Memory).into());

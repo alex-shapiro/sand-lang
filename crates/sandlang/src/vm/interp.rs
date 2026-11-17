@@ -614,8 +614,8 @@ impl Vm {
         if fiber.pending_error.is_some() {
             return Err(self.raise_pending_error(fiber));
         }
-        // As few values as possible stay live across the loop, so that the
-        // register allocator keeps `code`, `ip`, `regs` and fuel in registers.
+        // Keep few locals live across the dispatch loop. The register allocator
+        // can then keep the hot loop state in registers.
         let fr = *fiber.frames.last().unwrap();
         let protos: &[Proto] = &prog.protos;
         let mut code: &[Op] = &protos[fr.proto as usize].code;
@@ -1771,9 +1771,8 @@ impl Vm {
         let mut r = Self::invoke_native(self, natives, n, fiber, start + argc);
         self.heap.fail_next_check.set(false);
         if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
-            // Native functions check memory and resource limits before garbage
-            // collection. Collect all garbage, refund the failed attempt's
-            // fuel, and retry the call once.
+            // Native functions check memory and resource limits before any side effect.
+            // The VM can therefore retry the call once after garbage collection.
             self.collect_all_garbage(Some(fiber));
             self.meter.refund_to(fuel_at_call);
             r = match self.meter.check() {
