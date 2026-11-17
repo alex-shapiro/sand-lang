@@ -821,12 +821,12 @@ fn lists(m: &mut NativeModule) {
         Ok(new_set(vm, set))
     });
     fn fold_num(context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>, product: bool) -> Result<Param<0>, Fail> {
-        let len = list_len(context.vm(), xs);
-        context.step(|vm| produce(vm, len, 0))?;
         let mut acc = if product { num.one(context)? } else { num.zero(context)? }.raw();
         let vm = context.vm();
-        let items = xs.items(&vm.heap).to_vec();
-        for x in items {
+        let len = list_len(vm, xs);
+        vm.charge(len as u64)?;
+        for i in 0..len {
+            let x = xs.items(&vm.heap)[i];
             acc = vm.arith(if product { 2 } else { 0 }, acc, x)?;
         }
         Ok(Param::from_raw(acc))
