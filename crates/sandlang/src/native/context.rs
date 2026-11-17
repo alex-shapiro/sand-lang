@@ -294,6 +294,9 @@ fn attempt_step<R, E: NativeError>(
     }
 }
 
+/// Root slots that a task keeps for its next synchronous native call.
+const MAX_IDLE_ROOTS: usize = 1024;
+
 /// VM and callback handle for a synchronous native function.
 ///
 /// [`NativeModule::function`](super::NativeModule::function) passes a
@@ -368,11 +371,10 @@ impl<'a> CallContext<'a> {
         }
         let (vm, fiber) = (&mut *self.vm, &mut *self.fiber);
         let (code, base) = self.callbacks.get_or_insert_with(|| (vm.program_code(), fiber.live_top(&vm.prog)));
-        let result = vm.run_callback(code, fiber, *base, callee, args);
-        if let Err(fail) = &result {
-            self.ending = fail.ending().cloned();
-        }
-        result
+        vm.run_callback(code, fiber, *base, callee, args).map_err(|ending| {
+            self.ending = Some(ending.clone());
+            ending.into()
+        })
     }
 
     /// Keeps `value` alive until this native call returns. Returns its handle.
@@ -427,6 +429,10 @@ impl<'a> CallContext<'a> {
     pub(crate) fn finish(self, output: impl NativeReturn<Fail>) -> Result<VmValue, Ctl> {
         let CallContext { vm, fiber, roots_start, slice_base, ending, .. } = self;
         fiber.native_roots.truncate(roots_start);
+        if roots_start == 0 && fiber.native_roots.capacity() > MAX_IDLE_ROOTS {
+            vm.heap.fiber_bytes = vm.heap.fiber_bytes.saturating_sub(fiber.native_roots.capacity() * std::mem::size_of::<VmValue>());
+            fiber.native_roots = Vec::new();
+        }
         if vm.meter.slice_base() != slice_base {
             vm.meter.end_slice();
         }

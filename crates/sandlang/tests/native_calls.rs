@@ -89,13 +89,10 @@ fn calls_module(log: &EventLog) -> NativeModule {
             Ok(Param::from_raw(current))
         },
     );
-    // Allocate `"kept"` before the callback to keep it alive only through `CallContext::root`.
-    module.function("keep_sync", |context: &mut CallContext, callback: Callback| -> Result<String, Fail> {
-        let kept = context.step(|vm| "kept".into_vm_value(vm))?;
-        let kept = context.root(kept);
-        context.call(callback.raw(), &[])?;
-        let kept = context.value(kept);
-        Ok(context.vm().str(kept).to_string())
+    module.function("root_many", |context: &mut CallContext, count: i64| {
+        for i in 0..count {
+            context.root(VmValue::Int(i));
+        }
     });
     module.function("allocate_after", |context: &mut CallContext, callback: Callback, byte_count: i64| -> Result<i64, Fail> {
         context.call(callback.raw(), &[])?;
@@ -476,17 +473,6 @@ fn deep_synchronous_callbacks_end_with_a_limit_error_on_a_small_stack() {
 }
 
 #[test]
-fn synchronous_callbacks_keep_rooted_values_alive() {
-    let source = "print(calls.keep_sync(() => {\n\
-                      var xs: [str] = []\n\
-                      for i in 0..2000 { xs.push(\"garbage \\(i)\") }\n\
-                  }))";
-    for config in [Config::new().gc_stress(true), Config::new().retry_stress(true)] {
-        assert_eq!(run_ok(config, source), "kept\n");
-    }
-}
-
-#[test]
 fn synchronous_native_allocates_after_in_place_collection_and_runs_callbacks_once() {
     // `strings = []` leaves 8 MB unreachable. The 10 MB allocation fits within
     // the 16 MB limit only if `CallContext::step` collects garbage in place.
@@ -600,7 +586,9 @@ fn rooted_callback_results_stay_alive_until_the_native_returns() {
                       for j in 0..200 { junk.push(\"garbage \\(j)\") }\n\
                       \"item \\(i)\"\n\
                   }, 4))";
-    assert_eq!(run_ok(Config::new().gc_stress(true), source), "[\"item 0\", \"item 1\", \"item 2\", \"item 3\"]\n");
+    for config in [Config::new().gc_stress(true), Config::new().retry_stress(true)] {
+        assert_eq!(run_ok(config, source), "[\"item 0\", \"item 1\", \"item 2\", \"item 3\"]\n");
+    }
 }
 
 #[test]
@@ -629,6 +617,16 @@ fn callback_loops_in_a_native_use_constant_memory() {
     // Rooting each result would hold 16 bytes per callback, 3.2 MB in all.
     let source = "print(calls.apply_sync((x) => x + 1, 0, 200000))";
     assert_eq!(run_ok(memory_limit(2 << 20), source), "200000\n");
+}
+
+#[test]
+fn a_native_frees_its_roots_when_it_returns() {
+    // 200,000 roots take 4 MiB, which leaves too little of the limit for the string.
+    let source = "calls.root_many(200000)\n\
+                  var block = \"x\"\n\
+                  for _ in 0..21 { block = block + block }\n\
+                  print(block.len())";
+    assert_eq!(run_ok(memory_limit(5 << 20), source), "2097152\n");
 }
 
 #[test]

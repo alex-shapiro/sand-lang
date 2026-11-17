@@ -180,15 +180,6 @@ impl Fail {
     pub(crate) fn into_kind(self) -> FailKind {
         *self.0
     }
-
-    /// Returns the run ending that `self` holds, if `self` comes from a Sand
-    /// callback.
-    pub(crate) fn ending(&self) -> Option<&RunEnding> {
-        match &*self.0 {
-            FailKind::Ended(ending) => Some(ending),
-            _ => None,
-        }
-    }
 }
 
 impl Ctl {
