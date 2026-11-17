@@ -1,6 +1,7 @@
 //! Round-robin fiber scheduler for bytecode slices and async native calls.
 
 use super::interp::FiberStop;
+use super::meter::code_fuel_surcharge;
 use super::*;
 use crate::engine::LimitKind;
 use crate::native::context::VmRequest;
@@ -381,16 +382,30 @@ impl Vm {
     }
 
     /// Pushes a [`CALLBACK_PROTO`] frame on `fiber` to call `callee` with `args`.
+    ///
+    /// The trampoline's `CallR` calls a native or iterator `callee`. A closure
+    /// `callee` gets its own frame here, which saves the interpreter a
+    /// dispatch of `CallR`.
     fn begin_callback(&mut self, fiber: &mut Fiber, base: usize, callee: VmValue, args: &[VmValue]) -> Result<(), RunEnding> {
-        if fiber.frames.len() >= self.host.limits.max_call_depth {
+        let closure = match (callee, self.heap.get(callee)) {
+            (VmValue::Obj(handle), Obj::Closure(proto, captures)) => {
+                Some((handle, &self.prog.protos[*proto as usize], *proto, !captures.is_empty()))
+            }
+            _ => None,
+        };
+        let frame_count = 1 + usize::from(closure.is_some());
+        if fiber.frames.len() + frame_count > self.host.limits.max_call_depth {
             return Err(self.stack_overflow(fiber));
         }
-        let need = base + 1 + MAX_CALLBACK_ARGS;
+        let callee_regs = closure.map_or(0, |(_, proto, ..)| proto.nregs as usize);
+        let need = base + 1 + MAX_CALLBACK_ARGS.max(callee_regs);
+        let closure =
+            closure.map(|(handle, proto, id, captures)| (handle, id, proto.nparams as usize, code_fuel_surcharge(proto.code.len()), captures));
         let grow = |vm: &mut Vm, fiber: &mut Fiber| -> Result<(), Fail> {
             if fiber.stack.len() < need {
                 fiber.grow_stack(need, &mut vm.heap)?;
             }
-            if fiber.frames.len() == fiber.frames.capacity() {
+            if fiber.frames.capacity() - fiber.frames.len() < frame_count {
                 fiber.grow_frames(&mut vm.heap)?;
             }
             Ok(())
@@ -408,13 +423,21 @@ impl Vm {
         for (i, &arg) in args.iter().enumerate() {
             fiber.stack[base + 1 + i] = arg;
         }
-        fiber.frames.push(Frame {
-            proto: CALLBACK_PROTO,
-            ip: Proto::callback_entry(args.len()),
-            base: base as u32,
-            ret: base as u32,
-            closure: NO_CLOSURE,
-        });
+        let entry = Proto::callback_entry(args.len());
+        let Some((handle, proto, nparams, entry_fuel, captures)) = closure else {
+            fiber.frames.push(Frame { proto: CALLBACK_PROTO, ip: entry, base: base as u32, ret: base as u32, closure: NO_CLOSURE });
+            return Ok(());
+        };
+        // Charge the fuel of the trampoline's `CallR`, and resume after it on return.
+        const CALL_FUEL: i64 = super::interp::call_tick(Op::CallR { callee: 0, base: 1, dst: 0, argc: 0 });
+        if let Err(fail) = self.meter.charge((CALL_FUEL + entry_fuel) as u64) {
+            return Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
+        }
+        fiber.frames.push(Frame { proto: CALLBACK_PROTO, ip: entry + 1, base: base as u32, ret: base as u32, closure: NO_CLOSURE });
+        fiber.frames.push(Frame { proto, ip: 0, base: (base + 1) as u32, ret: base as u32, closure: handle });
+        if captures {
+            super::interp::load_captures(&self.heap, handle, &mut fiber.stack[base + 1 + nparams..]);
+        }
         Ok(())
     }
 
