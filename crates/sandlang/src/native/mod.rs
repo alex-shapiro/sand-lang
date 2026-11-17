@@ -12,14 +12,14 @@ use crate::types::ValueTypeInfo;
 use crate::value::{StructDesc, StructValue, Value, VariantDesc, VariantValue, qualified_name, qualified_name_module};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
-use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
+use crate::vm::{Fail, HostFn, NativeFn, Vm};
 use convert::{Conversion, FromVmValue, mismatch};
 use func::{NativeFunction, Signature};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
-use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, VmVal};
+use ty::{Channel, Range, Reflect, SandType, Task, Type, VmVal};
 
 /// A Rust type bound to a nominal Sand type in a [`NativeModule`].
 ///
@@ -589,28 +589,6 @@ impl<const N: u8> Reflect<N> {
 /// Method names of the prelude `Num` trait in dictionary slot order.
 pub(crate) const NUM_METHODS: [&str; 2] = ["zero", "one"];
 
-impl<const N: u8> Num<N> {
-    /// Returns the additive identity (`0` or `0.0`) for type parameter `N`.
-    pub fn zero(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
-        self.call_method(vm, 0)
-    }
-
-    /// Returns the multiplicative identity (`1` or `1.0`) for type parameter `N`.
-    pub fn one(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
-        self.call_method(vm, 1)
-    }
-
-    fn call_method(self, vm: &mut Vm, slot: usize) -> Result<Param<N>, Ctl> {
-        let f = match vm.heap.get(self.raw()) {
-            Obj::Tuple(slots) => slots.get(slot).map(|&f| vm.heap.get(f)),
-            _ => None,
-        };
-        let Some(&Obj::NativeFn(n)) = f else { return Err(Fail::internal("a native function expected `Num` evidence").into()) };
-        let f = vm.natives[n as usize].f.clone();
-        f.call(vm, &[]).map(Param::from_raw)
-    }
-}
-
 impl VmVal<String> {
     pub fn str(self, heap: &Heap) -> &str {
         heap.str(self.raw())
@@ -759,21 +737,23 @@ struct FnDef {
 /// `import <name>`.
 ///
 /// The engine infers the Sand signature of each registered function from its
-/// Rust parameter and return types. It exports functions that are absent from
-/// [`NativeModule::source`] as `pub native fn`. [`NativeModule::params`] sets
-/// their parameter names, which default to `arg1`, `arg2`, and so on.
-/// Registering a function as `"Type.name"` defines a method on `Type`. The
-/// method takes `self` if its first parameter has type `Type`. Use `native fn`
-/// declarations in [`NativeModule::source`] to specify default parameter
+/// Rust parameter and return types. It exports functions absent from
+/// [`NativeModule::source`] as `pub native fn`. Default parameter names are
+/// `arg1`, `arg2`, and higher. [`NativeModule::params`] overrides those
+/// parameter names. A function name of `"Type.name"` defines a method on
+/// `Type`. The method takes `self` if its first parameter has type `Type`.
+/// Declare `native fn` items in [`NativeModule::source`] for default parameter
 /// values or generic type parameters.
 /// [`HostModules::new`](crate::engine::HostModules::new) checks all
 /// declarations against the registered Rust signatures.
 ///
-/// The VM re-runs a registered function from the start after a permission
-/// prompt or after a garbage collection triggered by a memory or resource
-/// limit. Check permissions with [`Vm::require`], reserve memory, and acquire
-/// resource slots before performing any side effect. Avoid panicking on script
-/// input. The engine catches panics and aborts the run with
+/// The VM reruns a plain synchronous or `&mut Vm` function after a permission
+/// prompt or limit-triggered garbage collection. Check permissions, memory
+/// limits, and resource limits before any side effect. [`Vm::require`] checks a
+/// sandbox capability. The VM runs a [`CallContext`](context::CallContext)
+/// function once per call. [`CallContext::step`](context::CallContext::step)
+/// retries limit checks in place. Return an error on invalid script input. The
+/// engine catches Rust panics. It then aborts the run with
 /// [`Error::Internal`](crate::engine::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {

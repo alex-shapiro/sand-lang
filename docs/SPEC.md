@@ -2144,26 +2144,30 @@ values. `NativeModule` and `HostModules::new` panic if a module, type, or
 function name is invalid or duplicated. `NativeModule::new` also panics if a
 module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 
-| Method                       | Registered item                                                             |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| `function(name, f)`          | Rust function or closure `f`                                                |
-| `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                    |
-| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function |
+| Method                       | Registered item                                         |
+| ---------------------------- | ------------------------------------------------------- |
+| `function(name, f)`          | Rust function or closure `f`                            |
+| `bind::<T>()`                | Rust type `T` with a derived `NamedType`                |
+| `params(names)`, `doc(text)` | parameter names and documentation for the last function |
 
-`NativeModule::function` accepts three kinds of Rust function, selected by the
-function signature:
+`NativeModule::function` selects from four kinds of Rust function by signature:
 
 - **Synchronous.** Each parameter can borrow `&str`, `&[u8]`, or `&T` from the
   VM heap.
-- **Synchronous with `&mut Vm` first.** A synchronous function that accesses
-  the VM. Each parameter after `&mut Vm` is an owned type or a VM handle such
-  as `VmVal<T>`.
-- **Asynchronous.** A function that returns a future and suspends only the
+- **Synchronous with `&mut Vm` first.** The function accesses the VM
+  synchronously. Each parameter after `&mut Vm` is an owned type or a VM handle
+  such as `VmVal<T>`.
+- **Synchronous with `&mut CallContext` first.** The function can call Sand
+  functions synchronously on the calling task. Each parameter after
+  `&mut CallContext` is an owned type or a VM handle. It returns an
+  `IntoVmValue` type, `Result<T, Fail>`, or `Result<T, HostError<Fail>>`.
+- **Asynchronous.** The function returns a future. The engine suspends only the
   calling task. Its parameters, future, and future output are owned `Send`
   types.
 
-The compiler rejects a borrowed parameter in a function that takes `&mut Vm` or
-returns a future. The garbage collector can free a heap object during a wait.
+Only plain synchronous functions can borrow parameters from the VM heap. The
+compiler rejects borrowed parameters in `&mut Vm`, `&mut CallContext`, and
+async functions. The garbage collector can free a heap object during a wait.
 Each VM handle type is therefore `!Send`. The compiler rejects VM handles in
 these places:
 
@@ -2195,12 +2199,43 @@ operations:
   native future again. The engine polls timers or other `select!` branches
   inside the native future only after `callee` returns.
 
-Each callback uses two frames toward `max_call_depth`. On task cancellation
-during a callback, the engine runs the callee's `defer` blocks before dropping
-the native future. It then runs the caller's `defer` blocks.
+On task cancellation during an async callback, the engine runs the callee's
+`defer` blocks. It then drops the native future. Finally, it runs the caller's
+`defer` blocks.
 
-The engine keeps rooted values and callback results alive until the native call
-returns.
+`NativeContext` keeps rooted values and callback results alive until the native
+call returns.
+
+The engine runs a `CallContext` function once per call on the calling task. If
+the function returns a limit error, the engine ends the run immediately.
+`CallContext` provides four operations:
+
+- `vm()` returns `&Vm` for shared read access.
+- `root(value)` keeps a heap value alive until the native call returns. It
+  returns a `RootedValue` handle. `value(rooted)` reads that `VmValue` from the
+  call's root stack.
+- `step(f)` runs `f` with `&mut Vm` under automatic retry for limit errors.
+  After a memory or resource limit error, the engine collects garbage in place.
+  It then runs `f` again. The engine rejects any permission prompt inside `f`
+  with an `"invalid"` error.
+- `call(callee, args)` runs a Sand function with at most 255 arguments to
+  completion on the host thread. The garbage collector preserves the returned
+  `VmValue` until the next `call` or `step`. Inside `callee`,
+  `task.yield_now()` returns `()` immediately. During `callee`, the engine
+  rejects task waits, permission prompts, and self-cancellation with an
+  `"invalid"` error.
+
+`CallContext` records any run-ending outcome from `call` and any prompt error
+from `step`. Later `call` and `step` calls return that recorded `Fail`. After
+the native function returns, the engine ends the run with that recorded
+outcome.
+
+In both `NativeContext` and `CallContext`, the engine counts two frames toward
+`max_call_depth` for a Sand closure callback. It counts a single frame for a
+native function callback. The engine also caps synchronous callbacks at 256 KiB
+of Rust stack. If a call exceeds either limit, the engine ends the run with
+`limit: stack overflow`. Build the engine with optimizations. Run it on a
+thread with at least 512 KiB of stack.
 
 Bound the recursion depth of any async native function. The engine charges only
 the top-level future and its root table against `max_memory`. A recursive async

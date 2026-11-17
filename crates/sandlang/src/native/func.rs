@@ -1,10 +1,10 @@
 //! Traits and types for registering Rust functions in a [`NativeModule`](super::NativeModule).
 
-use super::context::{AsyncNativeCall, NativeContext};
+use super::context::{AsyncNativeCall, CallContext, NativeContext};
 use super::convert::{Conversion, FromVmValue, HostError, IntoVmValue, ok_vm_value};
 use super::ty::{SandType, Type};
 use crate::vm::value::VmValue;
-use crate::vm::{Ctl, Fail, NativeFn, Vm, WaitKind};
+use crate::vm::{Ctl, Fail, Fiber, NativeFn, Vm, WaitKind};
 use std::future::Future;
 
 /// Sand parameter and return types derived from a Rust function signature.
@@ -31,17 +31,22 @@ impl Signature {
 
 /// Rust function that [`NativeModule::function`](super::NativeModule::function) registers.
 ///
-/// [`NativeModule::function`](super::NativeModule::function) selects from three
-/// kinds of Rust function based on the signature:
+/// [`NativeModule::function`](super::NativeModule::function) selects from four
+/// kinds of Rust function by signature:
 ///
 /// ```
 /// # use sandlang::native::NativeModule;
+/// # use sandlang::native::context::CallContext;
+/// # use sandlang::native::ty::VmVal;
 /// # use sandlang::vm::{Fail, Vm};
 /// let mut module = NativeModule::new("text");
-/// module.function("len", |s: &str| s.len() as i64);
-/// module.function("reserve", |vm: &mut Vm, s: String| -> Result<i64, Fail> {
-///     vm.check_memory(s.len())?;
-///     Ok(s.len() as i64)
+/// module.function("len", |text: &str| text.len() as i64);
+/// module.function("reserve", |vm: &mut Vm, text: String| -> Result<i64, Fail> {
+///     vm.check_memory(text.len())?;
+///     Ok(text.len() as i64)
+/// });
+/// module.function("call", |context: &mut CallContext, sand_fn: VmVal<fn() -> i64>| -> Result<VmVal<i64>, Fail> {
+///     Ok(VmVal::from_raw(context.call(sand_fn.raw(), &[])?))
 /// });
 /// module.function("fetch", |url: String| async move { url.len() as i64 });
 /// ```
@@ -52,16 +57,22 @@ impl Signature {
 /// - **Synchronous with `&mut Vm` first.** Each parameter after `&mut Vm` is an
 ///   owned [`NativeParam`] type. The return type implements
 ///   [`NativeReturn<Ctl>`]. Check permissions and limits before any side
-///   effect. The engine restarts the function from the start after a
-///   permission prompt or limit-triggered garbage collection. Return a
-///   [`Later`] to suspend the calling task on a future. That future can await
-///   host events or Sand callbacks.
-/// - **Asynchronous.** A function that returns a future suspends only the
-///   calling Sand task. Each parameter is an owned `Send` [`NativeParam`] type.
-///   The future and its output are `Send`. The output implements
+///   effect. The engine reruns the function after a permission prompt or
+///   limit-triggered garbage collection. [`Later`] suspends the calling task on
+///   a future. That future can await host events or Sand callbacks.
+/// - **Synchronous with `&mut CallContext` first.** The function can call Sand
+///   functions on the calling task through [`CallContext::call`]. Each
+///   parameter after `&mut CallContext` is an owned [`NativeParam`] type. The
+///   return type implements [`NativeReturn<Fail>`]. The engine runs the
+///   function once per call. [`CallContext::step`] retries limit checks in
+///   place after garbage collection.
+/// - **Asynchronous.** The function returns a future. The engine suspends only
+///   the calling Sand task. Each parameter is an owned `Send` [`NativeParam`]
+///   type. The future and its output are `Send`. The output implements
 ///   [`NativeReturn<Fail>`].
 ///
-/// The compiler rejects borrowed parameters in a `&mut Vm` function:
+/// The compiler rejects borrowed parameters in `&mut Vm` and `&mut CallContext`
+/// functions:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -98,10 +109,13 @@ impl Signature {
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a native function",
-    note = "each parameter must implement `NativeParam`, and the return type must implement `NativeReturn<Ctl>`",
-    note = "`&mut Vm` must be the first parameter, each parameter after it must be an owned type, and the function must return a `Later` to wait",
-    note = "an async function must have `Send` parameters, future, and output, and cannot hold a VM handle such as `VmVal` across a wait",
-    note = "a synchronous function returns `HostError`, and a future returns `HostError<Fail>`",
+    note = "each parameter must implement `NativeParam`",
+    note = "place `&mut Vm` or `&mut CallContext` first",
+    note = "parameters after `&mut Vm` or `&mut CallContext` must be owned types",
+    note = "plain synchronous and `&mut Vm` functions suspend the calling task with `Result<Later<T, E>, E>`",
+    note = "an async function requires `Send` parameters, future, and output",
+    note = "for `HostError` results, plain synchronous and `&mut Vm` functions use `HostError`",
+    note = "for `HostError` results, `&mut CallContext` functions and futures use `HostError<Fail>`",
     note = "a function takes at most 12 parameters"
 )]
 pub trait NativeFunction<Kind>: Send + Sync + 'static {
@@ -230,19 +244,23 @@ fn too_few_args() -> Fail {
     Fail::internal("native function called with too few arguments")
 }
 
-/// Synchronous [`NativeFunction`] without `&mut Vm`.
+/// Plain synchronous [`NativeFunction`] that takes only [`NativeParam`] parameters.
 pub struct SyncNativeFn;
 
 /// Synchronous [`NativeFunction`] with `&mut Vm` as its first parameter.
 pub struct VmNativeFn;
+
+/// Synchronous [`NativeFunction`] with `&mut CallContext` as its first parameter.
+pub struct CallContextNativeFn;
 
 /// Asynchronous [`NativeFunction`] that returns a future.
 pub struct AsyncNativeFn;
 
 /// Return type of a registered function.
 ///
-/// `C` is the control signal that stops the call. Code that runs before a wait
-/// uses [`Ctl`]. Code that runs after a wait uses [`Fail`].
+/// `C` is the control signal that stops the call. Plain synchronous and
+/// `&mut Vm` functions use [`Ctl`]. [`CallContext`] functions and futures use
+/// [`Fail`].
 pub trait NativeReturn<C>: SandType {
     #[doc(hidden)]
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C>;
@@ -307,9 +325,7 @@ pub trait NativeError: Send + Sized + 'static + sealed::NativeError {
     type FutureError: From<Fail> + 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl>;
-    /// Splits `self` into a [`Ctl`] signal for
-    /// [`NativeContext::step`](super::context::NativeContext::step) or a final
-    /// future error.
+    /// Splits `self` into a [`Ctl`] signal for `step` or a final error.
     #[doc(hidden)]
     fn into_ctl(self) -> Result<Ctl, Self::FutureError>;
 }
@@ -426,7 +442,7 @@ fn script_args(args: &[VmValue], n: usize) -> Result<&[VmValue], Fail> {
 
 /// Reads each parameter `$param` of a native call into a variable named `$param`.
 macro_rules! read_params {
-    ($vm:ident, $args:ident, $($param:ident),*) => {
+    ($vm:ident, $args:expr, $($param:ident),*) => {
         let script_args = script_args($args, const { 0 $(+ script_arg_count::<$param>())* })?;
         let mut next_arg = 0;
         let mut conv = Conversion::new();
@@ -453,7 +469,8 @@ macro_rules! fn_impls {
                 fn call<R, $($param,)*>(f: &impl Fn($($param),*) -> R, $($param: $param,)*) -> R {
                     f($($param),*)
                 }
-                Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
+                Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args_end: usize| -> Result<VmValue, Ctl> {
+                    let args = &fiber.stack[..args_end];
                     let output = {
                         read_params!(vm, args, $($param),*);
                         call(&self, $($param),*)
@@ -474,11 +491,32 @@ macro_rules! fn_impls {
                 Signature::new([$($param::SCRIPT_PARAM_TYPE),*], R::sand_type())
             }
             fn into_native_fn(self) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
-                    read_params!(vm, args, $($param),*);
+                Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args_end: usize| -> Result<VmValue, Ctl> {
+                    read_params!(vm, &fiber.stack[..args_end], $($param),*);
                     vm.arm_retry_stress();
                     let output = self(vm, $($param),*);
                     vm.unchecked(|vm| output.into_call_result(vm))
+                })
+            }
+        }
+
+        #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments, clippy::too_many_arguments)]
+        impl<F, R, $($param,)*> NativeFunction<(CallContextNativeFn, ($($param,)*))> for F
+        where
+            F: Fn(&mut CallContext<'_>, $($param),*) -> R + Send + Sync + 'static,
+            R: NativeReturn<Fail>,
+            $($param: for<'a> NativeParam<Item<'a> = $param> + 'static,)*
+        {
+            fn signature() -> Signature {
+                Signature::new([$($param::SCRIPT_PARAM_TYPE),*], R::sand_type())
+            }
+            fn into_native_fn(self) -> Box<NativeFn> {
+                Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args_end: usize| -> Result<VmValue, Ctl> {
+                    read_params!(vm, &fiber.stack[..args_end], $($param),*);
+                    vm.arm_retry_stress();
+                    let mut context = CallContext::new(vm, fiber);
+                    let output = self(&mut context, $($param),*);
+                    context.finish(output)
                 })
             }
         }
@@ -495,8 +533,8 @@ macro_rules! fn_impls {
                 Signature::new([$($param::SCRIPT_PARAM_TYPE),*], R::sand_type())
             }
             fn into_native_fn(self) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
-                    read_params!(vm, args, $($param),*);
+                Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args_end: usize| -> Result<VmValue, Ctl> {
+                    read_params!(vm, &fiber.stack[..args_end], $($param),*);
                     let future = self($($param),*);
                     Err(Ctl::async_native(AsyncNativeCall::new(WaitKind::Io, |_| future)))
                 })

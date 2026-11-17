@@ -225,6 +225,30 @@ stats.function("counter", || Counter(AtomicI64::new(0)));
 stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::Relaxed) + n).params(&["n"]);
 ```
 
+### Calling Sand functions
+
+A native function can call a Sand function from the script. Take `&mut CallContext` as the first parameter. `CallContext::call` runs the Sand function on the calling task:
+
+```rust
+use sandlang::native::NativeModule;
+use sandlang::native::context::CallContext;
+use sandlang::native::ty::{Param, VmVal};
+use sandlang::vm::Fail;
+
+let mut calls = NativeModule::new("calls");
+calls.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
+calls.function("twice", |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, input: Param<0>| -> Result<Param<0>, Fail> {
+    let once = context.call(sand_fn.raw(), &[input.raw()])?;
+    Ok(Param::from_raw(context.call(sand_fn.raw(), &[once])?))
+});
+```
+
+`CallContext::call` returns an unrooted `VmValue`. `CallContext::root` keeps a `VmValue` alive across `CallContext::call` and `CallContext::step`. The garbage collector can free unrooted heap values during either method. Allocate heap values and resources inside `CallContext::step`. On a memory or resource limit, `CallContext::step` collects garbage in place. It then runs its closure again.
+
+The engine runs each callback to completion on the host thread. Set `max_wall_time` or `max_cpu_time` for untrusted scripts. During a `CallContext` call, the engine rejects task waits, permission prompts, and self-cancellation with a runtime error. Use `Later::new` if the call awaits host I/O or permission prompts. Inside the `Later::new` future, `NativeContext::call` runs Sand callbacks.
+
+Build the engine with optimizations. Run it on a thread with at least 512 KiB of stack. The engine caps synchronous callbacks at 256 KiB of Rust stack. An optimized build supports about 100 nested callbacks within 256 KiB. An unoptimized build supports fewer than 10.
+
 ### Checking permissions
 
 To check a sandbox capability inside a native function, take `&mut Vm` as the first parameter and call `Vm::require` before performing any side effect. `Vm::require` returns a `"permission_denied"` error if the policy denies the request:

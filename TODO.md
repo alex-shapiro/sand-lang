@@ -26,23 +26,35 @@ Untrusted code violates a valid policy.
 The host cannot rely on engine limits, stability, or control.
 
 - [ ] ❓ _Embedding._ Reject stale raw `VmValue` handles and cross-call
-      `RootedValue` handles. Typed VM handles are `!Send`. The compiler rejects
-      them in a future. `VmValue` implements `Send` for heap storage. The
-      compiler therefore accepts a future that keeps a `VmValue` across a wait.
-      `NativeContext::value` and `NativeContext::with_vm` return raw `VmValue`
-      handles. A Sand callback in `NativeContext::call` can trigger garbage
-      collection during a wait. After garbage collection, the VM returns an
-      unrelated object from a reused heap slot. If collection shrank the heap,
-      the VM panics on an out-of-bounds slot. The engine reports a caught panic
-      as an internal error. Under `panic = "abort"`, the Rust runtime aborts the
-      process on a panic. If a caller passes a `RootedValue` to another call's
-      `NativeContext`, `NativeContext::value` reads the wrong root slot. Either
-      wrap host values in a `!Send` handle or check a generation counter on each
-      heap slot.
-- [ ] ❓ _Embedding._ Detect collection changes during an async native walk. A
-      Sand callback in `NativeContext::call` can mutate a collection during
-      iteration. Either fail on mutation as in CPython or iterate over a
-      snapshot.
+      `RootedValue` handles. Wrap host values in a handle with the context's
+      lifetime. Alternatively, check a generation counter on each heap slot.
+      The garbage collector can invalidate raw `VmValue` handles during
+      `CallContext::call` or `NativeContext::call`. Typed VM handles are
+      `!Send`. The compiler rejects them in a future. `VmValue` implements
+      `Send` for heap storage. A future or a synchronous native function can
+      keep an unrooted `VmValue` across a callback. After garbage collection,
+      the VM returns an unrelated object from a reused heap slot. If the
+      collector shrinks the heap, the VM panics on an out-of-bounds slot. The
+      engine reports a caught panic as an internal error. Under
+      `panic = "abort"`, the Rust runtime aborts the process on a panic. If a
+      caller passes a `RootedValue` to another call's context, that context
+      reads the wrong root slot.
+- [ ] ❓ _Embedding._ Bound every recursive engine path with a stack budget.
+      Let the host set its thread stack size in `Config`. Enforce that budget
+      across all recursive engine paths. The engine checks Rust stack growth
+      only before synchronous callbacks. In an unoptimized build on a 512 KiB
+      thread, `json.parse` overflows the Rust stack on 300 nested arrays. The
+      Rust runtime then aborts the host process. The host loses every engine in
+      that process.
+- [ ] ❓ _Embedding._ Check the arguments of a Sand callback. Derive a typed
+      `call` method from `VmVal<fn(..) -> R>`. `CallContext::call` and
+      `NativeContext::call` take an untyped callee and a raw argument slice. A
+      host caller can pass the wrong number of arguments. The callee then reads
+      a stale register.
+- [ ] ❓ _Embedding._ Detect collection changes during a native walk. Fail on
+      mutation as in CPython. Alternatively, iterate over a snapshot. A Sand
+      callback in `CallContext::call` or `NativeContext::call` can mutate a
+      collection during iteration.
 - [ ] ❓ _Embedding._ Let an async native function release roots during a call.
       `NativeContext::root` and `NativeContext::call` keep every rooted object
       graph in the call's root table until the call returns. If a native future

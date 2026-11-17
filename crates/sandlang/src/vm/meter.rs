@@ -159,8 +159,44 @@ impl Meter {
         }
     }
 
-    /// Allocates execution fuel for the next slice and sets execution deadlines.
+    /// Starts a turn's first fuel slice with `cpu_deadline` and `wall_deadline`.
     pub(crate) fn start_slice(&self, cpu_deadline: Option<Duration>, wall_deadline: Option<Instant>) -> i64 {
+        self.cpu_deadline.set(cpu_deadline);
+        self.wall_deadline.set(wall_deadline);
+        self.refill_slice()
+    }
+
+    /// Starts the next fuel slice under the active deadlines. Reports spent
+    /// slice work to the clock.
+    pub(crate) fn next_slice(&self) -> i64 {
+        self.clock.work(self.spent());
+        self.refill_slice()
+    }
+
+    /// Ends the current slice with zero remaining fuel. Reports spent slice work
+    /// to the clock.
+    pub(crate) fn end_slice(&self) {
+        self.clock.work(self.spent());
+        self.base.set(self.used());
+        self.slice.set(0);
+        self.fuel.set(0);
+        self.synced.set(0);
+        self.check_at.set(0);
+    }
+
+    /// Returns the total fuel spent before the current slice.
+    pub(crate) fn slice_base(&self) -> u64 {
+        self.base.get()
+    }
+
+    /// Computes total run fuel spent from the interpreter's `fuel_left`.
+    pub(crate) fn used_with_fuel_left(&self, fuel_left: i64) -> u64 {
+        let fuel = self.fuel.get() - (self.synced.get() - fuel_left);
+        self.base.get().saturating_add(self.slice.get().saturating_sub(fuel).max(0) as u64)
+    }
+
+    /// Allocates execution fuel for the next slice.
+    fn refill_slice(&self) -> i64 {
         let used = self.used();
         let fuel = match self.max_instructions {
             Some(max) => max.saturating_sub(used).min(super::SLICE_FUEL as u64) as i64,
@@ -171,8 +207,6 @@ impl Meter {
         self.fuel.set(fuel);
         self.synced.set(fuel);
         self.check_at.set(0);
-        self.cpu_deadline.set(cpu_deadline);
-        self.wall_deadline.set(wall_deadline);
         fuel
     }
 

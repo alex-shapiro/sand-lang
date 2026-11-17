@@ -106,6 +106,22 @@ impl Fiber {
     }
 }
 
+/// Rust stack budget in bytes for synchronous callbacks.
+const MAX_CALLBACK_STACK_BYTES: usize = 256 << 10;
+
+/// Returns an address on the current Rust stack.
+#[inline(always)]
+fn stack_address() -> usize {
+    let marker = 0u8;
+    std::ptr::from_ref(std::hint::black_box(&marker)).addr()
+}
+
+/// The program and native functions that [`Vm::interp`] runs.
+pub(crate) struct ProgramCode {
+    pub program: Arc<Program>,
+    pub natives: Arc<Vec<NativeEntry>>,
+}
+
 /// Maximum interpreter slices between clock readings.
 const CLOCK_SLICES: u32 = 32;
 
@@ -304,29 +320,27 @@ impl Vm {
         Ok(fid)
     }
 
-    /// Runs `fiber` until it stops or spends `fuel`.
+    /// Clones the shared program and native-function handles for [`Vm::interp`].
+    pub(crate) fn program_code(&self) -> ProgramCode {
+        ProgramCode { program: self.prog.clone(), natives: self.natives.clone() }
+    }
+
+    /// Runs a bytecode slice on `fiber` with `fuel`.
     ///
-    /// On a memory-limit error, `run_slice` collects all garbage and restores
+    /// On a memory-limit error, `run_slice` collects all garbage. It restores
     /// the instruction's fuel. It then retries the instruction in the same
     /// slice.
-    fn run_slice(&mut self, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
+    fn run_slice(&mut self, code: &ProgramCode, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
         let mut last_retry_site = None;
         loop {
-            let entry_fuel = *fuel;
-            // Catch panics once per slice. Report each panic as an internal error.
-            let stop = match crate::unwind::catch(|| self.interp(fiber, fuel)) {
-                Ok(stop) => stop,
-                Err(msg) => {
-                    self.broken = true;
-                    return Err(Trap::Internal { message: msg, trace: self.trace_of(fiber, None) }.into());
-                }
-            };
+            let used_at_entry = self.meter.used_with_fuel_left(*fuel);
+            let stop = self.interp(&code.program, &code.natives, fiber, fuel);
             let Ok(FiberStop::CollectAndRetry(frame)) = stop else { return stop };
             let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
-            // Reaching this instruction again crosses a back edge or call that spends fuel.
-            // Equal fuel here means the retry itself exceeded `max_memory`.
+            // The interpreter spends more than `tick` fuel to reach `retry_site` again through a loop or call.
+            // Otherwise, the retried instruction hit `max_memory` again.
             let retry_site = (fiber.frames.len(), frame.ip);
-            if last_retry_site == Some(retry_site) && entry_fuel - *fuel <= tick {
+            if last_retry_site == Some(retry_site) && self.meter.used_with_fuel_left(*fuel) - used_at_entry <= tick as u64 {
                 return Err(Trap::Limit(LimitKind::Memory).into());
             }
             last_retry_site = Some(retry_site);
@@ -368,37 +382,118 @@ impl Vm {
         }
     }
 
-    /// Pushes a [`CALLBACK_PROTO`] frame on `fiber` to call `callee` with `args`.
-    fn begin_callback(&mut self, fiber: &mut Fiber, callee: VmValue, args: &[VmValue]) -> Result<(), RunEnding> {
-        let base = fiber.live_top(&self.prog);
-        let need = base + 1 + MAX_CALLBACK_ARGS;
-        let grow = |vm: &mut Vm, fiber: &mut Fiber| -> Result<(), Fail> {
-            if fiber.stack.len() < need {
-                fiber.grow_stack(need, &mut vm.heap)?;
+    /// Pushes a [`CALLBACK_PROTO`] frame on `fiber` at `frame_base` for `callee` and `args`.
+    fn begin_callback(&mut self, fiber: &mut Fiber, frame_base: usize, callee: VmValue, args: &[VmValue]) -> Result<(), RunEnding> {
+        if fiber.frames.len() >= self.host.limits.max_call_depth {
+            return Err(self.stack_overflow(fiber));
+        }
+        let needed_slots = frame_base + 1 + MAX_CALLBACK_ARGS;
+        let grow_buffers = |vm: &mut Vm, fiber: &mut Fiber| -> Result<(), Fail> {
+            if fiber.stack.len() < needed_slots {
+                fiber.grow_stack(needed_slots, &mut vm.heap)?;
             }
             if fiber.frames.len() == fiber.frames.capacity() {
                 fiber.grow_frames(&mut vm.heap)?;
             }
             Ok(())
         };
-        let mut grown = grow(self, fiber);
-        if grown.as_ref().is_err_and(|fail| fail.as_limit() == Some(LimitKind::Memory)) {
+        let mut grow_result = grow_buffers(self, fiber);
+        if grow_result.as_ref().is_err_and(|fail| fail.as_limit() == Some(LimitKind::Memory)) {
+            // Root `callee` and `args` before writing them to `fiber.stack`.
+            let roots_len = fiber.native_roots.len();
+            fiber.native_roots.push(callee);
+            fiber.native_roots.extend_from_slice(args);
             self.collect_all_garbage(Some(fiber));
-            grown = grow(self, fiber);
+            fiber.native_roots.truncate(roots_len);
+            grow_result = grow_buffers(self, fiber);
         }
-        if let Err(fail) = grown {
+        if let Err(fail) = grow_result {
             return Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
         }
-        fiber.stack[base] = callee;
-        fiber.stack[base + 1..][..args.len()].copy_from_slice(args);
+        fiber.stack[frame_base] = callee;
+        fiber.stack[frame_base + 1..][..args.len()].copy_from_slice(args);
         fiber.frames.push(Frame {
             proto: CALLBACK_PROTO,
             ip: Proto::callback_entry(args.len()),
-            base: base as u32,
-            ret: base as u32,
+            base: frame_base as u32,
+            ret: frame_base as u32,
             closure: NO_CLOSURE,
         });
         Ok(())
+    }
+
+    /// Runs `callee` with `args` to completion on `fiber` for a synchronous
+    /// native call.
+    ///
+    /// `frame_base` is the first stack slot above the active native caller's
+    /// registers. Rejects task suspension and self-cancellation with an
+    /// `"invalid"` error. Restores `fiber.frames` and `self.caller_site` on
+    /// exit.
+    pub(crate) fn run_callback(
+        &mut self,
+        code: &ProgramCode,
+        fiber: &mut Fiber,
+        frame_base: usize,
+        callee: VmValue,
+        args: &[VmValue],
+    ) -> Result<VmValue, RunEnding> {
+        if self.turn_stack_address.saturating_sub(stack_address()) > MAX_CALLBACK_STACK_BYTES {
+            return Err(self.stack_overflow(fiber));
+        }
+        let frame_count = fiber.frames.len();
+        // Nested native calls overwrite `self.caller_site`.
+        let saved_caller_site = self.caller_site;
+        let result = self.begin_callback(fiber, frame_base, callee, args).and_then(|()| self.run_callback_slices(code, fiber));
+        self.caller_site = saved_caller_site;
+        fiber.frames.truncate(frame_count);
+        result
+    }
+
+    /// Drives bytecode slices on `fiber` for the active synchronous callback.
+    fn run_callback_slices(&mut self, code: &ProgramCode, fiber: &mut Fiber) -> Result<VmValue, RunEnding> {
+        let mut fuel = self.meter.resync();
+        let result = loop {
+            let stop = match self.run_slice(code, fiber, &mut fuel) {
+                Ok(stop) => stop,
+                Err(ending) => break Err(ending),
+            };
+            let (forbidden_action, trace_ip) = match stop {
+                FiberStop::CallbackReturn(value) => break Ok(value),
+                FiberStop::Preempt => {
+                    self.meter.sync(fuel);
+                    fuel = self.meter.next_slice();
+                    match self.meter.check() {
+                        Ok(()) => continue,
+                        Err(fail) => break Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None))),
+                    }
+                }
+                FiberStop::YieldNow => continue,
+                FiberStop::Blocked | FiberStop::AsyncNative(_) => ("wait", None),
+                // `call_native` rewound `frame.ip` to the call instruction for `Prompt`.
+                FiberStop::Prompt(_) => ("prompt for a permission", fiber.frames.last().map(|frame| frame.ip + 1)),
+                FiberStop::Cancelled => ("cancel the running task", None),
+                FiberStop::Done(_) | FiberStop::Unwound | FiberStop::CollectAndRetry(_) => {
+                    unreachable!("`CALLBACK_PROTO` catches top-level returns. `run_slice` handles `CollectAndRetry`.")
+                }
+            };
+            break Err(self.synchronous_call_error(fiber, forbidden_action, trace_ip));
+        };
+        self.meter.sync(fuel);
+        result
+    }
+
+    /// Builds the `"invalid"` trap for a `forbidden_action` inside a synchronous native call.
+    pub(crate) fn synchronous_call_error(&self, fiber: &Fiber, forbidden_action: &str, trace_ip: Option<u32>) -> RunEnding {
+        Trap::Error {
+            message: format!("invalid: cannot {forbidden_action} inside a synchronous native call"),
+            trace: self.trace_of(fiber, trace_ip),
+        }
+        .into()
+    }
+
+    /// Builds the `"limit: stack overflow"` trap for `fiber`.
+    fn stack_overflow(&self, fiber: &Fiber) -> RunEnding {
+        Trap::Error { message: "limit: stack overflow".into(), trace: self.trace_of(fiber, None) }.into()
     }
 
     /// Pops the callback trampoline frame on `fiber`. Roots `result` for the waiting native call.
@@ -450,10 +545,16 @@ impl Vm {
     }
 }
 
-/// Advances `fiber` until it stops or exhausts `fuel`.
+/// Runs a scheduler turn on `fiber` with `fuel`.
 ///
 /// Alternates between bytecode slices and polls of the top native call.
-fn run_fiber_turn(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
+fn run_fiber_turn(
+    vm: &mut MutexGuard<'_, Vm>,
+    shared_vm: &SharedVm,
+    code: &ProgramCode,
+    fiber: &mut Fiber,
+    fuel: &mut i64,
+) -> Result<FiberStop, RunEnding> {
     loop {
         if fiber.top_native_call().is_some() {
             vm.meter.sync(*fuel);
@@ -467,7 +568,7 @@ fn run_fiber_turn(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &mut
             }
             continue;
         }
-        match vm.run_slice(fiber, fuel)? {
+        match vm.run_slice(code, fiber, fuel)? {
             FiberStop::AsyncNative(call) => vm.push_native_call(fiber, call),
             FiberStop::CallbackReturn(result) => vm.end_callback(fiber, result),
             stop => return Ok(stop),
@@ -523,14 +624,15 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
                 return Ok(Some(FiberStop::Blocked));
             }
             Some(VmRequest::Call { callee, args }) => {
-                vm.begin_callback(fiber, callee, &args)?;
+                let frame_base = fiber.live_top(&vm.prog);
+                vm.begin_callback(fiber, frame_base, callee, &args)?;
                 return Ok(None);
             }
             Some(VmRequest::Collect) => {
                 collected = true;
                 vm.collect_all_garbage(Some(fiber));
             }
-            Some(VmRequest::Prompt(capability)) => return Ok(Some(FiberStop::Prompt(capability))),
+            Some(VmRequest::Prompt(capability)) => return Ok(Some(FiberStop::Prompt(Box::new(capability)))),
         }
     }
 }
@@ -551,6 +653,7 @@ fn run_ready<U: DriveUntil>(
     stop_policy: &U,
     timer: &mut RunTimer,
 ) -> Result<Pause<U::Stop>, RunEnding> {
+    let code = vm.program_code();
     while let Some(fiber_id) = vm.ready.pop_front() {
         let Some(mut fiber) = vm.fibers.get_mut(fiber_id as usize).and_then(|slot| slot.take()) else { continue };
         if fiber.state != FiberState::Ready {
@@ -558,9 +661,14 @@ fn run_ready<U: DriveUntil>(
             continue;
         }
         vm.current = fiber_id;
+        vm.turn_stack_address = stack_address();
         // Set meter deadlines for time-limit checks inside long native calls.
         let mut fuel = vm.meter.start_slice(timer.cpu_deadline(vm.host.limits.max_cpu_time), vm.deadline);
-        let turn_result = run_fiber_turn(vm, shared_vm, &mut fiber, &mut fuel);
+        // Catch panics once per turn. Report each panic as an internal error.
+        let turn_result = crate::unwind::catch(|| run_fiber_turn(vm, shared_vm, &code, &mut fiber, &mut fuel)).unwrap_or_else(|message| {
+            vm.broken = true;
+            Err(Trap::Internal { message, trace: vm.trace_of(&fiber, None) }.into())
+        });
         vm.meter.sync(fuel);
         timer.ran(vm.meter.spent());
         // Share current heap usage with background I/O readers for `max_memory` checks.
@@ -594,13 +702,13 @@ fn run_ready<U: DriveUntil>(
                 fiber.state = FiberState::Waiting;
                 vm.fibers[fiber_id as usize] = Some(fiber);
             }
-            FiberStop::Prompt(cap) => {
+            FiberStop::Prompt(capability) => {
                 fiber.state = FiberState::Ready;
                 vm.fibers[fiber_id as usize] = Some(fiber);
                 vm.ready.push_front(fiber_id);
-                return Ok(match stop_policy.stop_on_prompt(&cap) {
+                return Ok(match stop_policy.stop_on_prompt(&capability) {
                     Some(stop) => Pause::Stop(stop),
-                    None => Pause::Prompt(cap),
+                    None => Pause::Prompt(*capability),
                 });
             }
             FiberStop::Cancelled => {
