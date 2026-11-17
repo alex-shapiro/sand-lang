@@ -7,19 +7,20 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-/// A Sand value as the VM stores it: an immediate value, or a handle to an
-/// object on the VM heap.
+/// Immediate Sand value or handle to an object on the VM heap.
 ///
-/// A heap handle is valid only during the native call that received or
-/// allocated it. The garbage collector does not trace a `VmValue` held in a
-/// native function.
+/// Use a heap handle only within the native call that received or allocated it.
+/// The garbage collector can invalidate an unrooted `VmValue` during a
+/// callback, a `step` retry, or an async wait. Root heap values across those
+/// points with [`CallContext::root`](crate::native::context::CallContext::root)
+/// or [`NativeContext::root`](crate::native::context::NativeContext::root).
 ///
-/// Variants `VUnit` through `VObj` store single-payload enum variants inline if
-/// the payload is not itself an inline variant. Each variant holds the runtime
-/// variant ID followed by the payload. Single-payload variants whose payload is
-/// an inline variant use a heap [`Obj::Variant`]. Build variants with
-/// [`VmValue::variant1`] or [`Heap::new_variant`](super::heap::Heap::new_variant).
-/// Inspect variants with [`Heap::variant`](super::heap::Heap::variant),
+/// Variants `VUnit` through `VObj` store single-payload enum variants inline.
+/// Single-payload variants with an inline-variant payload use a heap
+/// [`Obj::Variant`]. Each inline variant stores the runtime variant ID and the
+/// payload. Build variants with [`VmValue::variant1`] or
+/// [`Heap::new_variant`](super::heap::Heap::new_variant). Inspect variants with
+/// [`Heap::variant`](super::heap::Heap::variant),
 /// [`Heap::variant_id`](super::heap::Heap::variant_id), and
 /// [`Heap::field`](super::heap::Heap::field).
 #[derive(Clone, Copy, Debug, PartialEq)]

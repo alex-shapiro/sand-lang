@@ -244,7 +244,7 @@ fn too_few_args() -> Fail {
     Fail::internal("native function called with too few arguments")
 }
 
-/// Synchronous [`NativeFunction`] without `&mut Vm` or `&mut CallContext`.
+/// Plain synchronous [`NativeFunction`] that takes only [`NativeParam`] parameters.
 pub struct SyncNativeFn;
 
 /// Synchronous [`NativeFunction`] with `&mut Vm` as its first parameter.
