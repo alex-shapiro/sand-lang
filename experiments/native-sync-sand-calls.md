@@ -97,6 +97,7 @@ The CPU Profiler attributed the cost of a callback before the changes below. The
 - **The interpreter borrows the program and native table.** `Vm::interp` takes `&Arc<Program>` and `&Arc<Vec<NativeEntry>>`. The scheduler clones them once for each batch of turns, and a `CallContext` clones them on its first callback. Passing `&Program` and `&[NativeEntry]` instead added a register to the dispatch loop and slowed `struct method dispatch 2M` by 22%.
 - **Panics are caught once per turn,** not once per slice, so a callback skips `catch_unwind`.
 - **`CallContext` caches the callback frame base,** because the caller's frame stays the same during the call.
+- **`begin_callback` pushes a closure callee's frame itself,** which skips the dispatch of the trampoline's `CallR`. Native and iterator callees still go through `CallR`.
 - **`begin_callback` copies arguments in a loop,** because `copy_from_slice` called `memmove` for a single argument.
 - **`FiberStop::Prompt` boxes its `Capability`,** which shrinks `FiberStop` from 104 bytes to 40.
 
