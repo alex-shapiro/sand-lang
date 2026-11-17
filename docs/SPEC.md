@@ -2223,8 +2223,8 @@ have called Sand. A limit error outside `step` therefore ends the run, and the
 function cannot prompt for a permission. In both contexts, a callback of a
 closure uses two frames toward `max_call_depth`, and a callback of a native
 function uses one. Nested callbacks can use 256 KiB of the Rust stack. A
-deeper callback fails with `limit: stack overflow`. The engine needs a thread
-with at least 512 KiB of stack.
+deeper callback fails with `limit: stack overflow`. An optimized build of the
+engine needs a thread with at least 512 KiB of stack.
 
 Bound the recursion depth of any async native function. The engine charges only
 the top-level future and its root table against `max_memory`. A recursive async

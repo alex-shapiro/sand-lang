@@ -247,7 +247,7 @@ The garbage collector can free any heap value during `call`, including the resul
 
 The Sand function runs to completion and blocks the host thread until it returns, so set `max_wall_time` or `max_cpu_time` for untrusted scripts. It cannot wait for I/O, a timer, or another task, prompt for a permission, or cancel its own task. If it tries, the run ends with an error. The engine never runs a `CallContext` function a second time, so the function itself cannot prompt for a permission either. A native function that must wait or prompt while Sand code runs can return a `Later` future and call Sand through `NativeContext::call`.
 
-Nested callbacks can use 256 KiB of the Rust stack. Run the engine on a thread with at least 512 KiB of stack.
+Nested callbacks can use 256 KiB of the Rust stack: about 100 levels in an optimized build, and fewer than 10 in an unoptimized build. Build the engine with optimizations, and run it on a thread with at least 512 KiB of stack.
 
 ### Checking permissions
 

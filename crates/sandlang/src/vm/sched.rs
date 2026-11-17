@@ -437,29 +437,26 @@ impl Vm {
         base: usize,
         callee: VmValue,
         args: &[VmValue],
-    ) -> Result<VmValue, Fail> {
+    ) -> Result<VmValue, RunEnding> {
         if self.turn_stack_address.saturating_sub(stack_address()) > CALLBACK_STACK_BYTES {
-            return Err(self.stack_overflow(fiber).into());
+            return Err(self.stack_overflow(fiber));
         }
         let frame_count = fiber.frames.len();
         // The native calls of the callee replace the call site of the active native call.
         let caller_site = self.caller_site;
-        let result = match self.begin_callback(fiber, base, callee, args) {
-            Ok(()) => self.finish_callback(code, fiber),
-            Err(ending) => Err(ending.into()),
-        };
+        let result = self.begin_callback(fiber, base, callee, args).and_then(|()| self.finish_callback(code, fiber));
         self.caller_site = caller_site;
         fiber.frames.truncate(frame_count);
         result
     }
 
     /// Runs `fiber` until the callback from [`Vm::begin_callback`] returns.
-    fn finish_callback(&mut self, code: &ProgramCode, fiber: &mut Fiber) -> Result<VmValue, Fail> {
+    fn finish_callback(&mut self, code: &ProgramCode, fiber: &mut Fiber) -> Result<VmValue, RunEnding> {
         let mut fuel = self.meter.resync();
         let result = loop {
             let stop = match self.run_slice(code, fiber, &mut fuel) {
                 Ok(stop) => stop,
-                Err(ending) => break Err(ending.into()),
+                Err(ending) => break Err(ending),
             };
             let (action, trace_ip) = match stop {
                 FiberStop::CallbackReturn(value) => break Ok(value),
@@ -468,7 +465,7 @@ impl Vm {
                     fuel = self.meter.next_slice();
                     match self.meter.check() {
                         Ok(()) => continue,
-                        Err(fail) => break Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)).into()),
+                        Err(fail) => break Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None))),
                     }
                 }
                 FiberStop::YieldNow => continue,
@@ -480,7 +477,7 @@ impl Vm {
                     unreachable!("the callback frame stays below the callee, and `run_slice` retries collections")
                 }
             };
-            break Err(self.synchronous_call_error(fiber, action, trace_ip).into());
+            break Err(self.synchronous_call_error(fiber, action, trace_ip));
         };
         self.meter.sync(fuel);
         result
