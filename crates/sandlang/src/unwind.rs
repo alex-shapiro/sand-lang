@@ -6,8 +6,8 @@
 //! [`Session`](crate::session::Session) entry-point methods wrap their futures
 //! in [`CatchUnwind`]. The scheduler wraps each fiber turn and each
 //! native-future poll in [`catch`]. Per-turn guards keep native calls and
-//! their Sand callbacks fast. Under `panic = "abort"`, the Rust runtime aborts the process on
-//! any panic.
+//! their Sand callbacks fast. Under `panic = "abort"`, the Rust runtime aborts
+//! the process on any panic.
 
 use std::any::Any;
 use std::future::Future;

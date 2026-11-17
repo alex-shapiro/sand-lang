@@ -46,7 +46,8 @@ impl Signature {
 ///     Ok(s.len() as i64)
 /// });
 /// module.function("call", |context: &mut CallContext, f: VmVal<fn() -> i64>| -> Result<VmVal<i64>, Fail> {
-///     Ok(VmVal::from_raw(context.call(f.raw(), &[])?))
+///     let result = context.call(f.raw(), &[])?;
+///     Ok(VmVal::from_raw(context.value(result)))
 /// });
 /// module.function("fetch", |url: String| async move { url.len() as i64 });
 /// ```

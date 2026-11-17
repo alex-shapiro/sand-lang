@@ -180,6 +180,15 @@ impl Fail {
     pub(crate) fn into_kind(self) -> FailKind {
         *self.0
     }
+
+    /// Returns the run ending that `self` holds, if `self` comes from a Sand
+    /// callback.
+    pub(crate) fn ending(&self) -> Option<&RunEnding> {
+        match &*self.0 {
+            FailKind::Ended(ending) => Some(ending),
+            _ => None,
+        }
+    }
 }
 
 impl Ctl {
@@ -380,7 +389,7 @@ pub struct TraceFrame {
     pub line: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Trap {
     /// The script failed with an error, `kind: message`.
     Error {
@@ -397,7 +406,7 @@ pub enum Trap {
 }
 
 /// An early exit or trap that stops a VM run.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum RunEnding {
     /// A task exited with this status code.
     Exit(i32),
@@ -641,8 +650,8 @@ pub struct Vm {
     pub(crate) instruction_retried: bool,
     /// Struct nesting depth during conversion to Sand (see [`struct_into_vm_value`](crate::native::struct_into_vm_value)).
     pub(crate) struct_depth: usize,
-    /// Number of Sand callbacks that synchronous native calls run on the Rust stack.
-    nested_callbacks: usize,
+    /// Address on the Rust stack at the start of the current fiber turn.
+    turn_stack_address: usize,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -735,7 +744,7 @@ impl Vm {
             retry_stress: false,
             instruction_retried: false,
             struct_depth: 0,
-            nested_callbacks: 0,
+            turn_stack_address: 0,
         };
         vm.load_program();
         vm

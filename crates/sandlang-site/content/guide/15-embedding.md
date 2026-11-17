@@ -227,7 +227,7 @@ stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::R
 
 ### Calling Sand functions
 
-A native function can call a Sand function that the script passes to it. Take `&mut CallContext` as the first parameter and call `CallContext::call`. The Sand function runs on the calling task and returns before the native function continues:
+A native function can call a Sand function that the script passes to it. Take `&mut CallContext` as the first parameter and call `CallContext::call`. The Sand function runs on the calling task and returns before the native function continues. `call` returns a `RootedValue`, which stays valid until the native function returns:
 
 ```rust
 use sandlang::native::NativeModule;
@@ -239,11 +239,14 @@ let mut calls = NativeModule::new("calls");
 calls.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
 calls.function("twice", |cx: &mut CallContext, f: VmVal<fn(Param<0>) -> Param<0>>, x: Param<0>| -> Result<Param<0>, Fail> {
     let once = cx.call(f.raw(), &[x.raw()])?;
-    Ok(Param::from_raw(cx.call(f.raw(), &[once])?))
+    let twice = cx.call(f.raw(), &[cx.value(once)])?;
+    Ok(Param::from_raw(cx.value(twice)))
 });
 ```
 
-The Sand function cannot wait for I/O, a timer, or another task. If it does, the run ends with an error. A native function that must wait while Sand code runs can return a `Later` future and call Sand through `NativeContext::call`.
+The garbage collector can free any other heap value during `call`. Keep values across a call with `CallContext::root`, and allocate inside `CallContext::step`, which collects garbage and retries if the heap is full.
+
+The Sand function runs to completion and blocks the host thread until it returns, so set `max_wall_time` or `max_cpu_time` for untrusted scripts. It cannot wait for I/O, a timer, or another task, prompt for a permission, or cancel its own task. If it tries, the run ends with an error. The engine never runs a `CallContext` function a second time, so the function itself cannot prompt for a permission either. A native function that must wait or prompt while Sand code runs can return a `Later` future and call Sand through `NativeContext::call`.
 
 ### Checking permissions
 
