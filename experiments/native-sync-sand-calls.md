@@ -87,9 +87,9 @@ Each number is the best of 7 runs of 1M calls to `fn inc(x: int) -> int { x + 1 
 
 | Call                               | ns per call |
 | ---------------------------------- | ----------: |
-| Sand call through a function value |        15.7 |
-| Synchronous native call            |        27.5 |
-| Async native call                  |        91.6 |
+| Sand call through a function value |        15.8 |
+| Synchronous native call            |        26.2 |
+| Async native call                  |        88.3 |
 
 The CPU Profiler attributed the cost of a callback before the changes below. These changes made the callback faster:
 
