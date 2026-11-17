@@ -35,13 +35,19 @@ The host cannot rely on engine limits, stability, or control.
       unrelated object from a reused heap slot. If collection shrank the heap,
       the VM panics on an out-of-bounds slot. The engine reports a caught panic
       as an internal error. Under `panic = "abort"`, the Rust runtime aborts the
-      process on a panic. If a caller passes a `RootedValue` to another call's
-      `NativeContext`, `NativeContext::value` reads the wrong root slot. Either
-      wrap host values in a `!Send` handle or check a generation counter on each
-      heap slot.
-- [ ] ❓ _Embedding._ Detect collection changes during an async native walk. A
-      Sand callback in `NativeContext::call` can mutate a collection during
-      iteration. Either fail on mutation as in CPython or iterate over a
+      process on a panic. A synchronous native that keeps an unrooted
+      `VmValue` across `CallContext::call` has the same problem. If a caller
+      passes a `RootedValue` to another call's context, `value` reads the wrong
+      root slot. Either wrap host values in a handle that borrows the context or
+      check a generation counter on each heap slot.
+- [ ] ❓ _Embedding._ Check the arguments of a Sand callback.
+      `CallContext::call` and `NativeContext::call` take a raw callee and
+      argument slice, so a host can pass the wrong number of arguments. The
+      callee then reads a stale register. Derive a typed `call` from the
+      `VmVal<fn(..) -> R>` type of the callee.
+- [ ] ❓ _Embedding._ Detect collection changes during a native walk. A Sand
+      callback in `CallContext::call` or `NativeContext::call` can mutate a
+      collection during iteration. Either fail on mutation as in CPython or iterate over a
       snapshot.
 - [ ] ❓ _Embedding._ Let an async native function release roots during a call.
       `NativeContext::root` and `NativeContext::call` keep every rooted object

@@ -45,8 +45,7 @@ fn calls_module() -> NativeModule {
         |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, value: Param<0>, times: i64| -> Result<Param<0>, Fail> {
             let mut current = value.raw();
             for _ in 0..times {
-                let result = context.call(sand_fn.raw(), &[current])?;
-                current = context.value(result);
+                current = context.call(sand_fn.raw(), &[current])?;
             }
             Ok(Param::from_raw(current))
         },

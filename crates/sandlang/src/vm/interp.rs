@@ -143,7 +143,7 @@ fn dense_get<'h>(heap: &'h Heap, m: &VmValue, k: &VmValue) -> Dense<'h> {
 
 /// Copies the captures of closure `h` to the start of `regs`.
 #[inline]
-pub(super) fn load_captures(heap: &Heap, h: u32, regs: &mut [VmValue]) {
+fn load_captures(heap: &Heap, h: u32, regs: &mut [VmValue]) {
     if let Obj::Closure(_, caps) = heap.obj(h) {
         copy_values(caps, regs);
     }
@@ -2534,7 +2534,7 @@ impl Vm {
 }
 
 /// Returns the interpreter fuel that `op` spends at `tick_call!` before it can fail.
-pub(super) const fn call_tick(op: Op) -> i64 {
+pub(super) fn call_tick(op: Op) -> i64 {
     match op {
         Op::CallDirect { .. }
         | Op::CallR { .. }
