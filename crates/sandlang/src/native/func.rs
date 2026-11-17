@@ -71,7 +71,8 @@ impl Signature {
 ///   type. The future and its output are `Send`. The output implements
 ///   [`NativeReturn<Fail>`].
 ///
-/// The compiler rejects borrowed parameters in a `&mut Vm` function:
+/// The compiler rejects borrowed parameters in `&mut Vm` and `&mut CallContext`
+/// functions:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -111,10 +112,10 @@ impl Signature {
     note = "each parameter must implement `NativeParam`",
     note = "place `&mut Vm` or `&mut CallContext` first",
     note = "parameters after `&mut Vm` or `&mut CallContext` must be owned types",
-    note = "a `&mut Vm` function suspends the calling task with `Later`",
+    note = "plain synchronous and `&mut Vm` functions suspend the calling task with `Result<Later<T, E>, E>`",
     note = "an async function requires `Send` parameters, future, and output",
-    note = "plain synchronous and `&mut Vm` functions return `HostError`",
-    note = "`&mut CallContext` functions and futures return `HostError<Fail>`",
+    note = "for `HostError` results, plain synchronous and `&mut Vm` functions use `HostError`",
+    note = "for `HostError` results, `&mut CallContext` functions and futures use `HostError<Fail>`",
     note = "a function takes at most 12 parameters"
 )]
 pub trait NativeFunction<Kind>: Send + Sync + 'static {
@@ -243,7 +244,7 @@ fn too_few_args() -> Fail {
     Fail::internal("native function called with too few arguments")
 }
 
-/// Synchronous [`NativeFunction`] without `&mut Vm`.
+/// Synchronous [`NativeFunction`] without `&mut Vm` or `&mut CallContext`.
 pub struct SyncNativeFn;
 
 /// Synchronous [`NativeFunction`] with `&mut Vm` as its first parameter.
@@ -257,8 +258,9 @@ pub struct AsyncNativeFn;
 
 /// Return type of a registered function.
 ///
-/// `C` is the control signal that stops the call. Code that runs before a wait
-/// uses [`Ctl`]. Code that runs after a wait uses [`Fail`].
+/// `C` is the control signal that stops the call. Plain synchronous and
+/// `&mut Vm` functions use [`Ctl`]. [`CallContext`] functions and futures use
+/// [`Fail`].
 pub trait NativeReturn<C>: SandType {
     #[doc(hidden)]
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C>;
@@ -323,9 +325,7 @@ pub trait NativeError: Send + Sized + 'static + sealed::NativeError {
     type FutureError: From<Fail> + 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl>;
-    /// Splits `self` into a [`Ctl`] signal for
-    /// [`NativeContext::step`](super::context::NativeContext::step) or a final
-    /// future error.
+    /// Splits `self` into a [`Ctl`] signal for `step` or a final error.
     #[doc(hidden)]
     fn into_ctl(self) -> Result<Ctl, Self::FutureError>;
 }

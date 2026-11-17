@@ -25,8 +25,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use value::*;
 
-/// Type-erased native function. The third argument is the exclusive end index
-/// of the call's arguments on [`Fiber::stack`].
+/// Type-erased native function.
+///
+/// The third argument is the exclusive end index of the call's arguments on
+/// [`Fiber::stack`].
 pub type NativeFn = dyn Fn(&mut Vm, &mut Fiber, usize) -> Result<VmValue, Ctl> + Send + Sync;
 
 #[derive(Clone)]
@@ -131,9 +133,8 @@ pub(crate) enum FailKind {
     /// Host interrupt (see `Meter::check`).
     Interrupted,
     Exit(i32),
-    /// Terminal run ending recorded during
-    /// [`CallContext::call`](crate::native::context::CallContext::call) or
-    /// [`CallContext::step`](crate::native::context::CallContext::step).
+    /// Terminal run ending from a
+    /// [`CallContext`](crate::native::context::CallContext) call.
     Ended(RunEnding),
 }
 
@@ -155,9 +156,9 @@ impl Fail {
     ///
     /// On [`LimitKind::Memory`], the engine collects garbage. It then retries a
     /// plain synchronous function, a `&mut Vm` function, or a `step` closure
-    /// once. Outside `step`, the engine ends a
-    /// [`CallContext`](crate::native::context::CallContext) call on the first
-    /// limit error.
+    /// once. If a [`CallContext`](crate::native::context::CallContext) function
+    /// or native future returns `Fail::limit`, the engine ends the run
+    /// immediately.
     #[cold]
     pub fn limit(kind: LimitKind) -> Fail {
         Fail(Box::new(FailKind::Limit(kind)))

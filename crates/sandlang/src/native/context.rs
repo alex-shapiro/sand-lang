@@ -1,7 +1,7 @@
 //! VM access and Sand callbacks for native functions.
 //!
-//! Synchronous native functions use [`CallContext`]. Async native futures use
-//! [`NativeContext`].
+//! Synchronous native functions call Sand through [`CallContext`].
+//! [`Later::new`](super::func::Later::new) futures use [`NativeContext`].
 
 use super::func::{NativeError, NativeReturn};
 use super::ty::{Num, Param};
@@ -58,7 +58,7 @@ pub struct NativeContext {
     state: Arc<Mutex<NativeCallState>>,
 }
 
-/// Handle to a heap value that [`CallContext`] or [`NativeContext`] keeps alive
+/// Handle to a [`VmValue`] rooted in a [`CallContext`] or [`NativeContext`]
 /// until the native call returns.
 ///
 /// Read the value from the same context with [`CallContext::value`] or
@@ -188,9 +188,9 @@ impl NativeContext {
     /// permission requests.
     ///
     /// `f` must check limits and capabilities before any side effect. After a
-    /// memory or resource limit error, the engine collects all garbage before
-    /// running `f` again. After a permission request, the engine prompts the
-    /// user before running `f` again.
+    /// memory or resource limit error, the engine collects all garbage. It then
+    /// runs `f` again. After a permission request, the engine prompts the user.
+    /// It then runs `f` again.
     ///
     /// ```
     /// # use sandlang::native::context::NativeContext;
@@ -343,9 +343,9 @@ impl<'a> CallContext<'a> {
         CallContext { vm, fiber, roots_start, entry_slice_base, callback_state: None, run_ending: None }
     }
 
-    /// Returns shared read access to the [`Vm`]. Use [`CallContext::step`] for
-    /// mutable [`Vm`] access.
+    /// Returns shared read access to the [`Vm`].
     ///
+    /// Use [`CallContext::step`] for mutable [`Vm`] access.
     /// [`CallContext::root`] keeps a [`VmValue`] alive across
     /// [`CallContext::call`] and [`CallContext::step`]. The garbage collector
     /// can free unrooted heap values during either method.
@@ -363,11 +363,10 @@ impl<'a> CallContext<'a> {
     /// `callee`, the engine rejects task waits, permission prompts, and
     /// self-cancellation with an `"invalid"` error.
     ///
-    /// On an uncaught error, limit, or exit in `callee`, `call` records that
-    /// run ending and its stack trace. `call` returns that recorded ending as a
-    /// [`Fail`]. Later `call` and `step` calls return the same [`Fail`]. After
-    /// this native function returns, the engine ends the run with that recorded
-    /// outcome.
+    /// If `callee` ends the run, `call` records that outcome. `call` returns
+    /// that recorded outcome as a [`Fail`]. Later `call` and `step` calls
+    /// return the same [`Fail`]. After this native function returns, the engine
+    /// ends the run with that recorded outcome.
     ///
     /// # Panics
     ///
@@ -386,7 +385,7 @@ impl<'a> CallContext<'a> {
         })
     }
 
-    /// Keeps `value` alive until this native call returns. Returns its handle.
+    /// Roots `value` until this native call returns.
     pub fn root(&mut self, value: VmValue) -> RootedValue {
         let roots = &mut self.fiber.native_roots;
         let capacity = roots.capacity();
@@ -395,7 +394,7 @@ impl<'a> CallContext<'a> {
         RootedValue((roots.len() - 1) as u32)
     }
 
-    /// Returns the [`VmValue`] for `rooted` from this call's root stack.
+    /// Returns the [`VmValue`] for `rooted` in this call.
     pub fn value(&self, rooted: RootedValue) -> VmValue {
         self.fiber.native_roots[rooted.0 as usize]
     }
@@ -455,12 +454,12 @@ impl<'a> CallContext<'a> {
 }
 
 impl<const N: u8> Num<N> {
-    /// Returns the additive identity (`0` or `0.0`) for type parameter `N`.
+    /// Returns the additive identity `0` or `0.0` for type parameter `N`.
     pub fn zero(self, context: &mut CallContext) -> Result<Param<N>, Fail> {
         self.call_method(context, 0)
     }
 
-    /// Returns the multiplicative identity (`1` or `1.0`) for type parameter `N`.
+    /// Returns the multiplicative identity `1` or `1.0` for type parameter `N`.
     pub fn one(self, context: &mut CallContext) -> Result<Param<N>, Fail> {
         self.call_method(context, 1)
     }

@@ -5,7 +5,7 @@ A synchronous native Rust function can call a Sand function directly on the Rust
 ## Terms
 
 - **`CallContext` function**: a synchronous native function whose first parameter is `&mut CallContext`.
-- **Callback**: a Sand function that a `CallContext` function runs through `CallContext::call`.
+- **Callback**: a Sand function that a native function runs through `CallContext::call` or `NativeContext::call`.
 - **Suspension**: a fiber stop that returns control to the scheduler.
 - **Run ending**: an exit code or VM trap in `RunEnding`.
 
@@ -35,7 +35,7 @@ Both `CallContext` functions and async native futures require a `NativeReturn<Fa
 
 ### 1. Pass the calling fiber through `NativeFn`
 
-`NativeFn` takes `(&mut Vm, &mut Fiber, usize)` rather than `(&mut Vm, &[VmValue])`. The `usize` argument is the exclusive end index of the call's arguments on `Fiber::stack`. Each generated wrapper slices `&fiber.stack[..args_end]`. It then reads its trailing script parameters. A `CallContext` wrapper reads its owned parameters first. It then passes `&mut Vm` and `&mut Fiber` to `CallContext::new`.
+`NativeFn` takes `(&mut Vm, &mut Fiber, usize)`. The `usize` argument is the exclusive end index of the call's arguments on `Fiber::stack`. Each generated wrapper slices `&fiber.stack[..args_end]`. It then reads its trailing script parameters. A `CallContext` wrapper reads its owned parameters first. It then passes `&mut Vm` and `&mut Fiber` to `CallContext::new`.
 
 We keep all 282 existing `&mut Vm` functions unchanged with a fourth function kind. The VM reruns a `&mut Vm` function on a limit retry. It runs a `CallContext` function once per call.
 
@@ -57,16 +57,16 @@ The scheduler must suspend a task for a permission prompt. `CallContext::step` t
 
 ### 4. Wrap callback run endings in `Fail`
 
-`FailKind::Ended(RunEnding)` stores a callback's terminal `RunEnding` and stack trace inside `Fail`. Host code propagates that `Fail` with `?`. `Vm::run_ending_of` unwraps `FailKind::Ended` directly. `Fail::as_limit` returns `None` for `FailKind::Ended`. `call_native` therefore skips limit-retry handling.
+`FailKind::Ended(RunEnding)` stores a terminal `RunEnding` inside `Fail`. Host code propagates that `Fail` with `?`. `Vm::run_ending_of` unwraps `FailKind::Ended` directly. `Fail::as_limit` returns `None` for `FailKind::Ended`. `call_native` therefore skips limit-retry handling.
 
 ### 5. Reuse the `CALLBACK_PROTO` trampoline
 
-`Vm::run_callback` pushes a `CALLBACK_PROTO` frame with `begin_callback`. `Vm::run_callback_slices` then loops over `run_slice` and handles each `FiberStop`:
+`Vm::run_callback` pushes a `CALLBACK_PROTO` frame with `begin_callback`. `Vm::run_callback_slices` then runs `run_slice` in a loop for each `FiberStop`:
 
 - `CallbackReturn(value)`: return `value` to the caller.
 - `Preempt`: check time and interrupt limits with `Meter::check`. Start the next fuel slice under the active deadlines. Continue the loop.
 - `YieldNow`: continue running the callback.
-- `Blocked`, `AsyncNative`, `Prompt`, `Cancelled`: end the run with an `invalid` error and the stack trace at the suspension site.
+- `Blocked`, `AsyncNative`, `Prompt`, `Cancelled`: end the run with an `invalid` error and the stack trace at that stop site.
 - `Done`, `Unwound`, `CollectAndRetry`: unreachable. `CALLBACK_PROTO` catches top-level returns. `run_slice` handles `CollectAndRetry`.
 
 On exit, `run_callback` truncates `fiber.frames` to its pre-call depth. It also restores `Vm::caller_site`. Under SPEC §7.1, terminal run endings skip `defer` blocks. The VM needs only that frame truncation for callee cleanup.
@@ -79,11 +79,11 @@ The engine also ends the run if a callback cancels its own task. An active Rust 
 
 ### 6. Bound Rust stack growth and call depth
 
-The engine caps nested synchronous callbacks at 256 KiB of Rust stack, half of a 512 KiB thread stack. `run_callback` measures stack growth from the stack address recorded at the start of the fiber turn. Lua's `LUAI_MAXCCALLS` counts callbacks rather than stack bytes. Native frames between callbacks can allocate arbitrary stack space. `begin_callback` also enforces `max_call_depth` across both synchronous and async callbacks.
+The engine caps synchronous callbacks at 256 KiB of Rust stack. 256 KiB is half of the minimum 512 KiB thread stack. `run_callback` measures stack growth from the stack address recorded at the start of the fiber turn. Lua's `LUAI_MAXCCALLS` bounds only the callback count. Native frames between callbacks can allocate arbitrary stack space. `begin_callback` also enforces `max_call_depth` across both synchronous and async callbacks.
 
 ### 7. Pass `CallContext` to `Num` evidence methods
 
-`Num::zero` and `Num::one` invoke prelude `NativeFn` entries. Those entries require `&mut Fiber`. `Num::zero` and `Num::one` therefore take `&mut CallContext`. `List.sum` and `List.product` take `&mut CallContext` as well. `Num::call_method` invokes the prelude `NativeFn` directly rather than calling `CallContext::call`. In prototype benchmarks, calling `Num` methods through `CallContext::call` slowed `xs.sum()` on a three-element list by 1.9x.
+`Num::zero` and `Num::one` invoke prelude `NativeFn` entries. Those entries require `&mut Fiber`. `Num::zero` and `Num::one` therefore take `&mut CallContext`. `List.sum` and `List.product` take `&mut CallContext` as well. `Num::call_method` invokes that prelude `NativeFn` directly. In prototype benchmarks, calling `Num` methods through `CallContext::call` slowed `xs.sum()` on a three-element list by 1.9x.
 
 ## Speed
 
@@ -99,7 +99,7 @@ Five profile-guided changes reduced callback overhead:
 
 - **Align `VmValue` payloads with `#[repr(u32)]`.** The default enum layout placed `Bool(bool)`'s payload at byte 1. `rustc` then copied bytes 1 through 7 of a `VmValue` with two overlapping stores. Each load from a copied value stalled store-to-load forwarding for 13 ns. A 4-byte tag aligns every payload to byte 4 or byte 8.
 - **Pass `&Arc<Program>` and `&Arc<Vec<NativeEntry>>` to `Vm::interp`.** The scheduler clones both handles once per batch of turns. `CallContext` clones them on its first callback. In prototype benchmarks, `&Program` and `&[NativeEntry]` parameters spilled an extra register in the dispatch loop. That spill slowed `struct method dispatch 2M` by 22%.
-- **Catch panics once per fiber turn.** The scheduler wraps `run_fiber_turn` in `catch_unwind` instead of wrapping `run_slice`. Synchronous callbacks run inside that turn guard.
+- **Catch panics once per fiber turn.** The scheduler wraps `run_fiber_turn` in `unwind::catch` once per turn. Synchronous callbacks run inside that turn guard.
 - **Cache the callback stack base on `CallContext`.** The caller's frame stays fixed during a synchronous native call. `CallContext` computes `ProgramCode` and the callback frame base on its first callback. Later callbacks in the same call reuse both values.
 - **Box `Capability` inside `FiberStop::Prompt`.** A boxed `Capability` shrinks `FiberStop` from 104 bytes to 40 bytes.
 

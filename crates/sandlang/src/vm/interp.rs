@@ -602,7 +602,7 @@ impl Vm {
         Err(Trap::Limit(k).into())
     }
 
-    /// Runs `fiber` until it stops or exhausts `fuel_out`.
+    /// Executes bytecode on `fiber` with `fuel_out`.
     pub(crate) fn interp(
         &mut self,
         prog: &Arc<Program>,
