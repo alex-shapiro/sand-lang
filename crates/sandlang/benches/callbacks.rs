@@ -1,10 +1,13 @@
-//! Benchmarks for native functions that call Sand functions. Run with
-//! `cargo bench --bench callbacks`. `cargo test --benches` runs each program
-//! once and checks its output.
+//! Benchmarks for native functions that call Sand functions.
 //!
-//! Each benchmark calls `fn inc(x: int) -> int { x + 1 }` one million times
-//! through a different caller. The harness reports the best wall time over
-//! `BENCH_RUNS` runs (default 5), including compilation, and the time per call.
+//! Run `cargo bench --bench callbacks` to measure wall time and time per call.
+//! Run `cargo test --benches` to verify each benchmark's output in a single
+//! pass.
+//!
+//! Each benchmark calls `fn inc(x: int) -> int { x + 1 }` 1,000,000 times
+//! through a different call path. By default, the harness runs each benchmark
+//! five times and reports the lowest total time, including compilation. Set
+//! `BENCH_RUNS` to change the run count.
 
 use sandlang::engine::{Config, Engine, HostModules, MemorySink};
 use sandlang::native::NativeModule;
@@ -18,22 +21,21 @@ const CALLS: u64 = 1_000_000;
 
 struct Bench {
     name: &'static str,
-    /// Sand expression that applies `inc` to 0 `CALLS` times.
-    apply: &'static str,
+    /// Sand expression that calls `inc` `CALLS` times starting from `0`.
+    call_expr: &'static str,
 }
 
 const BENCHES: &[Bench] = &[
-    Bench { name: "Sand call through a function value", apply: "apply(inc, 0, 1000000)" },
-    Bench { name: "synchronous native call", apply: "calls.apply(inc, 0, 1000000)" },
-    Bench { name: "async native call", apply: "calls.apply_async(inc, 0, 1000000)" },
+    Bench { name: "Sand call through a function value", call_expr: "apply(inc, 0, 1000000)" },
+    Bench { name: "synchronous native call", call_expr: "calls.apply(inc, 0, 1000000)" },
+    Bench { name: "async native call", call_expr: "calls.apply_async(inc, 0, 1000000)" },
 ];
 
 const PRELUDE: &str = "import calls\n\
                        fn inc(x: int) -> int { x + 1 }\n\
                        fn apply<T>(f: fn(T) -> T, x: T, times: int) -> T {\n    var y = x\n    for _ in 0..times { y = f(y) }\n    y\n}\n";
 
-/// Builds the `calls` module: `apply` calls Sand synchronously, and
-/// `apply_async` calls Sand from an async native future.
+/// Builds the `calls` host module with synchronous and async callback functions.
 fn calls_module() -> NativeModule {
     let mut module = NativeModule::new("calls");
     module.source(
@@ -67,31 +69,31 @@ fn calls_module() -> NativeModule {
     module
 }
 
-fn run_once(src: &str) -> (Duration, String) {
-    let out = MemorySink::new();
-    let config = Config::new().stdout(out.clone()).host_modules(HostModules::new([calls_module()]).unwrap());
+fn run_once(source: &str) -> (Duration, String) {
+    let stdout = MemorySink::new();
+    let config = Config::new().stdout(stdout.clone()).host_modules(HostModules::new([calls_module()]).unwrap());
     let mut engine = Engine::new(config);
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let start = Instant::now();
-    rt.block_on(engine.run_source("bench.sand", src)).unwrap();
-    (start.elapsed(), out.contents())
+    runtime.block_on(engine.run_source("bench.sand", source)).unwrap();
+    (start.elapsed(), stdout.contents())
 }
 
 fn main() {
-    let filter = std::env::args().skip(1).find(|a| !a.starts_with('-'));
-    let quick = std::env::var("BENCH_QUICK").is_ok() || !std::env::args().any(|a| a == "--bench");
-    let runs = if quick { 1 } else { std::env::var("BENCH_RUNS").ok().and_then(|n| n.parse().ok()).unwrap_or(5usize).max(1) };
+    let filter = std::env::args().skip(1).find(|arg| !arg.starts_with('-'));
+    let quick = std::env::var("BENCH_QUICK").is_ok() || !std::env::args().any(|arg| arg == "--bench");
+    let runs = if quick { 1 } else { std::env::var("BENCH_RUNS").ok().and_then(|raw| raw.parse().ok()).unwrap_or(5usize).max(1) };
     println!("{:<38} {:>10} {:>8}", "benchmark", "best", "ns/call");
-    for b in BENCHES.iter().filter(|b| filter.as_ref().is_none_or(|f| b.name.contains(f.as_str()))) {
-        let src = format!("{PRELUDE}print({})", b.apply);
+    for bench in BENCHES.iter().filter(|bench| filter.as_ref().is_none_or(|pattern| bench.name.contains(pattern.as_str()))) {
+        let source = format!("{PRELUDE}print({})", bench.call_expr);
         let best = (0..runs)
             .map(|_| {
-                let (time, out) = run_once(&src);
-                assert_eq!(out, format!("{CALLS}\n"), "{}", b.name);
-                time
+                let (elapsed, stdout) = run_once(&source);
+                assert_eq!(stdout, format!("{CALLS}\n"), "{}", bench.name);
+                elapsed
             })
             .min()
             .unwrap();
-        println!("{:<38} {:>8.1}ms {:>8.1}", b.name, best.as_secs_f64() * 1e3, best.as_secs_f64() * 1e9 / CALLS as f64);
+        println!("{:<38} {:>8.1}ms {:>8.1}", bench.name, best.as_secs_f64() * 1e3, best.as_secs_f64() * 1e9 / CALLS as f64);
     }
 }

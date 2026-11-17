@@ -588,7 +588,7 @@ pub enum Op {
     /// Ends a cleanup pad: leaves the frame and continues unwinding a
     /// cancelled task (`Proto::cleanups`).
     Unwind,
-    /// Returns register 0 from [`CALLBACK_PROTO`] to the native call that waits for it.
+    /// Returns register 0 from [`CALLBACK_PROTO`] to the active native call.
     ResumeNative,
 
     // Data structures.

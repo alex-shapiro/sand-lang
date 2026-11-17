@@ -23,8 +23,8 @@ use std::sync::{Arc, OnceLock};
 /// [`Heap::variant_id`](super::heap::Heap::variant_id), and
 /// [`Heap::field`](super::heap::Heap::field).
 #[derive(Clone, Copy, Debug, PartialEq)]
-// A 4-byte tag puts each payload at byte 4 or 8. Copies of a `VmValue` then
-// use aligned stores that later loads can forward from.
+// A 4-byte tag aligns every payload to byte 4 or byte 8. Aligned stores avoid
+// store-to-load forwarding stalls on `VmValue` copies.
 #[repr(u32)]
 pub enum VmValue {
     Unit,

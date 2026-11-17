@@ -820,21 +820,23 @@ fn lists(m: &mut NativeModule) {
         let set = set_of(vm, xs.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
-    fn fold_num(context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>, product: bool) -> Result<Param<0>, Fail> {
-        let identity = if product { num.one(context)? } else { num.zero(context)? }.raw();
+    fn fold_num(context: &mut CallContext, num: Num<0>, list: List<Param<0, traits::Num>>, is_product: bool) -> Result<Param<0>, Fail> {
+        let identity = if is_product { num.one(context)? } else { num.zero(context)? }.raw();
         context.step(|vm| -> Result<_, Fail> {
-            let len = list_len(vm, xs);
+            let len = list_len(vm, list);
             vm.charge(len as u64)?;
-            let mut acc = identity;
-            for i in 0..len {
-                let x = xs.items(&vm.heap)[i];
-                acc = vm.arith(if product { 2 } else { 0 }, acc, x)?;
+            let mut accumulator = identity;
+            for index in 0..len {
+                let item = list.items(&vm.heap)[index];
+                accumulator = vm.arith(if is_product { 2 } else { 0 }, accumulator, item)?;
             }
-            Ok(Param::from_raw(acc))
+            Ok(Param::from_raw(accumulator))
         })
     }
-    m.function("List.sum", |context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(context, num, xs, false));
-    m.function("List.product", |context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(context, num, xs, true));
+    m.function("List.sum", |context: &mut CallContext, num: Num<0>, list: List<Param<0, traits::Num>>| fold_num(context, num, list, false));
+    m.function("List.product", |context: &mut CallContext, num: Num<0>, list: List<Param<0, traits::Num>>| {
+        fold_num(context, num, list, true)
+    });
     fn extreme(vm: &mut Vm, xs: List<Param<0, traits::Ord>>, want: Ordering) -> Result<Option<Param<0>>, Fail> {
         let items = xs.items(&vm.heap);
         let mut best: Option<VmValue> = None;
