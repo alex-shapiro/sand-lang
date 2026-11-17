@@ -141,7 +141,7 @@ fn dense_get<'h>(heap: &'h Heap, m: &VmValue, k: &VmValue) -> Dense<'h> {
 
 /// Copies the captures of closure `h` to the start of `regs`.
 #[inline]
-pub(super) fn load_captures(heap: &Heap, h: u32, regs: &mut [VmValue]) {
+fn load_captures(heap: &Heap, h: u32, regs: &mut [VmValue]) {
     if let Obj::Closure(_, caps) = heap.obj(h) {
         copy_values(caps, regs);
     }
@@ -2001,8 +2001,8 @@ impl Vm {
         self.heap.append_text(cur, &s).map_err(Fail::limit)
     }
 
-    /// Calls native `n`. A Rust panic in it is caught by the scheduler
-    /// around the whole slice (`crate::unwind`).
+    /// Calls native `n`. The scheduler catches a Rust panic in it once per
+    /// fiber turn (`crate::unwind`).
     #[inline(always)]
     fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, fiber: &mut Fiber, args_end: usize) -> Result<VmValue, Ctl> {
         let entry = &natives[n as usize];
@@ -2535,7 +2535,7 @@ impl Vm {
 }
 
 /// Returns the interpreter fuel that `op` spends at `tick_call!` before it can fail.
-pub(super) const fn call_tick(op: Op) -> i64 {
+pub(super) fn call_tick(op: Op) -> i64 {
     match op {
         Op::CallDirect { .. }
         | Op::CallR { .. }

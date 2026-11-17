@@ -21,7 +21,7 @@ module.function("apply", |cx: &mut CallContext, f: VmVal<fn(Param<0>) -> Param<0
 
 ```rust
 impl CallContext<'_> {
-    pub fn vm(&mut self) -> &mut Vm;
+    pub fn vm(&self) -> &Vm;
     pub fn call(&mut self, callee: VmValue, args: &[VmValue]) -> Result<VmValue, Fail>;
     pub fn root(&mut self, value: VmValue) -> RootedValue;
     pub fn value(&self, rooted: RootedValue) -> VmValue;
@@ -43,11 +43,13 @@ The new kind keeps the 282 `&mut Vm` closures unchanged. Those natives follow a 
 
 `RootedValue` is the handle for both kinds of call. An async native keeps its roots in its `NativeCallState`, because its `'static` future cannot reach the fiber during a poll. A calling native pushes its roots onto `Fiber::native_roots`. The collector traces that stack, `Fiber::footprint` counts it, and the wrapper truncates it when the native returns. The stack is reused, so a call does not allocate.
 
+`CallContext::call` does not root its result. The collector runs only inside `call` and `step`, so the result stays valid until the next `call` or `step`, as every other `VmValue` does. A loop of callbacks then uses constant memory. An async native roots its results, because the collector can run between polls.
+
 ### 3. A calling native runs once
 
 The engine never runs a calling native a second time, so the VM does not need to know whether the native called Sand:
 
-- The return type cannot express a permission request or a collection request. `Vm::require` and `Vm::resource_slot` return `Ctl`, so `?` on them does not compile in a calling native. The native calls them through `CallContext::step`.
+- `CallContext::vm` returns `&Vm`. Only the closure of `CallContext::step` gets `&mut Vm`, so every limit check that can allocate or prompt happens in `step`.
 - `CallContext::step` collects garbage in place and runs its closure again. `NativeContext::step` shares the same attempt function.
 - The wrapper converts any `Fail` from the closure into a run ending, as `poll_native_call` does for a future's output. `call_native` therefore never restarts the native.
 
@@ -69,13 +71,17 @@ A calling native cannot prompt for a permission. A prompt is a suspension.
 | `Blocked`, `AsyncNative`, `Prompt`, `Cancelled` | End the run with an `invalid` error and the trace at the suspension.                           |
 | `Done`, `Unwound`, `CollectAndRetry`            | Cannot occur.                                                                                  |
 
-On every outcome, `run_callback` restores the frames of the fiber. A run ending does not run `defer` blocks (SPEC §7.1), so the callee needs no other cleanup. `run_callback` also saves and restores `Vm::collected` and `Vm::caller_site`, because the callee makes native calls of its own.
+On every outcome, `run_callback` restores the frames of the fiber. A run ending does not run `defer` blocks (SPEC §7.1), so the callee needs no other cleanup. `run_callback` also saves and restores `Vm::caller_site`, because the callee makes native calls of its own.
+
+`CallContext` keeps the first run ending. Every later `call` and `step` returns it, and `finish` ends the run with it, so a native cannot ignore it.
+
+If a callback starts a new slice, `finish` ends that slice, so that the scheduler preempts the task after the native returns.
 
 A task can cancel itself inside a callback. The Rust frame of the native sits between the callee frames and the caller frames, and the scheduler cannot unwind it. Self-cancellation therefore ends the run, as other suspensions do.
 
 ### 6. Depth limit
 
-`Vm::nested_callbacks` counts the callbacks on the Rust stack. Lua counts nested C calls the same way (`nCcalls`, `LUAI_MAXCCALLS`). The limit lets nested callbacks use at most half of a 512 KiB stack. Each level uses 2,368 bytes in a release build and 2,320 bytes in the test profile, so the limit is 110. `begin_callback` also checks `max_call_depth`, so callback frames count toward it for both kinds of call.
+`run_callback` compares the address of a local variable with the address at the start of the fiber turn. Nested callbacks can use 256 KiB, half of a 512 KiB stack. A count of callbacks, as in Lua's `LUAI_MAXCCALLS`, does not bound the stack, because native functions between callbacks use any amount of it. `begin_callback` also checks `max_call_depth`, so callback frames count toward it for both kinds of call.
 
 ### 7. `Num` evidence uses the context
 
@@ -83,13 +89,13 @@ A task can cancel itself inside a callback. The Rust frame of the native sits be
 
 ## Speed
 
-Each number is the best of 7 runs of 1M calls to `fn inc(x: int) -> int { x + 1 }`, on an Apple M1:
+Each number is the best of 4 interleaved runs of 1M calls to `fn inc(x: int) -> int { x + 1 }`, on an Apple M1:
 
 | Call                               | ns per call |
 | ---------------------------------- | ----------: |
-| Sand call through a function value |        15.8 |
-| Synchronous native call            |        26.2 |
-| Async native call                  |        88.3 |
+| Sand call through a function value |        16.2 |
+| Synchronous native call            |        29.0 |
+| Async native call                  |        93.6 |
 
 The CPU Profiler attributed the cost of a callback before the changes below. These changes made the callback faster:
 
@@ -97,10 +103,10 @@ The CPU Profiler attributed the cost of a callback before the changes below. The
 - **The interpreter borrows the program and native table.** `Vm::interp` takes `&Arc<Program>` and `&Arc<Vec<NativeEntry>>`. The scheduler clones them once for each batch of turns, and a `CallContext` clones them on its first callback. Passing `&Program` and `&[NativeEntry]` instead added a register to the dispatch loop and slowed `struct method dispatch 2M` by 22%.
 - **Panics are caught once per turn,** not once per slice, so a callback skips `catch_unwind`.
 - **`CallContext` caches the callback frame base,** because the caller's frame stays the same during the call.
-- **`begin_callback` pushes a closure callee's frame itself,** which skips the dispatch of the trampoline's `CallR`. Native and iterator callees still go through `CallR`.
-- **`begin_callback` copies arguments in a loop,** because `copy_from_slice` called `memmove` for a single argument.
 - **`FiberStop::Prompt` boxes its `Capability`,** which shrinks `FiberStop` from 104 bytes to 40.
 
 The interpreter run of the callee costs about the same as one Sand call. The rest of a callback is spread over `run_callback`, `finish_callback`, `run_slice`, and `begin_callback`, and no part of it is above 2 ns.
+
+`begin_callback` could push the frame of a closure callee itself and skip the trampoline's `CallR`. That saves 3 ns for a synchronous call and 6 ns for an async call, but it copies the frame entry of the interpreter, so the branch does not do it.
 
 `native method calls 10M` in `benches/vm.rs` is about 1.5% slower, because each native wrapper loads the stack pointer and length from the fiber. The old signature received them in registers. Only a lent fiber, a `HostFn` variant per call kind, or `unsafe` code removes those loads.

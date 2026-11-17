@@ -311,9 +311,7 @@ fn attempt_step<R, E: NativeError>(
 /// module.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
 /// module.function("twice", |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, input: Param<0>| -> Result<Param<0>, Fail> {
 ///     let once = context.call(sand_fn.raw(), &[input.raw()])?;
-///     let once = context.value(once);
-///     let twice = context.call(sand_fn.raw(), &[once])?;
-///     Ok(Param::from_raw(context.value(twice)))
+///     Ok(Param::from_raw(context.call(sand_fn.raw(), &[once])?))
 /// });
 /// ```
 pub struct CallContext<'a> {
@@ -339,19 +337,18 @@ impl<'a> CallContext<'a> {
         CallContext { vm, fiber, roots_start, slice_base, callbacks: None, ending: None }
     }
 
-    /// Returns the [`Vm`].
+    /// Returns the [`Vm`] to read. Change the VM inside [`CallContext::step`].
     ///
     /// The garbage collector can free any unrooted heap value during
     /// [`CallContext::call`] and [`CallContext::step`]. Pass a [`VmValue`] to
-    /// [`CallContext::root`] to keep it across these calls. Check memory and
-    /// resource limits inside [`CallContext::step`]: a limit error outside it
-    /// ends the run, because the engine does not run the function again.
-    pub fn vm(&mut self) -> &mut Vm {
+    /// [`CallContext::root`] to keep it across these calls.
+    pub fn vm(&self) -> &Vm {
         self.vm
     }
 
     /// Calls the Sand function `callee` with `args` on the calling task, and
-    /// returns its rooted result.
+    /// returns its result. The result stays valid until the next `call` or
+    /// `step`. Pass it to [`CallContext::root`] to keep it longer.
     ///
     /// `callee` runs until it returns, and blocks the host thread until then.
     /// It cannot suspend: if it waits, prompts for a permission, or cancels
@@ -364,20 +361,18 @@ impl<'a> CallContext<'a> {
     ///
     /// Panics if `args.len()` exceeds 255.
     #[inline]
-    pub fn call(&mut self, callee: VmValue, args: &[VmValue]) -> Result<RootedValue, Fail> {
+    pub fn call(&mut self, callee: VmValue, args: &[VmValue]) -> Result<VmValue, Fail> {
         assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
         if let Some(ending) = &self.ending {
             return Err(ending.clone().into());
         }
         let (vm, fiber) = (&mut *self.vm, &mut *self.fiber);
         let (code, base) = self.callbacks.get_or_insert_with(|| (vm.program_code(), fiber.live_top(&vm.prog)));
-        match vm.run_callback(code, fiber, *base, callee, args) {
-            Ok(result) => Ok(self.root(result)),
-            Err(fail) => {
-                self.ending = fail.ending().cloned();
-                Err(fail)
-            }
+        let result = vm.run_callback(code, fiber, *base, callee, args);
+        if let Err(fail) = &result {
+            self.ending = fail.ending().cloned();
         }
+        result
     }
 
     /// Keeps `value` alive until this native call returns. Returns its handle.
@@ -414,12 +409,13 @@ impl<'a> CallContext<'a> {
                     self.vm.collect_all_garbage(Some(self.fiber));
                 }
                 StepAttempt::Prompt(_) => {
-                    break Err(Fail::from(self.vm.synchronous_call_error(self.fiber, "prompt for a permission", None)).into());
+                    let ending = self.vm.synchronous_call_error(self.fiber, "prompt for a permission", None);
+                    self.ending = Some(ending.clone());
+                    break Err(Fail::from(ending).into());
                 }
             }
         };
         self.vm.heap.fail_next_check.set(false);
-        self.vm.forget_once_answers();
         result
     }
 

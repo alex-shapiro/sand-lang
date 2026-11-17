@@ -821,15 +821,17 @@ fn lists(m: &mut NativeModule) {
         Ok(new_set(vm, set))
     });
     fn fold_num(context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>, product: bool) -> Result<Param<0>, Fail> {
-        let mut acc = if product { num.one(context)? } else { num.zero(context)? }.raw();
-        let vm = context.vm();
-        let len = list_len(vm, xs);
-        vm.charge(len as u64)?;
-        for i in 0..len {
-            let x = xs.items(&vm.heap)[i];
-            acc = vm.arith(if product { 2 } else { 0 }, acc, x)?;
-        }
-        Ok(Param::from_raw(acc))
+        let identity = if product { num.one(context)? } else { num.zero(context)? }.raw();
+        context.step(|vm| -> Result<_, Fail> {
+            let len = list_len(vm, xs);
+            vm.charge(len as u64)?;
+            let mut acc = identity;
+            for i in 0..len {
+                let x = xs.items(&vm.heap)[i];
+                acc = vm.arith(if product { 2 } else { 0 }, acc, x)?;
+            }
+            Ok(Param::from_raw(acc))
+        })
     }
     m.function("List.sum", |context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(context, num, xs, false));
     m.function("List.product", |context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(context, num, xs, true));

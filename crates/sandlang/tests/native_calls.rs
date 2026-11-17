@@ -84,8 +84,7 @@ fn calls_module(log: &EventLog) -> NativeModule {
         |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, value: Param<0>, times: i64| -> Result<Param<0>, Fail> {
             let mut current = value.raw();
             for _ in 0..times {
-                let result = context.call(sand_fn.raw(), &[current])?;
-                current = context.value(result);
+                current = context.call(sand_fn.raw(), &[current])?;
             }
             Ok(Param::from_raw(current))
         },
@@ -108,19 +107,18 @@ fn calls_module(log: &EventLog) -> NativeModule {
     module.function(
         "collect_sync",
         |context: &mut CallContext, callback: VmVal<fn(i64) -> String>, count: i64| -> Result<Vec<String>, Fail> {
-            let results = (0..count).map(|i| context.call(callback.raw(), &[VmValue::Int(i)])).collect::<Result<Vec<_>, _>>()?;
-            Ok(results
-                .into_iter()
-                .map(|result| {
-                    {
-                        let value = context.value(result);
-                        context.vm().str(value)
-                    }
-                    .to_string()
-                })
-                .collect())
+            let mut results = Vec::new();
+            for i in 0..count {
+                let result = context.call(callback.raw(), &[VmValue::Int(i)])?;
+                results.push(context.root(result));
+            }
+            Ok(results.into_iter().map(|result| context.vm().str(context.value(result)).to_string()).collect())
         },
     );
+    module.function("knock_and_ignore", |context: &mut CallContext| -> i64 {
+        let _ = context.step(|vm| vm.require(&Capability::Custom { name: "door".into(), detail: "back".into() }));
+        7
+    });
     module.function("ignore_errors", |context: &mut CallContext, callback: Callback| -> i64 {
         let _ = context.call(callback.raw(), &[]);
         7
@@ -128,9 +126,8 @@ fn calls_module(log: &EventLog) -> NativeModule {
     // `Heap::new_str` makes no memory check, so under `retry_stress` the first
     // check is the stack growth for the callback frame.
     module.function("call_with_fresh", |context: &mut CallContext, callback: VmVal<fn(String) -> String>| -> Result<String, Fail> {
-        let fresh = context.vm().heap.new_str("fresh");
+        let fresh = context.step(|vm| -> Result<_, Fail> { Ok(vm.heap.new_str("fresh")) })?;
         let result = context.call(callback.raw(), &[fresh])?;
-        let result = context.value(result);
         Ok(context.vm().str(result).to_string())
     });
     module.function("knock", |vm: &mut Vm, name: String| -> Result<String, HostError> {
@@ -597,7 +594,7 @@ fn engine_exits_run_from_synchronous_callback() {
 }
 
 #[test]
-fn synchronous_callback_results_stay_alive_until_the_native_returns() {
+fn rooted_callback_results_stay_alive_until_the_native_returns() {
     let source = "print(calls.collect_sync((i) => {\n\
                       var junk: [str] = []\n\
                       for j in 0..200 { junk.push(\"garbage \\(j)\") }\n\
@@ -614,6 +611,24 @@ fn engine_ends_the_run_when_a_native_ignores_a_callback_run_ending() {
     let (result, stdout) = run(Config::new(), &EventLog::default(), "calls.ignore_errors(() => { let _ = [1][2] })\nprint(\"after\")");
     assert!(matches!(&result, Err(Error::Runtime { message, .. }) if message.contains("bounds")), "{result:?}");
     assert_eq!(stdout, "");
+}
+
+#[test]
+fn engine_ends_the_run_when_a_native_ignores_a_prompt_in_step() {
+    let config = Config::new()
+        .custom_policy(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow })
+        .prompter(|_: Capability| async { PromptAnswer::AllowOnce });
+    let (result, stdout) = run(config, &EventLog::default(), "calls.knock_and_ignore()\nprint(\"after\")");
+    let expected = "invalid: cannot prompt for a permission inside a synchronous native call";
+    assert!(matches!(&result, Err(Error::Runtime { message, .. }) if message.contains(expected)), "{result:?}");
+    assert_eq!(stdout, "");
+}
+
+#[test]
+fn callback_loops_in_a_native_use_constant_memory() {
+    // Rooting each result would hold 16 bytes per callback, 3.2 MB in all.
+    let source = "print(calls.apply_sync((x) => x + 1, 0, 200000))";
+    assert_eq!(run_ok(memory_limit(2 << 20), source), "200000\n");
 }
 
 #[test]

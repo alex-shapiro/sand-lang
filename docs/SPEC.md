@@ -2203,8 +2203,8 @@ On task cancellation during a callback, the engine runs the callee's `defer`
 blocks before dropping the native future. It then runs the caller's `defer`
 blocks.
 
-The engine keeps rooted values and callback results alive until the native call
-returns.
+`NativeContext` keeps rooted values and callback results alive until the native
+call returns.
 
 `CallContext::call` runs a Sand function on the Rust stack of the calling
 task. The callee runs to completion and blocks the host thread until it
@@ -2212,16 +2212,19 @@ returns. It cannot suspend: if it waits for a timer, a task, a channel, or an
 async native function, prompts for a permission, or cancels its own task, the
 run ends with an `invalid` error. `task.yield_now()` returns at once. An error,
 a limit, or `exit` in the callee ends the run with the trace of the callee and
-its callers, even if the native function ignores the error. `call` roots its
-result until the native function returns. `CallContext::step` retries a memory
-or resource check after an in-place garbage collection.
+its callers, even if the native function ignores the error. The result of
+`call` stays valid until the next `call` or `step`. `CallContext::root` keeps a
+value until the native function returns. `CallContext::vm` gives read access.
+Changes to the VM happen in `CallContext::step`, which retries a memory or
+resource check after an in-place garbage collection.
 
 The engine runs a `CallContext` function only once, because the function can
 have called Sand. A limit error outside `step` therefore ends the run, and the
 function cannot prompt for a permission. In both contexts, a callback of a
 closure uses two frames toward `max_call_depth`, and a callback of a native
 function uses one. Nested callbacks can use 256 KiB of the Rust stack. A
-deeper callback fails with `limit: stack overflow`.
+deeper callback fails with `limit: stack overflow`. The engine needs a thread
+with at least 512 KiB of stack.
 
 Bound the recursion depth of any async native function. The engine charges only
 the top-level future and its root table against `max_memory`. A recursive async

@@ -150,9 +150,9 @@ impl Fail {
         Fail(Box::new(FailKind::Internal(msg.into())))
     }
 
-    /// Reports that the run exceeded limit `k`. If a native call returns
-    /// [`LimitKind::Memory`], the engine collects garbage and retries the call
-    /// once.
+    /// Reports that the run exceeded limit `k`. If a native call or a `step`
+    /// returns [`LimitKind::Memory`], the engine collects garbage and retries
+    /// it once. A `CallContext` function runs only once.
     #[cold]
     pub fn limit(k: LimitKind) -> Fail {
         Fail(Box::new(FailKind::Limit(k)))
