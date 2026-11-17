@@ -1,4 +1,4 @@
-//! Integration tests for async native functions and Sand callbacks.
+//! Integration tests for native functions that call Sand functions.
 
 mod common;
 
@@ -6,7 +6,7 @@ use common::{StoppedClock, rt};
 use parking_lot::Mutex;
 use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
 use sandlang::native::NativeModule;
-use sandlang::native::context::NativeContext;
+use sandlang::native::context::{CallContext, NativeContext};
 use sandlang::native::convert::{HostError, IntoVmValue};
 use sandlang::native::func::Later;
 use sandlang::native::ty::{Param, VmVal};
@@ -75,7 +75,39 @@ impl<F: Future> Future for WakeGatedFuture<F> {
 /// Builds the `calls` test module backed by `log`.
 fn calls_module(log: &EventLog) -> NativeModule {
     let mut module = NativeModule::new("calls");
-    module.source("pub native fn apply<T>(f: fn(T) -> T, x: T, times: int) -> T");
+    module.source(
+        "pub native fn apply<T>(f: fn(T) -> T, x: T, times: int) -> T\n\
+         pub native fn apply_sync<T>(f: fn(T) -> T, x: T, times: int) -> T",
+    );
+    module.function(
+        "apply_sync",
+        |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, value: Param<0>, times: i64| -> Result<Param<0>, Fail> {
+            let mut current = value.raw();
+            for _ in 0..times {
+                current = context.call(sand_fn.raw(), &[current])?;
+            }
+            Ok(Param::from_raw(current))
+        },
+    );
+    // Allocate `"kept"` before the callback to keep it alive only through `CallContext::root`.
+    module.function("keep_sync", |context: &mut CallContext, callback: Callback| -> Result<String, Fail> {
+        let kept = context.step(|vm| "kept".into_vm_value(vm))?;
+        let kept = context.root(kept);
+        context.call(callback.raw(), &[])?;
+        let kept = context.value(kept);
+        Ok(context.vm().str(kept).to_string())
+    });
+    module.function("allocate_after", |context: &mut CallContext, callback: Callback, byte_count: i64| -> Result<i64, Fail> {
+        context.call(callback.raw(), &[])?;
+        context.step(|vm| -> Result<i64, Fail> {
+            let text = "x".repeat(byte_count as usize).into_vm_value(vm)?;
+            Ok(vm.str(text).len() as i64)
+        })
+    });
+    module.function("knock", |vm: &mut Vm, name: String| -> Result<String, HostError> {
+        vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
+        Ok(name)
+    });
     module.function(
         "apply",
         |sand_fn: VmVal<fn(Param<0>) -> Param<0>>, value: Param<0>, times: i64| -> Result<Later<Param<0>, Fail>, Fail> {
@@ -391,4 +423,146 @@ fn sessions_run_callbacks_in_inputs_and_in_background_tasks() {
     let wait = async { tokio::time::sleep(Duration::from_millis(50)).await };
     runtime.block_on(session.run_tasks_until(wait, |e| panic!("{e}")));
     assert_eq!(runtime.block_on(session.eval("t.wait()")).unwrap().as_deref(), Some("2"));
+}
+
+#[test]
+fn synchronous_callbacks_return_their_results_to_the_native_call() {
+    assert_eq!(run_ok(Config::new(), "print(calls.apply_sync((s) => s + \"!\", \"hi\", 1000).len())"), "1002\n");
+}
+
+#[test]
+fn synchronous_callbacks_nest_through_native_calls() {
+    let source = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply_sync(down, n - 1, 1) + 1 } }\nprint(down(30))";
+    assert_eq!(run_ok(Config::new().gc_stress(true), source), "30\n");
+
+    let limits = Limits { max_call_depth: 40, ..Limits::default() };
+    let (result, _) = run(Config::new().limits(limits), &EventLog::default(), source);
+    assert!(matches!(&result, Err(Error::Runtime { message, .. }) if message.contains("stack overflow")), "{result:?}");
+}
+
+#[test]
+fn deep_synchronous_callbacks_end_with_a_limit_error_on_a_small_stack() {
+    let source = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply_sync(down, n - 1, 1) + 1 } }\nprint(down(100000))";
+    let limits = Limits { max_call_depth: 1_000_000, ..Limits::default() };
+    let deep_run = move || run(Config::new().limits(limits), &EventLog::default(), source).0;
+    let result = std::thread::Builder::new().stack_size(512 << 10).spawn(deep_run).unwrap().join().unwrap();
+    assert!(matches!(&result, Err(Error::Runtime { message, .. }) if message.contains("stack overflow")), "{result:?}");
+}
+
+#[test]
+fn synchronous_callbacks_keep_rooted_values_alive() {
+    let source = "print(calls.keep_sync(() => {\n\
+                      var xs: [str] = []\n\
+                      for i in 0..2000 { xs.push(\"garbage \\(i)\") }\n\
+                  }))";
+    for config in [Config::new().gc_stress(true), Config::new().retry_stress(true)] {
+        assert_eq!(run_ok(config, source), "kept\n");
+    }
+}
+
+#[test]
+fn synchronous_native_allocates_after_in_place_collection_and_runs_callbacks_once() {
+    // `strings = []` leaves 8 MB unreachable. The 10 MB allocation fits within
+    // the 16 MB limit only if `CallContext::step` collects garbage in place.
+    let source = "var block = \"x\"\n\
+                  for _ in 0..10 { block = block + block }\n\
+                  var strings: [str] = []\n\
+                  for i in 0..8000 { strings.push(\"\\(i)\" + block) }\n\
+                  strings = []\n\
+                  print(calls.allocate_after(() => calls.log(\"callback\"), 10 << 20))";
+    for stress in [false, true] {
+        let log = EventLog::default();
+        let (result, stdout) = run(memory_limit(16 << 20).retry_stress(stress), &log, source);
+        result.unwrap();
+        assert_eq!(stdout, "10485760\n");
+        assert_eq!(*log.lock(), ["callback"], "retry stress: {stress}");
+    }
+}
+
+#[test]
+fn collector_runs_inside_synchronous_callbacks_under_a_memory_limit() {
+    // Each callback leaves 1 MB of garbage. 100 callbacks fit within the 16 MB
+    // limit only if the collector runs during the native call.
+    let source = "var block = \"x\"\n\
+                  for _ in 0..20 { block = block + block }\n\
+                  print(calls.apply_sync((n) => (block + \"y\").len() - block.len() + n, 0, 100))";
+    assert_eq!(run_ok(memory_limit(16 << 20), source), "100\n");
+}
+
+#[test]
+fn every_suspension_in_a_synchronous_callback_ends_the_run() {
+    let cases = [
+        ("task.sleep(1ms)", "wait"),
+        ("calls.wait_ms(1)", "wait"),
+        ("let ch: Channel<int> = Channel()\nlet _ = ch.recv()", "wait"),
+        ("let t = spawn task.sleep(10ms)\nt.wait()", "wait"),
+        ("let _ = calls.knock(\"front\")", "prompt for a permission"),
+    ];
+    for (body, action) in cases {
+        let prompted = Arc::new(AtomicBool::new(false));
+        let prompted_by_engine = prompted.clone();
+        let config = Config::new()
+            .custom_policy(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow })
+            .prompter(move |_: Capability| {
+                prompted_by_engine.store(true, Ordering::SeqCst);
+                async { PromptAnswer::AllowOnce }
+            });
+        let source = format!("calls.apply_sync((x) => {{\n{body}\nx\n}}, 0, 1)");
+        let (result, _) = run(config, &EventLog::default(), &source);
+        let expected = format!("invalid: cannot {action} inside a synchronous native call");
+        assert!(matches!(&result, Err(Error::Runtime { message, .. }) if message.contains(&expected)), "{body}: {result:?}");
+        assert!(!prompted.load(Ordering::SeqCst), "{body}");
+    }
+}
+
+#[test]
+fn self_cancellation_in_a_synchronous_callback_ends_the_run() {
+    let source = "let ch: Channel<Task<int>> = Channel()\n\
+                  let t = spawn {\n\
+                      let me = ch.recv().unwrap()\n\
+                      calls.apply_sync((x) => {\n\
+                          me.cancel()\n\
+                          x\n\
+                      }, 0, 1)\n\
+                  }\n\
+                  ch.send(t)\n\
+                  print(t.wait())";
+    let (result, _) = run(Config::new(), &EventLog::default(), source);
+    let expected = "invalid: cannot cancel the running task inside a synchronous native call";
+    assert!(matches!(&result, Err(Error::Runtime { message, .. }) if message.contains(expected)), "{result:?}");
+}
+
+#[test]
+fn synchronous_callbacks_continue_after_yield_now() {
+    assert_eq!(run_ok(Config::new(), "print(calls.apply_sync((x) => {\ntask.yield_now()\nx + 1\n}, 0, 3))"), "3\n");
+}
+
+#[test]
+fn instruction_and_wall_time_limits_hold_inside_synchronous_callbacks() {
+    let source = "calls.apply_sync((x) => {\nvar i = 0\nwhile i >= 0 { i += 1 }\nx\n}, 0, 1)";
+    let limits = [
+        (Limits { max_instructions: Some(1_000_000), ..Limits::default() }, LimitKind::Instructions),
+        (Limits { max_wall_time: Some(Duration::from_millis(50)), ..Limits::default() }, LimitKind::WallTime),
+    ];
+    for (limits, kind) in limits {
+        let (result, _) = run(Config::new().limits(limits), &EventLog::default(), source);
+        assert!(matches!(result, Err(Error::Limit(k)) if k == kind), "{result:?}");
+    }
+}
+
+#[test]
+fn synchronous_callback_errors_include_the_outer_caller_in_the_trace() {
+    let source = "fn divide(x: int) -> int { x / 0 }\nfn outer() -> int { calls.apply_sync(divide, 1, 1) }\nprint(outer())";
+    let (result, _) = run(Config::new(), &EventLog::default(), source);
+    let Err(Error::Runtime { trace, .. }) = result else { panic!("{result:?}") };
+    let functions: Vec<&str> = trace.iter().map(|frame| frame.function.as_str()).collect();
+    assert_eq!(functions, ["divide", "outer", "<top level>"]);
+}
+
+#[test]
+fn engine_exits_run_from_synchronous_callback() {
+    let source = "calls.apply_sync((x) => {\nexit(3)\nx\n}, 1, 1)\nprint(\"unreachable\")";
+    let (result, stdout) = run(Config::new(), &EventLog::default(), source);
+    assert_eq!(result.unwrap(), 3);
+    assert_eq!(stdout, "");
 }

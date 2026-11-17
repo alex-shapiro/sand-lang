@@ -225,6 +225,26 @@ stats.function("counter", || Counter(AtomicI64::new(0)));
 stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::Relaxed) + n).params(&["n"]);
 ```
 
+### Calling Sand functions
+
+A native function can call a Sand function that the script passes to it. Take `&mut CallContext` as the first parameter and call `CallContext::call`. The Sand function runs on the calling task and returns before the native function continues:
+
+```rust
+use sandlang::native::NativeModule;
+use sandlang::native::context::CallContext;
+use sandlang::native::ty::{Param, VmVal};
+use sandlang::vm::Fail;
+
+let mut calls = NativeModule::new("calls");
+calls.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
+calls.function("twice", |cx: &mut CallContext, f: VmVal<fn(Param<0>) -> Param<0>>, x: Param<0>| -> Result<Param<0>, Fail> {
+    let once = cx.call(f.raw(), &[x.raw()])?;
+    Ok(Param::from_raw(cx.call(f.raw(), &[once])?))
+});
+```
+
+The Sand function cannot wait for I/O, a timer, or another task. If it does, the run ends with an error. A native function that must wait while Sand code runs can return a `Later` future and call Sand through `NativeContext::call`.
+
 ### Checking permissions
 
 To check a sandbox capability inside a native function, take `&mut Vm` as the first parameter and call `Vm::require` before performing any side effect. `Vm::require` returns a `"permission_denied"` error if the policy denies the request:

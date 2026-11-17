@@ -62,7 +62,7 @@ pub enum FiberStop {
     Blocked,
     /// Started an async native call. The scheduler writes its result to `Fiber::result_slot`.
     AsyncNative(AsyncNativeCall),
-    /// Finished a Sand callback for the innermost async native call.
+    /// Finished a Sand callback for the innermost native call.
     CallbackReturn(VmValue),
     /// A native call requested a permission prompt.
     Prompt(Box<Capability>),
@@ -1749,10 +1749,10 @@ impl Vm {
         None
     }
 
-    /// Calls a native. `Ok(None)` to continue, `Ok(Some(exit))` to suspend.
-    /// Arguments are borrowed from the fiber's stack because the running fiber
-    /// is not in `self.fibers` and so natives cannot observe or move it. If a
-    /// native exhausts the slice's fuel, the VM preempts the task on return.
+    /// Calls a native; `Ok(None)` to continue, `Ok(Some(exit))` to suspend.
+    /// The native reads its arguments from the fiber's stack. The running
+    /// fiber is not in `self.fibers`. A native that exhausts the slice's fuel
+    /// preempts the task once it returns.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn call_native(
@@ -1769,7 +1769,7 @@ impl Vm {
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
         let fuel_at_call = self.meter.remaining_slice_fuel();
-        let mut r = self.invoke_native(natives, n, &fiber.stack[start..start + argc]);
+        let mut r = Self::invoke_native(self, natives, n, fiber, start + argc);
         self.heap.fail_next_check.set(false);
         if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
             // Check memory and resource limits before GC.
@@ -1779,7 +1779,7 @@ impl Vm {
             r = match self.meter.check_limits() {
                 Ok(()) => {
                     self.collected = true;
-                    let retried = self.invoke_native(natives, n, &fiber.stack[start..start + argc]);
+                    let retried = Self::invoke_native(self, natives, n, fiber, start + argc);
                     self.collected = false;
                     retried
                 }
@@ -2003,9 +2003,9 @@ impl Vm {
 
     /// Invokes a native function.
     #[inline(always)]
-    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[VmValue]) -> Result<VmValue, Ctl> {
+    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, fiber: &mut Fiber, args_end: usize) -> Result<VmValue, Ctl> {
         let entry = &natives[n as usize];
-        entry.f.call(self, args)
+        entry.f.call(self, fiber, args_end)
     }
 
     /// Returns the result of `on` if it is ready. Otherwise, registers a wait

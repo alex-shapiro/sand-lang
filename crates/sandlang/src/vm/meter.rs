@@ -170,6 +170,13 @@ impl VmMeter {
     /// after `SLICE_FUEL` units or stops at `max_instructions`. Returns the
     /// starting fuel for the interpreter's local counter.
     pub(crate) fn start_slice(&self, cpu_deadline: Option<Duration>, wall_deadline: Option<Instant>) -> i64 {
+        self.cpu_deadline.set(cpu_deadline);
+        self.wall_deadline.set(wall_deadline);
+        self.next_slice()
+    }
+
+    /// Begins another scheduling slice under the current deadlines.
+    pub(crate) fn next_slice(&self) -> i64 {
         let used = self.total_fuel_used();
         let slice_fuel = match self.max_instructions {
             Some(max) => max.saturating_sub(used).min(super::SLICE_FUEL as u64) as i64,
@@ -180,8 +187,6 @@ impl VmMeter {
         self.remaining_slice_fuel.set(slice_fuel);
         self.interpreter_fuel_baseline.set(slice_fuel);
         self.next_limit_check_fuel.set(0);
-        self.cpu_deadline.set(cpu_deadline);
-        self.wall_deadline.set(wall_deadline);
         slice_fuel
     }
 
