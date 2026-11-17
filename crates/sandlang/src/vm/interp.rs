@@ -61,9 +61,11 @@ pub enum FiberStop {
     Blocked,
     /// Started an async native call. The scheduler writes its result to `Fiber::result_slot`.
     AsyncNative(AsyncNativeCall),
-    /// Finished a Sand callback for the innermost async native call.
+    /// Finished a Sand callback for the innermost native call.
     CallbackReturn(VmValue),
-    Prompt(Capability),
+    /// A native call needs a permission prompt. The capability is boxed to keep
+    /// `FiberStop` small.
+    Prompt(Box<Capability>),
     /// `task.yield_now()`.
     YieldNow,
     /// The running task was cancelled.
@@ -486,6 +488,15 @@ impl Vm {
         }
     }
 
+    /// Raises the pending error of a resumed `fiber`.
+    #[cold]
+    #[inline(never)]
+    fn raise_pending_error(&mut self, fiber: &mut Fiber) -> RunEnding {
+        let msg = fiber.pending_error.take().unwrap_or_default();
+        let ip = fiber.frames.last().map(|f| f.ip).unwrap_or(0) as usize;
+        self.error_trap(fiber, ip, msg)
+    }
+
     /// `Op::Internal`: an internal error with constant message `msg`.
     #[cold]
     #[inline(never)]
@@ -592,14 +603,17 @@ impl Vm {
     }
 
     /// Runs `fiber` until it finishes, blocks, or exhausts `fuel`.
-    pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel_out: &mut i64) -> Result<FiberStop, RunEnding> {
+    pub(crate) fn interp(
+        &mut self,
+        prog: &Arc<Program>,
+        natives: &Arc<Vec<NativeEntry>>,
+        fiber: &mut Fiber,
+        fuel_out: &mut i64,
+    ) -> Result<FiberStop, RunEnding> {
         fiber.stopped_in_native_call = false;
-        if let Some(msg) = fiber.pending_error.take() {
-            let ip = fiber.frames.last().map(|f| f.ip).unwrap_or(0) as usize;
-            return Err(self.error_trap(fiber, ip, msg));
+        if fiber.pending_error.is_some() {
+            return Err(self.raise_pending_error(fiber));
         }
-        let prog = self.prog.clone();
-        let natives = self.natives.clone();
         // As few values as possible stay live across the loop, so that the
         // register allocator keeps `code`, `ip`, `regs` and fuel in registers.
         let fr = *fiber.frames.last().unwrap();
@@ -789,7 +803,7 @@ impl Vm {
                     Op::LoadGlobal { dst, g } => {
                         let v = &self.globals[g as usize];
                         if let VmValue::Uninit = v {
-                            fail!(uninit_global(&prog, g));
+                            fail!(uninit_global(prog, g));
                         }
                         r!(dst) = *v;
                     }
@@ -959,7 +973,7 @@ impl Vm {
                     // Metered and out of line (`op_compare`); the branches
                     // `JNeq` and `JNne` share the arm to keep one call site.
                     Op::Eq { .. } | Op::Ne { .. } | Op::Lt { .. } | Op::Le { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
-                        match retryable!(self.op_compare(&prog, op, regs)) {
+                        match retryable!(self.op_compare(prog, op, regs)) {
                             Ok(off) => jump!(off),
                             Err(c) => fail_stop!(c),
                         }
@@ -1113,9 +1127,9 @@ impl Vm {
                             break 'back off as i32;
                         }
                     }
-                    Op::SwitchVariant { src, table } => ip = switch_target(&prog, table, self.heap.variant_id(r!(src)) as i64),
-                    Op::SwitchInt { src, table } => ip = switch_target(&prog, table, int!(src)),
-                    Op::SwitchChar { src, table } => ip = switch_target(&prog, table, char_code(&self.heap, &r!(src))),
+                    Op::SwitchVariant { src, table } => ip = switch_target(prog, table, self.heap.variant_id(r!(src)) as i64),
+                    Op::SwitchInt { src, table } => ip = switch_target(prog, table, int!(src)),
+                    Op::SwitchChar { src, table } => ip = switch_target(prog, table, char_code(&self.heap, &r!(src))),
                     Op::JNotVariant { src, variant, off } => {
                         if self.heap.variant_id(r!(src)) != variant as u32 {
                             jump!(off)
@@ -1666,24 +1680,24 @@ impl Vm {
                             r!(dst) = v;
                             continue 'dispatch;
                         }
-                        match retryable!(self.op_display(&prog, v, false)) {
+                        match retryable!(self.op_display(prog, v, false)) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         }
                     }
-                    Op::Debug { dst, src } => match retryable!(self.op_display(&prog, r!(src), true)) {
+                    Op::Debug { dst, src } => match retryable!(self.op_display(prog, r!(src), true)) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::Interp { dst, tmpl } => match retryable!(self.op_interp(&prog, tmpl, regs)) {
+                    Op::Interp { dst, tmpl } => match retryable!(self.op_interp(prog, tmpl, regs)) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::AppendInterp { local, tmpl } => match retryable!(self.op_append_interp(&prog, tmpl, local, regs)) {
+                    Op::AppendInterp { local, tmpl } => match retryable!(self.op_append_interp(prog, tmpl, local, regs)) {
                         Ok(v) => r!(local) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::Describe { base, tmpl } => match retryable!(self.op_describe(&prog, tmpl, &regs[base as usize..])) {
+                    Op::Describe { base, tmpl } => match retryable!(self.op_describe(prog, tmpl, &regs[base as usize..])) {
                         Ok(v) => r!(base) = v,
                         Err(c) => fail_stop!(c),
                     },
@@ -1699,11 +1713,11 @@ impl Vm {
                     Op::TryTop { src } => {
                         save!();
                         let e = r!(src);
-                        return self.try_top(fiber, ip, &prog, e);
+                        return self.try_top(fiber, ip, prog, e);
                     }
                     Op::Internal { msg } => {
                         save!();
-                        return Err(self.const_internal(fiber, ip, &prog, msg));
+                        return Err(self.const_internal(fiber, ip, prog, msg));
                     }
                 }
                 continue 'dispatch;
@@ -1734,9 +1748,9 @@ impl Vm {
     }
 
     /// Calls a native; `Ok(None)` to continue, `Ok(Some(exit))` to suspend.
-    /// Arguments are borrowed from the fiber's stack: the running fiber is not
-    /// in `self.fibers`, so natives cannot observe or move it. A native that
-    /// exhausts the slice's fuel preempts the task once it returns.
+    /// The native reads its arguments from the fiber's stack. The running
+    /// fiber is not in `self.fibers`. A native that exhausts the slice's fuel
+    /// preempts the task once it returns.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn call_native(
@@ -1753,7 +1767,7 @@ impl Vm {
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
         let fuel_at_call = self.meter.fuel();
-        let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+        let mut r = Self::invoke_native(self, natives, n, fiber, start + argc);
         self.heap.fail_next_check.set(false);
         if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
             // Native functions check memory and resource limits before garbage
@@ -1764,7 +1778,7 @@ impl Vm {
             r = match self.meter.check() {
                 Ok(()) => {
                     self.collected = true;
-                    let retried = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+                    let retried = Self::invoke_native(self, natives, n, fiber, start + argc);
                     self.collected = false;
                     retried
                 }
@@ -1808,7 +1822,7 @@ impl Vm {
             CtlKind::NeedPermission(cap) => {
                 // Retry the call instruction after the prompt.
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
-                Ok(Some(FiberStop::Prompt(cap)))
+                Ok(Some(FiberStop::Prompt(Box::new(cap))))
             }
             CtlKind::AsyncNative(call) => {
                 fiber.result_slot = slot;
@@ -1990,9 +2004,9 @@ impl Vm {
     /// Calls native `n`. A Rust panic in it is caught by the scheduler
     /// around the whole slice (`crate::unwind`).
     #[inline(always)]
-    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[VmValue]) -> Result<VmValue, Ctl> {
+    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, fiber: &mut Fiber, args_end: usize) -> Result<VmValue, Ctl> {
         let entry = &natives[n as usize];
-        entry.f.call(self, args)
+        entry.f.call(self, fiber, args_end)
     }
 
     /// Returns the result of `on` if it is ready. Otherwise, registers a wait

@@ -2150,7 +2150,7 @@ module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 | `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                    |
 | `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function |
 
-`NativeModule::function` accepts three kinds of Rust function, selected by the
+`NativeModule::function` accepts four kinds of Rust function, selected by the
 function signature:
 
 - **Synchronous.** Each parameter can borrow `&str`, `&[u8]`, or `&T` from the
@@ -2158,6 +2158,10 @@ function signature:
 - **Synchronous with `&mut Vm` first.** A synchronous function that accesses
   the VM. Each parameter after `&mut Vm` is an owned type or a VM handle such
   as `VmVal<T>`.
+- **Synchronous with `&mut CallContext` first.** A synchronous function that
+  calls Sand functions on the calling task. Its parameters after
+  `&mut CallContext` are owned types or VM handles. Its error type is `Fail` or
+  `HostError<Fail>`.
 - **Asynchronous.** A function that returns a future and suspends only the
   calling task. Its parameters, future, and future output are owned `Send`
   types.
@@ -2201,6 +2205,30 @@ the native future. It then runs the caller's `defer` blocks.
 
 The engine keeps rooted values and callback results alive until the native call
 returns.
+
+`CallContext` gives a synchronous native function the VM and the calling
+task:
+
+- `vm()` returns `&mut Vm`.
+- `call(callee, args)` runs a Sand function with at most 255 arguments on the
+  Rust stack and returns its result. The callee cannot suspend. If it waits for
+  a timer, a task, a channel, or an async native function, prompts for a
+  permission, or cancels its own task, the run ends with an `invalid` error.
+  `task.yield_now()` returns at once. The callee runs under the same limits as
+  other code. An error or `exit` in the callee ends the run with the stack
+  trace of the callee and its callers.
+- `root(value)` and `value(rooted)` keep a heap value alive until the native
+  function returns, as in `NativeContext`.
+- `step(f)` runs `f` with `&mut Vm`. After a memory or resource limit error,
+  the engine collects garbage and runs `f` again. A permission request ends the
+  run with an `invalid` error.
+
+The engine runs a `CallContext` function only once. It does not run it again
+after a permission prompt or a garbage collection, because the function can
+have called Sand. A limit error from the function therefore ends the run. Each
+callback uses two frames toward `max_call_depth`. Callbacks of synchronous
+native functions nest at most 110 levels deep on the Rust stack. A deeper
+callback fails with `limit: stack overflow`.
 
 Bound the recursion depth of any async native function. The engine charges only
 the top-level future and its root table against `max_memory`. A recursive async

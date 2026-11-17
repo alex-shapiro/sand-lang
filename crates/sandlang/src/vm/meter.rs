@@ -159,8 +159,15 @@ impl Meter {
         }
     }
 
-    /// Allocates execution fuel for the next slice and sets execution deadlines.
+    /// Sets execution deadlines and allocates execution fuel for the next slice.
     pub(crate) fn start_slice(&self, cpu_deadline: Option<Duration>, wall_deadline: Option<Instant>) -> i64 {
+        self.cpu_deadline.set(cpu_deadline);
+        self.wall_deadline.set(wall_deadline);
+        self.next_slice()
+    }
+
+    /// Allocates execution fuel for the next slice under the current deadlines.
+    pub(crate) fn next_slice(&self) -> i64 {
         let used = self.used();
         let fuel = match self.max_instructions {
             Some(max) => max.saturating_sub(used).min(super::SLICE_FUEL as u64) as i64,
@@ -171,8 +178,6 @@ impl Meter {
         self.fuel.set(fuel);
         self.synced.set(fuel);
         self.check_at.set(0);
-        self.cpu_deadline.set(cpu_deadline);
-        self.wall_deadline.set(wall_deadline);
         fuel
     }
 

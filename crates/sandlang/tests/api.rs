@@ -1851,14 +1851,15 @@ fn rust_field_defaults_can_be_any_constant() {
 
 #[test]
 fn natives_take_num_evidence() {
+    use sandlang::native::context::CallContext;
     use sandlang::native::ty::{Num, Param, VmVal};
     use sandlang::types::traits;
-    use sandlang::vm::{Ctl, Fail, Vm};
+    use sandlang::vm::Fail;
     let module = |decl: &str| {
         let mut m = NativeModule::new("nums");
-        m.function("total", |vm: &mut Vm, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
-            let mut acc = num.zero(vm)?.raw();
-            for &x in xs.items(&vm.heap) {
+        m.function("total", |context: &mut CallContext, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Fail> {
+            let mut acc = num.zero(context)?.raw();
+            for &x in xs.items(&context.vm().heap) {
                 acc = match (acc, x) {
                     (sandlang::vm::value::VmValue::Int(a), sandlang::vm::value::VmValue::Int(b)) => {
                         sandlang::vm::value::VmValue::Int(a + b)
@@ -1866,12 +1867,12 @@ fn natives_take_num_evidence() {
                     (sandlang::vm::value::VmValue::Float(a), sandlang::vm::value::VmValue::Float(b)) => {
                         sandlang::vm::value::VmValue::Float(a + b)
                     }
-                    _ => return Err(Fail::internal("not a number").into()),
+                    _ => return Err(Fail::internal("not a number")),
                 };
             }
             Ok(Param::from_raw(acc))
         });
-        m.function("unit", |vm: &mut Vm, num: Num<1>, _: Param<0>, _: Param<1>| num.one(vm));
+        m.function("unit", |context: &mut CallContext, num: Num<1>, _: Param<0>, _: Param<1>| num.one(context));
         m.source(decl);
         m
     };
@@ -1930,7 +1931,7 @@ print(none.product())
     assert_eq!(errors, ["native function `first` must declare `T: Num`, as its Rust function requires `T: Num`"]);
 
     let mut m = NativeModule::new("nums");
-    m.function("List.go", |vm: &mut Vm, num: Num<0>, _: VmVal<Vec<Param<0, traits::Num>>>| num.one(vm));
+    m.function("List.go", |context: &mut CallContext, num: Num<0>, _: VmVal<Vec<Param<0, traits::Num>>>| num.one(context));
     m.source("pub trait Go { fn go(self) -> int }\nimpl<T: Num> Go for [T] { native fn go(self) -> T }");
     let errors = host_module_errors([m]);
     assert!(errors.iter().any(|e| e == "the Rust function of a native impl method cannot take `Num` evidence"), "{errors:?}");

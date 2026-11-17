@@ -4,11 +4,12 @@ use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink};
 use sandlang::native::NativeModule;
+use sandlang::native::context::CallContext;
 use sandlang::native::ty::{Num, Param, VmVal};
 use sandlang::stdlib::json::Json;
 use sandlang::types::traits;
+use sandlang::vm::Fail;
 use sandlang::vm::value::VmValue;
-use sandlang::vm::{Ctl, Fail, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
@@ -242,13 +243,13 @@ fn json_layers() -> impl Strategy<Value = Vec<JsonLayer>> {
 
 fn sum_module() -> NativeModule {
     let mut m = NativeModule::new("nums");
-    m.function("total", |vm: &mut Vm, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
-        let mut acc = num.zero(vm)?.raw();
-        for &x in xs.items(&vm.heap) {
+    m.function("total", |context: &mut CallContext, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Fail> {
+        let mut acc = num.zero(context)?.raw();
+        for &x in xs.items(&context.vm().heap) {
             acc = match (acc, x) {
                 (VmValue::Int(a), VmValue::Int(b)) => VmValue::Int(a.wrapping_add(b)),
                 (VmValue::Float(a), VmValue::Float(b)) => VmValue::Float(a + b),
-                _ => return Err(Fail::internal("not a number").into()),
+                _ => return Err(Fail::internal("not a number")),
             };
         }
         Ok(Param::from_raw(acc))

@@ -1,6 +1,7 @@
 //! Natives for the prelude and the `task` module.
 
 use crate::check::ModKind;
+use crate::native::context::CallContext;
 use crate::native::convert::HostError;
 use crate::native::func::Later;
 use crate::native::ty::{Channel, Never, Num, Param, Task, VmVal};
@@ -11,7 +12,7 @@ use crate::vm::compare::{
 };
 use crate::vm::heap::Heap;
 use crate::vm::value::*;
-use crate::vm::{BlockOn, Ctl, Fail, Vm, WaitKind, fail, internal};
+use crate::vm::{BlockOn, Fail, Vm, WaitKind, fail, internal};
 use jiff::SignedDuration;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -819,17 +820,19 @@ fn lists(m: &mut NativeModule) {
         let set = set_of(vm, xs.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
-    fn fold_num(vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>, product: bool) -> Result<Param<0>, Ctl> {
-        produce(vm, list_len(vm, xs), 0)?;
-        let mut acc = if product { num.one(vm)? } else { num.zero(vm)? }.raw();
+    fn fold_num(context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>, product: bool) -> Result<Param<0>, Fail> {
+        let len = list_len(context.vm(), xs);
+        context.step(|vm| produce(vm, len, 0))?;
+        let mut acc = if product { num.one(context)? } else { num.zero(context)? }.raw();
+        let vm = context.vm();
         let items = xs.items(&vm.heap).to_vec();
         for x in items {
             acc = vm.arith(if product { 2 } else { 0 }, acc, x)?;
         }
         Ok(Param::from_raw(acc))
     }
-    m.function("List.sum", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, false));
-    m.function("List.product", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, true));
+    m.function("List.sum", |context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(context, num, xs, false));
+    m.function("List.product", |context: &mut CallContext, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(context, num, xs, true));
     fn extreme(vm: &mut Vm, xs: List<Param<0, traits::Ord>>, want: Ordering) -> Result<Option<Param<0>>, Fail> {
         let items = xs.items(&vm.heap);
         let mut best: Option<VmValue> = None;

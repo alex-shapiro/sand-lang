@@ -588,7 +588,7 @@ pub enum Op {
     /// Ends a cleanup pad: leaves the frame and continues unwinding a
     /// cancelled task (`Proto::cleanups`).
     Unwind,
-    /// Returns register 0 from [`CALLBACK_PROTO`] to the waiting async native call.
+    /// Returns register 0 from [`CALLBACK_PROTO`] to the native call that waits for it.
     ResumeNative,
 
     // Data structures.
@@ -1124,10 +1124,10 @@ impl Op {
     }
 }
 
-/// Prototype index of the callback trampoline for async native calls.
+/// Prototype index of the callback trampoline for native calls.
 pub const CALLBACK_PROTO: u32 = 0;
 
-/// Maximum argument count for a Sand callback in an async native call.
+/// Maximum argument count for a Sand callback in a native call.
 pub const MAX_CALLBACK_ARGS: usize = u8::MAX as usize;
 
 /// Prototype name for helper functions that evaluate field defaults and populate sets during `json.decode` (omitted from stack traces).
