@@ -227,9 +227,8 @@ impl RunTimer {
         RunTimer { clock, cpu: Duration::ZERO, cpu_mark, now, last_yield: now, unrecorded_slices: 0, unrecorded_fuel: 0 }
     }
 
-    /// Updates CPU and monotonic times, and reports completed work.
+    /// Updates CPU and monotonic times.
     fn read(&mut self) {
-        self.clock.work(self.unrecorded_fuel);
         let mark = self.clock.cpu_time();
         self.cpu += mark.saturating_sub(self.cpu_mark);
         self.cpu_mark = mark;
@@ -246,11 +245,13 @@ impl RunTimer {
         self.unrecorded_fuel = 0;
     }
 
-    /// Adds `fuel` to the unrecorded batch. Reads the clock once the slice count or fuel reaches its threshold.
-    fn ran(&mut self, fuel: u64) {
+    /// Adds the turn's fuel to the unrecorded batch. Reports work and reads the
+    /// clock once the slice count or fuel reaches its threshold.
+    fn ran(&mut self, meter: &VmMeter) {
         self.unrecorded_slices += 1;
-        self.unrecorded_fuel += fuel;
+        self.unrecorded_fuel += meter.slice_fuel_spent();
         if self.unrecorded_slices >= CLOCK_SLICES || self.unrecorded_fuel >= SLICE_FUEL as u64 {
+            meter.report_work();
             self.read();
         }
     }
@@ -270,12 +271,6 @@ impl RunTimer {
 
     fn sleep(&self, duration: Duration) -> ClockFuture {
         self.clock.sleep(duration)
-    }
-}
-
-impl Drop for RunTimer {
-    fn drop(&mut self) {
-        self.clock.work(self.unrecorded_fuel);
     }
 }
 
@@ -333,14 +328,14 @@ impl Vm {
     fn run_slice(&mut self, code: &ProgramCode, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
         let mut last_retry_site = None;
         loop {
-            let used_at_entry = self.meter.used_with_fuel_left(*fuel);
+            let entry_fuel = *fuel;
             let stop = self.interp(&code.program, &code.natives, fiber, fuel);
             let Ok(FiberStop::CollectAndRetry(frame)) = stop else { return stop };
             let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
             // The interpreter spends more than `tick` fuel to reach `retry_site` again through a loop or call.
             // Otherwise, the retried instruction hit `max_memory` again.
             let retry_site = (fiber.frames.len(), frame.ip);
-            if last_retry_site == Some(retry_site) && self.meter.used_with_fuel_left(*fuel) - used_at_entry <= tick as u64 {
+            if last_retry_site == Some(retry_site) && entry_fuel.saturating_sub(*fuel) <= tick {
                 return Err(Trap::Limit(LimitKind::Memory).into());
             }
             last_retry_site = Some(retry_site);
@@ -437,7 +432,7 @@ impl Vm {
         callee: VmValue,
         args: &[VmValue],
     ) -> Result<VmValue, RunEnding> {
-        if self.turn_stack_address.saturating_sub(stack_address()) > MAX_CALLBACK_STACK_BYTES {
+        if self.turn_stack_address.abs_diff(stack_address()) > MAX_CALLBACK_STACK_BYTES {
             return Err(self.stack_overflow(fiber));
         }
         let frame_count = fiber.frames.len();
@@ -451,7 +446,7 @@ impl Vm {
 
     /// Drives bytecode slices on `fiber` for the active synchronous callback.
     fn run_callback_slices(&mut self, code: &ProgramCode, fiber: &mut Fiber) -> Result<VmValue, RunEnding> {
-        let mut fuel = self.meter.reload_interpreter_fuel();
+        let mut fuel = self.meter.callback_fuel();
         let result = loop {
             let stop = match self.run_slice(code, fiber, &mut fuel) {
                 Ok(stop) => stop,
@@ -461,9 +456,11 @@ impl Vm {
                 FiberStop::CallbackReturn(value) => break Ok(value),
                 FiberStop::Preempt => {
                     self.meter.flush_interpreter_fuel(fuel);
-                    fuel = self.meter.next_slice();
-                    match self.meter.check_limits() {
-                        Ok(()) => continue,
+                    match self.meter.next_callback_slice() {
+                        Ok(next_fuel) => {
+                            fuel = next_fuel;
+                            continue;
+                        }
                         Err(fail) => break Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None))),
                     }
                 }
@@ -670,7 +667,7 @@ fn run_ready<U: DriveUntil>(
             Err(Trap::Internal { message, trace: vm.trace_of(&fiber, None) }.into())
         });
         vm.meter.flush_interpreter_fuel(fuel);
-        timer.ran(vm.meter.slice_fuel_spent());
+        timer.ran(&vm.meter);
         // Share current heap usage with background I/O readers for `max_memory` checks.
         let used = vm.heap.used_bytes();
         vm.heap.io_memory.publish_heap(used);
@@ -781,7 +778,12 @@ pub(crate) async fn end_tasks(shared_vm: &SharedVm) -> Result<(), RunEnding> {
 pub(crate) async fn drive<U: DriveUntil>(shared_vm: &SharedVm, stop_policy: U) -> Result<U::Stop, RunEnding> {
     let mut timer = RunTimer::start(shared_vm.lock().host.clock.clone());
     loop {
-        let pause = run_ready(&mut shared_vm.lock(), shared_vm, &stop_policy, &mut timer)?;
+        let pause = {
+            let mut vm = shared_vm.lock();
+            let pause = run_ready(&mut vm, shared_vm, &stop_policy, &mut timer);
+            vm.meter.report_work();
+            pause?
+        };
         match pause {
             Pause::Stop(stop) => return Ok(stop),
             Pause::Yield => {

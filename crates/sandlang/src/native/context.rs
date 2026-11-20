@@ -327,8 +327,6 @@ pub struct CallContext<'a> {
     fiber: &'a mut Fiber,
     /// Length of `fiber.native_roots` at the start of the call.
     roots_start: usize,
-    /// Run fuel recorded before the active slice started.
-    entry_slice_base: u64,
     /// Cached program code and stack base for callbacks in this call.
     callback_state: Option<(ProgramCode, usize)>,
     /// First terminal run ending from a callback or a `step` call.
@@ -339,8 +337,8 @@ impl<'a> CallContext<'a> {
     pub(crate) fn new(vm: &'a mut Vm, fiber: &'a mut Fiber) -> CallContext<'a> {
         // A retried argument conversion in `call_native` leaves `collected` set.
         vm.collected = false;
-        let (roots_start, entry_slice_base) = (fiber.native_roots.len(), vm.meter.slice_base());
-        CallContext { vm, fiber, roots_start, entry_slice_base, callback_state: None, run_ending: None }
+        let roots_start = fiber.native_roots.len();
+        CallContext { vm, fiber, roots_start, callback_state: None, run_ending: None }
     }
 
     /// Returns shared read access to the [`Vm`].
@@ -433,18 +431,13 @@ impl<'a> CallContext<'a> {
     /// Converts `output` into a Sand return value.
     ///
     /// Truncates the fiber's root stack to its pre-call length. Converts any
-    /// [`Fail`] into a terminal run ending. If a callback started a new fuel
-    /// slice, `finish` zeroes the remaining slice fuel. The scheduler then
-    /// preempts the calling task.
+    /// [`Fail`] into a terminal run ending.
     pub(crate) fn finish(self, output: impl NativeReturn<Fail>) -> Result<VmValue, Ctl> {
-        let CallContext { vm, fiber, roots_start, entry_slice_base, run_ending, .. } = self;
+        let CallContext { vm, fiber, roots_start, run_ending, .. } = self;
         fiber.native_roots.truncate(roots_start);
         if roots_start == 0 && fiber.native_roots.capacity() > MAX_IDLE_ROOT_SLOTS {
             vm.heap.fiber_bytes = vm.heap.fiber_bytes.saturating_sub(fiber.native_roots.capacity() * std::mem::size_of::<VmValue>());
             fiber.native_roots = Vec::new();
-        }
-        if vm.meter.slice_base() != entry_slice_base {
-            vm.meter.end_slice();
         }
         if let Some(ending) = run_ending {
             return Err(Fail::from(ending).into());

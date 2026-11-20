@@ -78,6 +78,8 @@ pub struct VmMeter {
     slice_initial_fuel: Cell<i64>,
     /// Total fuel spent across earlier slices in the current run.
     prior_slices_fuel: Cell<u64>,
+    /// Total fuel already reported to [`Clock::work`].
+    clock_reported_fuel: Cell<u64>,
     max_instructions: Option<u64>,
     cpu_deadline: Cell<Option<Duration>>,
     wall_deadline: Cell<Option<Instant>>,
@@ -94,6 +96,7 @@ impl VmMeter {
             next_limit_check_fuel: Cell::new(0),
             slice_initial_fuel: Cell::new(0),
             prior_slices_fuel: Cell::new(0),
+            clock_reported_fuel: Cell::new(0),
             max_instructions,
             cpu_deadline: Cell::new(None),
             wall_deadline: Cell::new(None),
@@ -164,47 +167,12 @@ impl VmMeter {
         self.prior_slices_fuel.get().saturating_add(self.slice_fuel_spent())
     }
 
-    /// Starts a turn's first fuel slice with `cpu_deadline` and `wall_deadline`.
+    /// Begins a scheduling slice with a fuel allowance and time deadline.
     ///
     /// The scheduler calls this before each fiber turn. The fiber yields
-    /// after `SLICE_FUEL` units or stops at `max_instructions`.
+    /// after `SLICE_FUEL` units or stops at `max_instructions`. Returns the
+    /// starting fuel for the interpreter's local counter.
     pub(crate) fn start_slice(&self, cpu_deadline: Option<Duration>, wall_deadline: Option<Instant>) -> i64 {
-        self.cpu_deadline.set(cpu_deadline);
-        self.wall_deadline.set(wall_deadline);
-        self.refill_slice()
-    }
-
-    /// Starts the next fuel slice under the active deadlines. Reports spent
-    /// slice work to the clock.
-    pub(crate) fn next_slice(&self) -> i64 {
-        self.clock.work(self.slice_fuel_spent());
-        self.refill_slice()
-    }
-
-    /// Ends the current slice with zero remaining fuel. Reports spent slice work
-    /// to the clock.
-    pub(crate) fn end_slice(&self) {
-        self.clock.work(self.slice_fuel_spent());
-        self.prior_slices_fuel.set(self.total_fuel_used());
-        self.slice_initial_fuel.set(0);
-        self.remaining_slice_fuel.set(0);
-        self.interpreter_fuel_baseline.set(0);
-        self.next_limit_check_fuel.set(0);
-    }
-
-    /// Returns the total fuel spent before the current slice.
-    pub(crate) fn slice_base(&self) -> u64 {
-        self.prior_slices_fuel.get()
-    }
-
-    /// Computes total run fuel spent from the interpreter's `fuel_left`.
-    pub(crate) fn used_with_fuel_left(&self, fuel_left: i64) -> u64 {
-        let remaining = self.remaining_slice_fuel.get() - (self.interpreter_fuel_baseline.get() - fuel_left);
-        self.prior_slices_fuel.get().saturating_add(self.slice_initial_fuel.get().saturating_sub(remaining).max(0) as u64)
-    }
-
-    /// Allocates execution fuel for the next slice.
-    fn refill_slice(&self) -> i64 {
         let used = self.total_fuel_used();
         let slice_fuel = match self.max_instructions {
             Some(max) => max.saturating_sub(used).min(super::SLICE_FUEL as u64) as i64,
@@ -215,7 +183,36 @@ impl VmMeter {
         self.remaining_slice_fuel.set(slice_fuel);
         self.interpreter_fuel_baseline.set(slice_fuel);
         self.next_limit_check_fuel.set(0);
+        self.cpu_deadline.set(cpu_deadline);
+        self.wall_deadline.set(wall_deadline);
         slice_fuel
+    }
+
+    /// Reports fuel spent since the last report to the clock.
+    pub(crate) fn report_work(&self) {
+        let used = self.total_fuel_used();
+        let unreported = used.saturating_sub(self.clock_reported_fuel.get());
+        if unreported > 0 {
+            self.clock_reported_fuel.set(used);
+            self.clock.work(unreported);
+        }
+    }
+
+    /// Returns interpreter fuel until the next checkpoint without altering the
+    /// remaining slice fuel.
+    pub(crate) fn callback_fuel(&self) -> i64 {
+        let fuel_to_checkpoint = self.remaining_slice_fuel.get().saturating_sub(self.next_limit_check_fuel.get()).max(0);
+        self.interpreter_fuel_baseline.set(fuel_to_checkpoint);
+        fuel_to_checkpoint
+    }
+
+    /// Reports work, checks limits, and advances the checkpoint for another callback slice.
+    pub(crate) fn next_callback_slice(&self) -> Result<i64, Fail> {
+        self.report_work();
+        self.run_limit_checkpoint()?;
+        let fuel_to_checkpoint = self.remaining_slice_fuel.get().saturating_sub(self.next_limit_check_fuel.get()).max(1);
+        self.interpreter_fuel_baseline.set(fuel_to_checkpoint);
+        Ok(fuel_to_checkpoint)
     }
 
     /// Commits bytecode fuel spent in the interpreter's local counter back into
@@ -254,6 +251,7 @@ impl VmMeter {
     /// a new session run.
     pub(crate) fn reset_for_run(&mut self, interrupt_flag: Arc<AtomicBool>) {
         self.prior_slices_fuel.set(0);
+        self.clock_reported_fuel.set(0);
         self.slice_initial_fuel.set(self.remaining_slice_fuel.get());
         self.interrupt_flag = interrupt_flag;
     }

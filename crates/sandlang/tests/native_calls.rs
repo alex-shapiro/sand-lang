@@ -663,6 +663,7 @@ fn scheduler_preempts_task_after_long_synchronous_callback() {
 struct WorkClock {
     origin: sandlang::platform::Instant,
     reported_fuel: std::sync::atomic::AtomicU64,
+    yield_count: std::sync::atomic::AtomicU64,
 }
 
 impl sandlang::platform::Clock for WorkClock {
@@ -679,6 +680,7 @@ impl sandlang::platform::Clock for WorkClock {
         Box::pin(std::future::ready(()))
     }
     fn yield_now(&self) -> sandlang::platform::ClockFuture {
+        self.yield_count.fetch_add(1, Ordering::SeqCst);
         Box::pin(std::future::ready(()))
     }
     fn work(&self, fuel: u64) {
@@ -688,9 +690,31 @@ impl sandlang::platform::Clock for WorkClock {
 
 #[test]
 fn engine_enforces_wall_time_limit_inside_callbacks_under_host_clock() {
-    let clock = Arc::new(WorkClock { origin: sandlang::platform::Instant::now(), reported_fuel: Default::default() });
+    let clock = Arc::new(WorkClock {
+        origin: sandlang::platform::Instant::now(),
+        reported_fuel: Default::default(),
+        yield_count: Default::default(),
+    });
     let limits = Limits { max_wall_time: Some(Duration::from_millis(50)), max_instructions: Some(100_000_000), ..Limits::default() };
     let source = "calls.apply_sync((x) => {\nvar i = 0\nwhile i >= 0 { i += 1 }\nx\n}, 0, 1)";
     let (result, _) = run(Config::new().clock(clock).limits(limits), &EventLog::default(), source);
     assert!(matches!(result, Err(Error::Limit(LimitKind::WallTime))), "{result:?}");
+}
+
+#[test]
+fn scheduler_yields_to_host_after_multi_slice_synchronous_callback() {
+    let clock = Arc::new(WorkClock {
+        origin: sandlang::platform::Instant::now(),
+        reported_fuel: Default::default(),
+        yield_count: Default::default(),
+    });
+    let source = "fn spin(n: int) -> int {\n\
+                      var i = 0\n\
+                      while i < n { i += 1 }\n\
+                      n\n\
+                  }\n\
+                  for _ in 0..3 { calls.apply_sync(spin, 50000, 1) }\n\
+                  print(\"done\")";
+    assert_eq!(run_ok(Config::new().clock(clock.clone()), source), "done\n");
+    assert!(clock.yield_count.load(Ordering::SeqCst) > 0);
 }
