@@ -4,7 +4,7 @@ use super::context::{AsyncNativeCall, CallContext, NativeContext};
 use super::convert::{Conversion, FromVmValue, HostError, IntoVmValue, ok_vm_value};
 use super::ty::{SandType, Type};
 use crate::vm::value::VmValue;
-use crate::vm::{Ctl, Fail, Fiber, NativeFn, Vm, WaitKind};
+use crate::vm::{ContextNativeFn, Ctl, Fail, Fiber, NativeFn, Vm, WaitKind};
 use std::future::Future;
 
 /// Sand parameter and return types derived from a Rust function signature.
@@ -122,7 +122,14 @@ pub trait NativeFunction<Kind>: Send + Sync + 'static {
     /// Returns the Sand parameter and return types.
     fn signature() -> Signature;
     #[doc(hidden)]
-    fn into_native_fn(self) -> Box<NativeFn>;
+    fn into_native_fn(self) -> BoxedNativeFn;
+}
+
+/// Boxed native function returned by [`NativeFunction::into_native_fn`].
+#[doc(hidden)]
+pub enum BoxedNativeFn {
+    Plain(Box<NativeFn>),
+    Context(Box<ContextNativeFn>),
 }
 
 /// ```compile_fail,E0277
@@ -465,22 +472,21 @@ macro_rules! fn_impls {
             fn signature() -> Signature {
                 Signature::new([$($param::SCRIPT_PARAM_TYPE),*], R::sand_type())
             }
-            fn into_native_fn(self) -> Box<NativeFn> {
+            fn into_native_fn(self) -> BoxedNativeFn {
                 fn call<R, $($param,)*>(f: &impl Fn($($param),*) -> R, $($param: $param,)*) -> R {
                     f($($param),*)
                 }
-                Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args_end: usize| -> Result<VmValue, Ctl> {
-                    let args = &fiber.stack[..args_end];
+                BoxedNativeFn::Plain(Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     let output = {
                         read_params!(vm, args, $($param),*);
                         call(&self, $($param),*)
                     };
                     vm.unchecked(|vm| output.into_call_result(vm))
-                })
+                }))
             }
         }
 
-        #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments, clippy::unused_unit, clippy::too_many_arguments)]
+        #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments, clippy::unused_unit)]
         impl<F, R, $($param,)*> NativeFunction<(VmNativeFn, ($($param,)*))> for F
         where
             F: Fn(&mut Vm, $($param),*) -> R + Send + Sync + 'static,
@@ -490,17 +496,17 @@ macro_rules! fn_impls {
             fn signature() -> Signature {
                 Signature::new([$($param::SCRIPT_PARAM_TYPE),*], R::sand_type())
             }
-            fn into_native_fn(self) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args_end: usize| -> Result<VmValue, Ctl> {
-                    read_params!(vm, &fiber.stack[..args_end], $($param),*);
+            fn into_native_fn(self) -> BoxedNativeFn {
+                BoxedNativeFn::Plain(Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
+                    read_params!(vm, args, $($param),*);
                     vm.arm_retry_stress();
                     let output = self(vm, $($param),*);
                     vm.unchecked(|vm| output.into_call_result(vm))
-                })
+                }))
             }
         }
 
-        #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments, clippy::too_many_arguments)]
+        #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments)]
         impl<F, R, $($param,)*> NativeFunction<(CallContextNativeFn, ($($param,)*))> for F
         where
             F: Fn(&mut CallContext<'_>, $($param),*) -> R + Send + Sync + 'static,
@@ -510,14 +516,14 @@ macro_rules! fn_impls {
             fn signature() -> Signature {
                 Signature::new([$($param::SCRIPT_PARAM_TYPE),*], R::sand_type())
             }
-            fn into_native_fn(self) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args_end: usize| -> Result<VmValue, Ctl> {
-                    read_params!(vm, &fiber.stack[..args_end], $($param),*);
+            fn into_native_fn(self) -> BoxedNativeFn {
+                BoxedNativeFn::Context(Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args: std::ops::Range<usize>| -> Result<VmValue, Ctl> {
+                    read_params!(vm, &fiber.stack[args], $($param),*);
                     vm.arm_retry_stress();
                     let mut context = CallContext::new(vm, fiber);
                     let output = self(&mut context, $($param),*);
                     context.finish(output)
-                })
+                }))
             }
         }
 
@@ -532,12 +538,12 @@ macro_rules! fn_impls {
             fn signature() -> Signature {
                 Signature::new([$($param::SCRIPT_PARAM_TYPE),*], R::sand_type())
             }
-            fn into_native_fn(self) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args_end: usize| -> Result<VmValue, Ctl> {
-                    read_params!(vm, &fiber.stack[..args_end], $($param),*);
+            fn into_native_fn(self) -> BoxedNativeFn {
+                BoxedNativeFn::Plain(Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
+                    read_params!(vm, args, $($param),*);
                     let future = self($($param),*);
                     Err(Ctl::async_native(AsyncNativeCall::new(WaitKind::Io, |_| future)))
-                })
+                }))
             }
         }
     };

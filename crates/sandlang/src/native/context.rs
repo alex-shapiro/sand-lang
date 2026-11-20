@@ -4,11 +4,10 @@
 //! [`Later::new`](super::func::Later::new) futures use [`NativeContext`].
 
 use super::func::{NativeError, NativeReturn};
-use super::ty::{Num, Param};
 use crate::policy::Capability;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::sched::ProgramCode;
-use crate::vm::value::{Obj, VmValue};
+use crate::vm::value::VmValue;
 use crate::vm::{Ctl, CtlKind, Fail, Fiber, RunEnding, SharedVm, Vm, WaitKind};
 use parking_lot::Mutex;
 use std::future::Future;
@@ -444,35 +443,5 @@ impl<'a> CallContext<'a> {
         }
         vm.unchecked(|vm| output.into_call_result(vm))
             .map_err(|fail| Fail::from(vm.run_ending_of(fail, |vm| vm.trace_of(fiber, None))).into())
-    }
-}
-
-impl<const N: u8> Num<N> {
-    /// Returns the additive identity `0` or `0.0` for type parameter `N`.
-    pub fn zero(self, context: &mut CallContext) -> Result<Param<N>, Fail> {
-        self.call_method(context, 0)
-    }
-
-    /// Returns the multiplicative identity `1` or `1.0` for type parameter `N`.
-    pub fn one(self, context: &mut CallContext) -> Result<Param<N>, Fail> {
-        self.call_method(context, 1)
-    }
-
-    /// Calls the native function at `slot` in the `Num` dictionary.
-    ///
-    /// Only the prelude implements `Num`. Its methods are infallible
-    /// synchronous native functions. `call_method` therefore invokes the entry
-    /// directly.
-    fn call_method(self, context: &mut CallContext, slot: usize) -> Result<Param<N>, Fail> {
-        let vm = &mut *context.vm;
-        let method = match vm.heap.get(self.raw()) {
-            Obj::Tuple(slots) => slots.get(slot).map(|&method| vm.heap.get(method)),
-            _ => None,
-        };
-        let Some(&Obj::NativeFn(native_index)) = method else {
-            return Err(Fail::internal("a native function expected `Num` evidence"));
-        };
-        let method = vm.natives[native_index as usize].f.clone();
-        method.call(vm, context.fiber, 0).map(Param::from_raw).map_err(|ctl| Fail::internal(format!("`Num` evidence stopped with {ctl:?}")))
     }
 }

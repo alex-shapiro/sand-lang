@@ -94,6 +94,15 @@ fn calls_module(log: &EventLog) -> NativeModule {
             context.root(VmValue::Int(i));
         }
     });
+    module.function("add_two", |a: i64, b: i64| a + b);
+    module.function("add_two_ctx", |_context: &mut CallContext, a: i64, b: i64| a + b);
+    module.function("call_missing_arg", |context: &mut CallContext, callback: VmVal<fn(i64, i64) -> i64>, x: i64| -> Result<i64, Fail> {
+        let value = context.call(callback.raw(), &[VmValue::Int(x)])?;
+        Ok(match value {
+            VmValue::Int(n) => n,
+            _ => 0,
+        })
+    });
     module.function("allocate_after", |context: &mut CallContext, callback: Callback, byte_count: i64| -> Result<i64, Fail> {
         context.call(callback.raw(), &[])?;
         context.step(|vm| -> Result<i64, Fail> {
@@ -717,4 +726,13 @@ fn scheduler_yields_to_host_after_multi_slice_synchronous_callback() {
                   print(\"done\")";
     assert_eq!(run_ok(Config::new().clock(clock.clone()), source), "done\n");
     assert!(clock.yield_count.load(Ordering::SeqCst) > 0);
+}
+
+#[test]
+fn native_callbacks_reject_too_few_arguments() {
+    for callee in ["calls.add_two", "calls.add_two_ctx"] {
+        let source = format!("let secret = 999\nlet _ = calls.call_missing_arg({callee}, 1)\nprint(secret)");
+        let (result, _) = run(Config::new(), &EventLog::default(), &source);
+        assert!(matches!(&result, Err(Error::Internal { message, .. }) if message.contains("too few arguments")), "{callee}: {result:?}");
+    }
 }

@@ -25,24 +25,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use value::*;
 
-/// Type-erased native function.
-///
-/// The third argument is the exclusive end index of the call's arguments on
-/// [`Fiber::stack`].
-pub type NativeFn = dyn Fn(&mut Vm, &mut Fiber, usize) -> Result<VmValue, Ctl> + Send + Sync;
+/// Type-erased native function that reads script arguments from a slice.
+pub type NativeFn = dyn Fn(&mut Vm, &[VmValue]) -> Result<VmValue, Ctl> + Send + Sync;
+
+/// Type-erased native function that receives the calling [`Fiber`] and argument range.
+pub type ContextNativeFn = dyn Fn(&mut Vm, &mut Fiber, std::ops::Range<usize>) -> Result<VmValue, Ctl> + Send + Sync;
 
 #[derive(Clone)]
 pub enum HostFn {
     Static(&'static NativeFn),
     Shared(Arc<NativeFn>),
+    StaticContext(&'static ContextNativeFn),
+    SharedContext(Arc<ContextNativeFn>),
 }
+
+const _: () = assert!(std::mem::size_of::<HostFn>() == 3 * std::mem::size_of::<usize>());
 
 impl HostFn {
     #[inline(always)]
-    pub fn call(&self, vm: &mut Vm, fiber: &mut Fiber, args_end: usize) -> Result<VmValue, Ctl> {
+    pub fn call(&self, vm: &mut Vm, fiber: &mut Fiber, args: std::ops::Range<usize>) -> Result<VmValue, Ctl> {
         match self {
-            HostFn::Static(native_fn) => native_fn(vm, fiber, args_end),
-            HostFn::Shared(native_fn) => native_fn(vm, fiber, args_end),
+            HostFn::Static(native_fn) => native_fn(vm, &fiber.stack[args]),
+            HostFn::Shared(native_fn) => native_fn(vm, &fiber.stack[args]),
+            HostFn::StaticContext(native_fn) => native_fn(vm, fiber, args),
+            HostFn::SharedContext(native_fn) => native_fn(vm, fiber, args),
         }
     }
 }

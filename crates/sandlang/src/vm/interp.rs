@@ -1770,7 +1770,8 @@ impl Vm {
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
         let fuel_at_call = self.meter.remaining_slice_fuel();
-        let mut r = Self::invoke_native(self, natives, n, fiber, start + argc);
+        let native_fn = &natives[n as usize].f;
+        let mut r = native_fn.call(self, fiber, start..start + argc);
         self.heap.fail_next_check.set(false);
         if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
             // Check memory and resource limits before GC.
@@ -1780,7 +1781,7 @@ impl Vm {
             r = match self.meter.check_limits() {
                 Ok(()) => {
                     self.collected = true;
-                    let retried = Self::invoke_native(self, natives, n, fiber, start + argc);
+                    let retried = native_fn.call(self, fiber, start..start + argc);
                     self.collected = false;
                     retried
                 }
@@ -2000,13 +2001,6 @@ impl Vm {
         };
         self.meter.charge_bytes(copied)?;
         self.heap.append_text(cur, &s).map_err(Fail::limit)
-    }
-
-    /// Calls native function `native_index`.
-    #[inline(always)]
-    fn invoke_native(&mut self, natives: &[NativeEntry], native_index: u32, fiber: &mut Fiber, args_end: usize) -> Result<VmValue, Ctl> {
-        let entry = &natives[native_index as usize];
-        entry.f.call(self, fiber, args_end)
     }
 
     /// Returns the result of `on` if it is ready. Otherwise, registers a wait
