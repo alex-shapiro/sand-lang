@@ -343,10 +343,10 @@ const NAMES: [&str; 12] = ["match", "fn", "Self", "self", "inf", "nan", "use", "
 proptest! {
     #[test]
     fn derive_name_checks_agree_with_the_lexer(s in prop_oneof!["[a-zA-Z_0-9 .]{0,6}", prop::sample::select(NAMES.as_slice()).prop_map(String::from)]) {
-        use sandlang::syntax::lexer::{Tok, lex};
+        use sandlang::syntax::lexer::{TokenKind, lex};
         let lexed = lex(&s, 0);
-        let toks: Vec<_> = lexed.tokens.iter().filter(|t| !matches!(t.tok, Tok::Semi | Tok::Eof)).collect();
-        let ident = lexed.errors.is_empty() && matches!(toks[..], [t] if t.tok == Tok::Ident && t.lo == 0 && t.hi as usize == s.len());
+        let toks: Vec<_> = lexed.tokens.iter().filter(|t| !matches!(t.kind, TokenKind::Semi | TokenKind::Eof)).collect();
+        let ident = lexed.errors.is_empty() && matches!(toks[..], [t] if t.kind == TokenKind::Ident && t.lo == 0 && t.hi as usize == s.len());
         prop_assert_eq!(sandlang::native::is_name(&s), ident, "{:?}", s);
         prop_assert_eq!(sandlang::native::is_type_name(&s), ident && s.starts_with(|c: char| c.is_ascii_uppercase()), "{:?}", s);
     }
