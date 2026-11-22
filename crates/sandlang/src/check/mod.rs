@@ -1209,6 +1209,7 @@ impl Checker {
         let first_type = self.types.len();
         self.first_type = first_type;
         let items = &pm.ast.items;
+
         // 1. Imports.
         for (idx, item) in items.iter().enumerate() {
             if let ItemKind::Import(imp) = &item.kind {
@@ -1218,6 +1219,7 @@ impl Checker {
                 self.bind_import(imp, target, item.span);
             }
         }
+
         // 2. Declare traits, then types.
         let mut trait_ids = Vec::new();
         for item in items {
@@ -1230,8 +1232,9 @@ impl Checker {
                 trait_ids.push(id);
             }
         }
-        let bound_members = if self.allows_native() { self.declare_bound_types() } else { Vec::new() };
+        let bound_members = if self.current_module_is_native() { self.declare_bound_types() } else { Vec::new() };
         let mut struct_ids = Vec::new();
+
         // The traits of type parameters may take types declared later as arguments.
         let mut type_params: Vec<(&[ast::GenericParam], Vec<ParamId>)> = Vec::new();
         for item in items {
@@ -1381,7 +1384,7 @@ impl Checker {
         for d in bound_ids {
             self.check_bound_member_types(d);
         }
-        if self.allows_native() {
+        if self.current_module_is_native() {
             self.declare_undeclared_natives(first_fn);
             // Re-derive `Decode` after registering undeclared native `init` functions.
             self.derive_impls(first_type, &[Builtin::Decode]);
@@ -1487,8 +1490,11 @@ impl Checker {
         self.mods[m as usize].scope.get(&s).map(|b| b.def)
     }
 
-    fn allows_native(&self) -> bool {
-        !matches!(self.mods[self.cur_mod as usize].kind, ModKind::Script { .. })
+    fn current_module_is_native(&self) -> bool {
+        match self.mods[self.cur_mod as usize].kind {
+            ModKind::Prelude | ModKind::Std | ModKind::Host => true,
+            ModKind::Script { .. } => false,
+        }
     }
 
     fn bind_import(&mut self, imp: &ast::Import, target: ModId, span: Span) {
@@ -1593,7 +1599,7 @@ impl Checker {
             }
             let ty = self.resolve_type_in(&f.ty, &scope, Some(self_ty));
             written.push((id, ty, f.ty.span));
-            if s.is_pub && f.is_pub && self.allows_native() {
+            if s.is_pub && f.is_pub && self.current_module_is_native() {
                 self.check_public_types("field", &f.name, [ty]);
             }
             let name = self.sym(&f.name.name);
@@ -2633,7 +2639,7 @@ impl Checker {
         outer: &[(Symbol, ParamId)],
         self_ty: Option<TypeId>,
     ) -> FnId {
-        if f.is_native && !self.allows_native() {
+        if f.is_native && !self.current_module_is_native() {
             self.error(f.name.span, "native functions can only be declared by native modules");
         }
         let mut scope: Vec<(Symbol, ParamId)> = outer.to_vec();
@@ -2666,7 +2672,7 @@ impl Checker {
             None => TypeId::UNIT,
         };
         let public = f.is_pub && !matches!(owner, Some(Ctor::Def(d)) if !self.types[d as usize].is_pub);
-        if public && self.allows_native() {
+        if public && self.current_module_is_native() {
             self.check_public_types("function", &f.name, params.iter().map(|p| p.ty).chain([ret]));
         }
         let intrinsic = match f.name.name.as_str() {
@@ -2964,7 +2970,7 @@ impl Checker {
             Ctor::Def(d) => self.types[d as usize].module != self.cur_mod,
             _ => true,
         };
-        if foreign && !self.allows_native() {
+        if foreign && !self.current_module_is_native() {
             let what = if builtin { "built-in types" } else { "types defined in other modules" };
             self.error(x.target.span, format!("cannot extend {what}"));
             return;
