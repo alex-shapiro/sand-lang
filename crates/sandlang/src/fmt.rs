@@ -14,7 +14,7 @@
 use crate::check::budget::{CompileBudget, Stop, tool_fuel};
 use crate::diag::{SourceFile, Span};
 use crate::syntax::ast::*;
-use crate::syntax::lexer::{Comment, CommentKind, Tok, Token};
+use crate::syntax::lexer::{Comment, CommentKind, Token, TokenKind};
 use crate::syntax::parser::parse_module;
 use std::sync::Arc;
 
@@ -603,7 +603,7 @@ struct Formatter<'a> {
 
 impl<'a> Formatter<'a> {
     fn new(src: &'a str, comments: &'a [Comment], docs: &'a [u32], mut tokens: Vec<Token>, budget: &'a CompileBudget) -> Formatter<'a> {
-        tokens.retain(|t| !(t.tok == Tok::Semi && t.lo == t.hi) && t.tok != Tok::Eof);
+        tokens.retain(|t| !(t.kind == TokenKind::Semi && t.lo == t.hi) && t.kind != TokenKind::Eof);
         let newlines = src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32).collect();
         Formatter { src, comments, docs, tokens, newlines, next: 0, deferred: Vec::new(), budget }
     }
@@ -637,9 +637,9 @@ impl<'a> Formatter<'a> {
     }
 
     /// Position of the first token at or after `pos` of the same kind as `tok`.
-    fn find_tok(&self, pos: u32, tok: &Tok) -> u32 {
+    fn find_tok(&self, pos: u32, tok: &TokenKind) -> u32 {
         let start = self.tokens.partition_point(|t| t.lo < pos);
-        self.tokens[start..].iter().find(|t| std::mem::discriminant(&t.tok) == std::mem::discriminant(tok)).map_or(pos, |t| t.lo)
+        self.tokens[start..].iter().find(|t| std::mem::discriminant(&t.kind) == std::mem::discriminant(tok)).map_or(pos, |t| t.lo)
     }
 
     /// Position of the token just before `pos`.
@@ -651,7 +651,7 @@ impl<'a> Formatter<'a> {
     /// End of the last token before `pos`, ignoring `;`.
     fn token_end(&self, pos: u32) -> u32 {
         let mut idx = self.tokens.partition_point(|t| t.lo < pos);
-        while idx > 0 && self.tokens[idx - 1].tok == Tok::Semi {
+        while idx > 0 && self.tokens[idx - 1].kind == TokenKind::Semi {
             idx -= 1;
         }
         if idx == 0 { pos } else { self.tokens[idx - 1].hi.min(pos) }
@@ -662,7 +662,7 @@ impl<'a> Formatter<'a> {
         let lo = f.span.lo;
         if f.is_pub {
             let idx = self.tokens.partition_point(|t| t.lo < lo);
-            if idx > 0 && self.tokens[idx - 1].tok == Tok::Pub {
+            if idx > 0 && self.tokens[idx - 1].kind == TokenKind::Pub {
                 return self.tokens[idx - 1].lo;
             }
         }
@@ -1074,8 +1074,8 @@ impl<'a> Formatter<'a> {
     fn fn_decl(&mut self, f: &'a FnDecl) -> Doc {
         let keywords = if f.is_native { "native fn " } else { "fn " };
         let mut parts = vec![declared(f.is_pub, keywords), text(&f.name.name), self.generics(&f.generics)];
-        let open = self.find_tok(f.name.span.hi, &Tok::LParen);
-        let close = self.find_tok(f.params.last().map_or(open + 1, |p| p.span.hi), &Tok::RParen);
+        let open = self.find_tok(f.name.span.hi, &TokenKind::LParen);
+        let close = self.find_tok(f.params.last().map_or(open + 1, |p| p.span.hi), &TokenKind::RParen);
         let params: Vec<CElem> = f.params.iter().map(CElem::Param).collect();
         parts.push(self.comma_list(("(", ")"), open, close, &params, LIST));
         if let Some(ret) = &f.ret {
@@ -1124,7 +1124,7 @@ impl<'a> Formatter<'a> {
         members.sort_by_key(|m| m.lo());
         let close = self.closing_brace(span);
         let inline = s.methods.is_empty() && !self.newline_between(span.lo, close);
-        let (body, flat) = self.braced(ListKind::Body, &members, self.find_tok(span.lo, &Tok::LBrace), close, inline);
+        let (body, flat) = self.braced(ListKind::Body, &members, self.find_tok(span.lo, &TokenKind::LBrace), close, inline);
         cat(vec![head, strict_group(self.budget, !flat, body)])
     }
 
@@ -1149,7 +1149,7 @@ impl<'a> Formatter<'a> {
         members.sort_by_key(|m| m.lo());
         let close = self.closing_brace(span);
         let inline = e.methods.is_empty() && e.variants.iter().all(|v| v.fields.is_empty()) && !self.newline_between(span.lo, close);
-        let (body, flat) = self.braced(ListKind::Body, &members, self.find_tok(span.lo, &Tok::LBrace), close, inline);
+        let (body, flat) = self.braced(ListKind::Body, &members, self.find_tok(span.lo, &TokenKind::LBrace), close, inline);
         cat(vec![head, strict_group(self.budget, !flat, body)])
     }
 
@@ -1168,7 +1168,8 @@ impl<'a> Formatter<'a> {
     fn extend_decl(&mut self, x: &'a ExtendDecl, span: Span) -> Doc {
         let head = cat(vec![text("extend"), self.generics(&x.generics), text(" "), self.ty(&x.target), text(" ")]);
         let members: Vec<Member> = x.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))).collect();
-        let (body, flat) = self.braced(ListKind::Body, &members, self.find_tok(span.lo, &Tok::LBrace), self.closing_brace(span), false);
+        let (body, flat) =
+            self.braced(ListKind::Body, &members, self.find_tok(span.lo, &TokenKind::LBrace), self.closing_brace(span), false);
         cat(vec![head, strict_group(self.budget, !flat, body)])
     }
 
@@ -1180,7 +1181,8 @@ impl<'a> Formatter<'a> {
         }
         head.push(text(" "));
         let members: Vec<Member> = t.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))).collect();
-        let (body, flat) = self.braced(ListKind::Body, &members, self.find_tok(span.lo, &Tok::LBrace), self.closing_brace(span), false);
+        let (body, flat) =
+            self.braced(ListKind::Body, &members, self.find_tok(span.lo, &TokenKind::LBrace), self.closing_brace(span), false);
         cat(vec![cat(head), strict_group(self.budget, !flat, body)])
     }
 
@@ -1193,7 +1195,8 @@ impl<'a> Formatter<'a> {
         }
         head.push(text(" "));
         let members: Vec<Member> = i.methods.iter().map(|f| Member::Method(f, self.fn_lo(f))).collect();
-        let (body, flat) = self.braced(ListKind::Body, &members, self.find_tok(span.lo, &Tok::LBrace), self.closing_brace(span), false);
+        let (body, flat) =
+            self.braced(ListKind::Body, &members, self.find_tok(span.lo, &TokenKind::LBrace), self.closing_brace(span), false);
         cat(vec![cat(head), strict_group(self.budget, !flat, body)])
     }
 
@@ -1327,7 +1330,7 @@ impl<'a> Formatter<'a> {
                 let head = cat(vec![text("match "), self.expr(scrutinee), text(" ")]);
                 let members: Vec<Member> = arms.iter().map(Member::Arm).collect();
                 let close = e.span.hi - 1;
-                let open = self.find_tok(scrutinee.span.hi, &Tok::LBrace);
+                let open = self.find_tok(scrutinee.span.hi, &TokenKind::LBrace);
                 let (body, flat) = self.braced(ListKind::Arms, &members, open, close, self.on_one_line(open, &members, close));
                 cat(vec![head, strict_group(self.budget, !flat, body)])
             }
@@ -1589,7 +1592,7 @@ impl<'a> Formatter<'a> {
 
     /// Call arguments; the `(` is the first one after `after`.
     fn call_args(&mut self, args: &'a [Arg], after: u32, close: u32) -> Doc {
-        let open = self.find_tok(after, &Tok::LParen);
+        let open = self.find_tok(after, &TokenKind::LParen);
         self.defer_comments(open);
         if let [arg] = args {
             // A lone literal or name gains nothing from a line of its own.
@@ -1673,12 +1676,12 @@ impl<'a> Formatter<'a> {
                 let name = dotted(path);
                 match args {
                     Some(args) => {
-                        let open = self.find_tok(path[path.len() - 1].span.hi, &Tok::LParen);
+                        let open = self.find_tok(path[path.len() - 1].span.hi, &TokenKind::LParen);
                         let mut elems: Vec<CElem> = args.positional.iter().map(CElem::Pat).collect();
                         elems.extend(args.named.iter().map(|(n, x)| CElem::NamedPat(n, x)));
                         if args.rest {
                             let after = args.patterns().map(|x| x.span.hi).max().unwrap_or(open);
-                            elems.push(CElem::Rest(self.find_tok(after, &Tok::DotDot), None));
+                            elems.push(CElem::Rest(self.find_tok(after, &TokenKind::DotDot), None));
                         }
                         cat(vec![name, self.pattern_list(("(", ")"), open, p.span.hi - 1, &elems)])
                     }
@@ -1688,7 +1691,7 @@ impl<'a> Formatter<'a> {
             PatternKind::List { before, rest, after } => {
                 let mut elems: Vec<CElem> = before.iter().map(CElem::Pat).collect();
                 if let Some(name) = rest {
-                    let at = self.find_tok(before.last().map_or(p.span.lo, |x| x.span.hi), &Tok::DotDot);
+                    let at = self.find_tok(before.last().map_or(p.span.lo, |x| x.span.hi), &TokenKind::DotDot);
                     elems.push(CElem::Rest(at, name.as_ref()));
                 }
                 elems.extend(after.iter().map(CElem::Pat));

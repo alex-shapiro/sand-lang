@@ -19,7 +19,7 @@ use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, FileId, SourceMap, Span};
 use crate::engine::{Error, Registry};
 use crate::syntax::ast::{self, ImportSource, ItemKind};
-use crate::syntax::lexer::{Tok, lex};
+use crate::syntax::lexer::{TokenKind, lex};
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use std::collections::HashMap;
@@ -253,62 +253,62 @@ pub(crate) fn scan_imports(text: &str, file: FileId) -> Vec<ImportRef> {
     let mut at_start = true;
     let word = |t: &crate::syntax::lexer::Token| &text[t.lo as usize..t.hi as usize];
     while i < toks.len() {
-        if toks[i].tok == Tok::Ident
+        if toks[i].kind == TokenKind::Ident
             && matches!(word(&toks[i]), "help" | "members")
-            && toks.get(i + 1).is_some_and(|t| t.tok == Tok::LParen)
-            && let Some(arg) = toks[i + 2..].iter().find(|t| t.tok != Tok::LParen)
+            && toks.get(i + 1).is_some_and(|t| t.kind == TokenKind::LParen)
+            && let Some(arg) = toks[i + 2..].iter().find(|t| t.kind != TokenKind::LParen)
         {
-            let name = match &arg.tok {
-                Tok::Ident => Some(word(arg)),
-                Tok::Str(s) => s.split(['.', '<']).next().map(str::trim),
+            let name = match &arg.kind {
+                TokenKind::Ident => Some(word(arg)),
+                TokenKind::Str(s) => s.split(['.', '<']).next().map(str::trim),
                 _ => None,
             };
             if let Some(name) = name.filter(|n| !n.is_empty()) {
                 out.push(ImportRef::Implicit(name.to_string(), Span::new(file, arg.lo, arg.hi)));
             }
         }
-        if toks[i].tok == Tok::Ident
+        if toks[i].kind == TokenKind::Ident
             && depth == 0
             && at_start
             && word(&toks[i]) == "test"
-            && toks.get(i + 1).is_some_and(|t| matches!(t.tok, Tok::Str(_)))
+            && toks.get(i + 1).is_some_and(|t| matches!(t.kind, TokenKind::Str(_)))
         {
             out.push(ImportRef::Implicit("test".to_string(), Span::new(file, toks[i].lo, toks[i].hi)));
         }
-        if toks[i].tok == Tok::Ident
-            && toks.get(i + 1).is_some_and(|t| t.tok == Tok::Bang)
+        if toks[i].kind == TokenKind::Ident
+            && toks.get(i + 1).is_some_and(|t| t.kind == TokenKind::Bang)
             && let Some(m) = crate::syntax::ast::MACROS.iter().find(|m| m.name == word(&toks[i]))
         {
             out.push(ImportRef::Implicit(m.module.to_string(), Span::new(file, toks[i].lo, toks[i].hi)));
         }
-        match &toks[i].tok {
-            Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
-            Tok::RParen | Tok::RBracket | Tok::RBrace => depth -= 1,
-            Tok::Import | Tok::Ident
+        match &toks[i].kind {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
+            TokenKind::Import | TokenKind::Ident
                 if depth == 0
                     && at_start
-                    && (toks[i].tok == Tok::Import
+                    && (toks[i].kind == TokenKind::Import
                         || (word(&toks[i]) == "from"
-                            && toks.get(i + 1).is_some_and(|t| matches!(t.tok, Tok::Ident | Tok::Str(_)))
-                            && toks.get(i + 2).is_some_and(|t| t.tok == Tok::Import))) =>
+                            && toks.get(i + 1).is_some_and(|t| matches!(t.kind, TokenKind::Ident | TokenKind::Str(_)))
+                            && toks.get(i + 2).is_some_and(|t| t.kind == TokenKind::Import))) =>
             {
                 if let Some(t) = toks.get(i + 1) {
                     let span = Span::new(file, t.lo, t.hi);
-                    match &t.tok {
-                        Tok::Ident => out.push(ImportRef::Name(text[t.lo as usize..t.hi as usize].to_string(), span)),
-                        Tok::Str(s) => out.push(ImportRef::Path(s.clone(), span)),
+                    match &t.kind {
+                        TokenKind::Ident => out.push(ImportRef::Name(text[t.lo as usize..t.hi as usize].to_string(), span)),
+                        TokenKind::Str(s) => out.push(ImportRef::Path(s.clone(), span)),
                         _ => {}
                     }
                 }
                 // Skip the rest of the declaration.
-                while i < toks.len() && !matches!(toks[i].tok, Tok::Semi | Tok::Eof) {
+                while i < toks.len() && !matches!(toks[i].kind, TokenKind::Semi | TokenKind::Eof) {
                     i += 1;
                 }
                 continue;
             }
             _ => {}
         }
-        at_start = depth == 0 && matches!(toks[i].tok, Tok::Semi);
+        at_start = depth == 0 && matches!(toks[i].kind, TokenKind::Semi);
         i += 1;
     }
     out

@@ -1,7 +1,7 @@
 //! Syntax highlighting from the lexer, for the REPL's line editor and the
 //! web playground. Works on incomplete and invalid source.
 
-use super::lexer::{Comment, CommentKind, Tok, lex};
+use super::lexer::{Comment, CommentKind, TokenKind, lex};
 
 /// What a highlighted range is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -64,30 +64,35 @@ pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
         while let Some(c) = comments.next_if(|c| (c.lo as usize) < lo) {
             add(c.lo as usize, c.hi as usize, comment(c));
         }
-        let after_fn = i > 0 && tokens[i - 1].tok == Tok::Fn;
-        let after_dot = i > 0 && tokens[i - 1].tok == Tok::Dot;
-        let kind = match &t.tok {
-            Tok::Str(_) | Tok::Bytes(_) | Tok::StrStart | Tok::StrText(_) | Tok::StrEnd => Highlight::String,
-            Tok::InterpStart => Highlight::Interpolation,
-            Tok::InterpEnd { spec } => {
-                if *spec {
+        let after_fn = i > 0 && tokens[i - 1].kind == TokenKind::Fn;
+        let after_dot = i > 0 && tokens[i - 1].kind == TokenKind::Dot;
+        let kind = match &t.kind {
+            TokenKind::Str(_) | TokenKind::Bytes(_) | TokenKind::StrStart | TokenKind::StrText(_) | TokenKind::StrEnd => Highlight::String,
+            TokenKind::InterpStart => Highlight::Interpolation,
+            TokenKind::InterpEnd { has_format_spec } => {
+                if *has_format_spec {
                     add(lo, hi - 1, Highlight::String);
                 }
                 add(hi - 1, hi, Highlight::Interpolation);
                 continue;
             }
-            Tok::Int(_) | Tok::IntOverflow(_) | Tok::Float(_) | Tok::Inf | Tok::Nan | Tok::Duration(_) => Highlight::Number,
-            Tok::True | Tok::False | Tok::SelfLower | Tok::SelfUpper => Highlight::Constant,
+            TokenKind::Int(_)
+            | TokenKind::IntOverflow(_)
+            | TokenKind::Float(_)
+            | TokenKind::Inf
+            | TokenKind::Nan
+            | TokenKind::Duration(_) => Highlight::Number,
+            TokenKind::True | TokenKind::False | TokenKind::SelfLower | TokenKind::SelfUpper => Highlight::Constant,
             // Treat keywords after `fn` or `.` as method names (`fn extend`, `xs.extend(ys)`).
             tok if tok.is_keyword() && !(after_fn || after_dot) => Highlight::Keyword,
-            tok if *tok == Tok::Ident || tok.is_keyword() => {
-                if &source[lo..hi] == "from" && tokens.get(i + 2).is_some_and(|n| n.tok == Tok::Import) {
+            tok if *tok == TokenKind::Ident || tok.is_keyword() => {
+                if &source[lo..hi] == "from" && tokens.get(i + 2).is_some_and(|n| n.kind == TokenKind::Import) {
                     Highlight::Keyword
                 } else if source[lo..hi].starts_with(|c: char| c.is_ascii_uppercase()) {
                     Highlight::Type
-                } else if matches!(tokens.get(i + 1), Some(n) if n.tok == Tok::LParen && n.lo == t.hi) || after_fn {
+                } else if matches!(tokens.get(i + 1), Some(n) if n.kind == TokenKind::LParen && n.lo == t.hi) || after_fn {
                     Highlight::Call
-                } else if let Some(n) = tokens.get(i + 1).filter(|n| n.tok == Tok::Bang && n.lo == t.hi) {
+                } else if let Some(n) = tokens.get(i + 1).filter(|n| n.kind == TokenKind::Bang && n.lo == t.hi) {
                     add(lo, n.hi as usize, Highlight::Call);
                     continue;
                 } else {
