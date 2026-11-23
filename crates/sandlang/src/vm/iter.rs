@@ -1,14 +1,10 @@
-//! Iterator functions (`Obj::IterFn`): the lazy iterators of lists, ranges,
-//! strings, maps and sets, which the interpreter steps directly.
+//! Lazy iterator functions.
 //!
-//! An iterator of a map or set (including a `for` loop over one) visits the
-//! entries it had when the iterator was made (spec §6.9, §12.13), without
-//! copying them up front: it reads the entries in place by slot, skipping
-//! removed ones, and pins the map or set (its `pins`). Every change to a map
-//! or set first calls [`Vm::unpin`], which moves the iterators still reading
-//! it to one private copy of its entries (with the same slots) and clears
-//! the pins. So iterating costs no copy unless the map or set changes
-//! meanwhile, in which case it costs one copy.
+//! An iterator visits collection entries without copying them up front. It
+//! reads each entry in place, skipping removed ones, and pins the map or set.
+//! A modification must call [`Vm::unpin`], which moves the iterators still
+//! reading it to a private copy and clears the pins. Thus iterating does not
+//! copy unless the collection is modified during iteration.
 
 use super::*;
 use crate::vm::interp::internal;
