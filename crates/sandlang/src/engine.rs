@@ -1956,8 +1956,8 @@ mod offload_tests {
         });
         m.function("walk", move |vm: &mut Vm| {
             let p = progress.clone();
-            vm.offload(move |allowance| {
-                while allowance.charge(1).is_ok() {
+            vm.offload(move |meter| {
+                while meter.charge(1).is_ok() {
                     p.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_micros(100));
                 }

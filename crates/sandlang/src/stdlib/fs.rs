@@ -153,10 +153,10 @@ pub(crate) fn module() -> NativeModule {
         // directory `to` removes every entry below that.
         let (fs, policy) = (vm.host.fs.clone(), vm.host.policy.clone());
         let mut res = vm.io_reservation();
-        let renamed = vm.offload(move |allowance| -> Result<io::Result<()>, (Halt, bool)> {
+        let renamed = vm.offload(move |meter| -> Result<io::Result<()>, (Halt, bool)> {
             for (t, moved_to, is_to) in [(&from, Some(to.path.as_path()), false), (&to, None, true)] {
                 if fs.stat(t).is_ok_and(|m| m.kind == EntryKind::Dir)
-                    && let Err(e) = scan_tree(&fs, &policy, t, moved_to, None, &mut res, allowance).map_err(|h| (h, is_to))?
+                    && let Err(e) = scan_tree(&fs, &policy, t, moved_to, None, &mut res, meter).map_err(|h| (h, is_to))?
                 {
                     return Ok(Err(e));
                 }
@@ -389,14 +389,14 @@ fn remove_tree(vm: &mut Vm, path: VmVal<String>) -> FsResult<()> {
     check(vm, &mut t, Access::Write, &shown)?;
     let (fs, permits, root) = (vm.host.fs.clone(), vm.permits(), t.path.clone());
     let mut res = vm.io_reservation();
-    let removed = vm.offload(move |allowance| -> Result<io::Result<()>, Halt> {
+    let removed = vm.offload(move |meter| -> Result<io::Result<()>, Halt> {
         if fs.stat(&t).is_ok_and(|m| m.kind == EntryKind::Dir)
-            && let Err(e) = scan_tree(&fs, &permits.policy, &t, None, Some(&permits), &mut res, allowance)?
+            && let Err(e) = scan_tree(&fs, &permits.policy, &t, None, Some(&permits), &mut res, meter)?
         {
             return Ok(Err(e));
         }
         fs.walk_tree(&t, &mut res, true, |path| {
-            charge_entry(allowance, path)?;
+            charge_entry(meter, path)?;
             permit_entry(&permits, path).map(Ok)
         })
     })?;
@@ -895,8 +895,8 @@ fn read_rest<R: IntoVmValue>(
         st.take_unread();
         st.shrink();
         let mut file = st.file.take().ok_or_else(|| Fail::internal("a file without its file"))?;
-        let (file, read) = vm.offload(move |allowance| {
-            let r = read_to_end(&mut file, &mut data, &mut res, allowance);
+        let (file, read) = vm.offload(move |meter| {
+            let r = read_to_end(&mut file, &mut data, &mut res, meter);
             (file, r.map(|r| r.map(|()| (data, res))))
         })?;
         st.file = Some(file);

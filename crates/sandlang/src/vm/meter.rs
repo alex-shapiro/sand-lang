@@ -376,7 +376,7 @@ pub const INSTRUCTIONS_PER_FUEL_SHIFT: u32 = 6;
 /// Enforces fuel, deadline, and cancellation limits for blocking work offloaded
 /// to a worker thread.
 ///
-/// [`Meter`] is bound to the VM thread, so offloaded jobs charge this instead.
+/// [`Meter`] is bound to the VM thread, so offloaded jobs use this instead.
 /// A charge returns [`WorkerStopped`] if the engine is interrupted, the clock
 /// passes the wall-clock deadline, the worker exceeds the starting instruction
 /// budget, or the VM stops waiting. After the job finishes, the VM charges its
