@@ -1863,38 +1863,57 @@ impl Checker {
             (Value::Str(s), Ty::Str) => ConstVal::Str(s.clone()),
             (Value::Bytes(b), Ty::Bytes) => ConstVal::Bytes(b.clone()),
             (Value::Range { start, end, inclusive }, Ty::Range) => ConstVal::Range(*start, *end, *inclusive),
-            (Value::List(items), Ty::List(e)) => ConstVal::List(self.resolve_const_vals(items, std::iter::repeat(e))?),
-            (Value::Set(items), Ty::Set(e)) => ConstVal::Set(self.resolve_const_vals(items, std::iter::repeat(e))?),
-            (Value::Tuple(items), Ty::Tuple(ts)) if items.len() == self.arena.list_len(ts) => {
-                let ts = self.arena.list(ts).to_vec();
-                ConstVal::Tuple(self.resolve_const_vals(items, ts)?)
+            (Value::List(items), Ty::List(e)) => {
+                ConstVal::List(items.iter().map(|item| self.resolve_const_val(item, e)).collect::<Option<_>>()?)
             }
-            (Value::Map(entries), Ty::Map(k, v)) => ConstVal::Map(
-                entries
-                    .iter()
-                    .map(|(key, value)| Some((self.resolve_const_val(key, k)?, self.resolve_const_val(value, v)?)))
-                    .collect::<Option<_>>()?,
-            ),
+            (Value::Set(items), Ty::Set(e)) => {
+                ConstVal::Set(items.iter().map(|item| self.resolve_const_val(item, e)).collect::<Option<_>>()?)
+            }
+            (Value::Tuple(items), Ty::Tuple(ts)) if items.len() == self.arena.list_len(ts) => {
+                let mut out = Vec::with_capacity(items.len());
+                for (i, item) in items.iter().enumerate() {
+                    let item_ty = self.arena.elem(ts, i);
+                    out.push(self.resolve_const_val(item, item_ty)?);
+                }
+                ConstVal::Tuple(out)
+            }
+            (Value::Map(entries), Ty::Map(k, v)) => {
+                let mut out = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    out.push((self.resolve_const_val(key, k)?, self.resolve_const_val(value, v)?));
+                }
+                ConstVal::Map(out)
+            }
             (Value::Struct(s), Ty::Named(def, args)) if self.matches_struct_def(def, s) => {
-                let args = self.arena.list(args).to_vec();
-                let tys: Vec<TypeId> = (0..s.fields.len()).map(|i| self.field_type(def, i, &args)).collect();
-                ConstVal::Struct(def, self.resolve_const_vals(&s.fields, tys)?)
+                let args = (!s.fields.is_empty() && self.arena.list_len(args) > 0).then(|| self.arena.list(args).to_vec());
+                let mut out = Vec::with_capacity(s.fields.len());
+                for (i, field) in s.fields.iter().enumerate() {
+                    let field_ty = match &args {
+                        Some(args) => self.field_type(def, i, args),
+                        None => self.types[def as usize].fields()[i].ty,
+                    };
+                    out.push(self.resolve_const_val(field, field_ty)?);
+                }
+                ConstVal::Struct(def, out)
             }
             (Value::Variant(v), Ty::Named(def, args)) => {
-                let variant = self.declared_variant(def, v)?;
-                let (rt_id, fields, generics) = (variant.rt_id, variant.fields.clone(), self.types[def as usize].generics.clone());
-                let args = self.arena.list(args).to_vec();
-                let tys: Vec<TypeId> = fields.into_iter().map(|t| self.arena.instantiate(t, &generics, &args)).collect();
-                ConstVal::Variant(rt_id, self.resolve_const_vals(&v.payload, tys)?)
+                let variant_idx = self.declared_variant_index(def, v)?;
+                let rt_id = self.types[def as usize].variants()[variant_idx].rt_id;
+                let args = (!v.payload.is_empty() && self.arena.list_len(args) > 0).then(|| self.arena.list(args).to_vec());
+                let mut out = Vec::with_capacity(v.payload.len());
+                for (i, item) in v.payload.iter().enumerate() {
+                    let def_info = &self.types[def as usize];
+                    let field_ty = def_info.variants()[variant_idx].fields[i];
+                    let item_ty = match &args {
+                        Some(args) => self.arena.instantiate(field_ty, &def_info.generics, args),
+                        None => field_ty,
+                    };
+                    out.push(self.resolve_const_val(item, item_ty)?);
+                }
+                ConstVal::Variant(rt_id, out)
             }
             _ => return None,
         })
-    }
-
-    /// Converts each element of `values` into a [`ConstVal`] of the
-    /// corresponding type in `tys`.
-    fn resolve_const_vals(&mut self, values: &[Value], tys: impl IntoIterator<Item = TypeId>) -> Option<Vec<ConstVal>> {
-        values.iter().zip(tys).map(|(value, ty)| self.resolve_const_val(value, ty)).collect()
     }
 
     /// Returns `true` if `s` matches the qualified name and field names of the
@@ -1907,12 +1926,29 @@ impl Checker {
             && s.ty.fields.iter().map(String::as_str).eq(fields.iter().map(|f| self.name(f.name)))
     }
 
-    /// Returns the variant of the enum `def` that matches `v`.
-    fn declared_variant(&self, def: TypeDefId, v: &VariantValue) -> Option<&VariantDef> {
-        let variant = self.types[def as usize].variants().iter().find(|x| self.name(x.name) == v.variant.name)?;
-        let names = v.variant.fields.iter().flatten().map(String::as_str);
-        let has_payload = v.payload.len() == variant.fields.len() && names.eq(variant.field_names.iter().flatten().map(|&n| self.name(n)));
-        (self.matches_type_name(def, &v.variant.type_name) && has_payload).then_some(variant)
+    /// Returns the index of the variant in enum `def` that matches `value`.
+    fn declared_variant_index(&self, def: TypeDefId, value: &VariantValue) -> Option<usize> {
+        if !self.matches_type_name(def, &value.variant.type_name) {
+            return None;
+        }
+
+        let variants = self.types[def as usize].variants();
+        let index = variants.iter().position(|v| self.name(v.name) == value.variant.name)?;
+        let variant = &variants[index];
+
+        if value.payload.len() != variant.fields.len() {
+            return None;
+        }
+
+        let value_field_names = value.variant.fields.as_deref().unwrap_or(&[]);
+        let variant_field_names = variant.field_names.as_deref().unwrap_or(&[]);
+
+        if value_field_names.len() != variant_field_names.len() {
+            return None;
+        }
+
+        let names_match = value_field_names.iter().zip(variant_field_names).all(|(a, b)| a == self.name(*b));
+        if names_match { Some(index) } else { None }
     }
 
     /// Returns `true` if `type_name` equals the qualified name of `def`.
