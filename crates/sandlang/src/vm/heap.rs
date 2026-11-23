@@ -106,15 +106,15 @@ enum IncrementalGcPhase {
 pub struct Heap {
     slots: Vec<Obj>,
     /// Sticky mark bits set for old objects retained by a prior collection.
-    mark_bits: Vec<u64>,
+    mark_bits: BitSet,
     /// Bitmask deduplicating entries in `remembered`.
-    remembered_bits: Vec<u64>,
+    remembered_bits: BitSet,
     /// Old object slots mutated since the last collection.
     remembered: Vec<u32>,
     /// Bitmask of remembered containers tracked with partial write barriers.
-    partial_barrier_bits: Vec<u64>,
+    partial_barrier_bits: BitSet,
     /// Bitmask of partially remembered containers whose pushed tail is already tracked.
-    pushed_tail_bits: Vec<u64>,
+    pushed_tail_bits: BitSet,
     /// Modified indices and pushed tails for partially remembered containers.
     dirty_containers: FxHashMap<u32, DirtyContainer>,
     /// Slots allocated since the last collection.
@@ -156,9 +156,9 @@ pub struct Heap {
     pub stats: GcStats,
     cycle_phase: IncrementalGcPhase,
     /// Mark bits for the active incremental major collection.
-    cycle_mark_bits: Vec<u64>,
+    cycle_mark_bits: BitSet,
     /// Bitmask deduplicating full-scan entries in `gray_worklist`.
-    gray_bits: Vec<u64>,
+    gray_bits: BitSet,
     /// Slots queued for incremental marking, paired with the next child index to scan.
     gray_worklist: Vec<(u32, usize)>,
     /// Next slot index to inspect during incremental sweeping.
@@ -359,11 +359,11 @@ impl Heap {
     pub fn new(limit: Option<usize>, max_resources: usize) -> Heap {
         Heap {
             slots: Vec::new(),
-            mark_bits: Vec::new(),
-            remembered_bits: Vec::new(),
+            mark_bits: BitSet::default(),
+            remembered_bits: BitSet::default(),
             remembered: Vec::new(),
-            partial_barrier_bits: Vec::new(),
-            pushed_tail_bits: Vec::new(),
+            partial_barrier_bits: BitSet::default(),
+            pushed_tail_bits: BitSet::default(),
             dirty_containers: FxHashMap::default(),
             young: Vec::new(),
             free_list_head: FREE_LIST_END,
@@ -384,8 +384,8 @@ impl Heap {
             scan_chunks: Vec::new(),
             stats: GcStats::default(),
             cycle_phase: IncrementalGcPhase::Idle,
-            cycle_mark_bits: Vec::new(),
-            gray_bits: Vec::new(),
+            cycle_mark_bits: BitSet::default(),
+            gray_bits: BitSet::default(),
             gray_worklist: Vec::new(),
             sweep_cursor: 0,
             bytes_at_last_step: 0,
@@ -433,20 +433,20 @@ impl Heap {
             handle
         } else {
             self.slots.push(obj);
-            if self.mark_bits.len() * 64 < self.slots.len() {
-                self.mark_bits.push(0);
-                self.remembered_bits.push(0);
-                self.partial_barrier_bits.push(0);
-                self.pushed_tail_bits.push(0);
-                self.cycle_mark_bits.push(0);
-                self.gray_bits.push(0);
+            if self.mark_bits.slot_capacity() < self.slots.len() {
+                self.mark_bits.push_word();
+                self.remembered_bits.push_word();
+                self.partial_barrier_bits.push_word();
+                self.pushed_tail_bits.push_word();
+                self.cycle_mark_bits.push_word();
+                self.gray_bits.push_word();
                 self.update_table_bytes();
             }
             (self.slots.len() - 1) as u32
         };
         if self.cycle_phase == IncrementalGcPhase::Sweeping {
             // Mark the new object so the active sweep retains it.
-            set_bit(&mut self.cycle_mark_bits, handle);
+            self.cycle_mark_bits.insert(handle);
         }
         self.young.push(handle);
         VmValue::Obj(handle)
@@ -492,8 +492,7 @@ impl Heap {
     #[inline]
     fn record_full_barrier(&mut self, handle: u32) {
         // Keep the fast path inline so only unremembered old objects call the cold helper.
-        let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        if self.mark_bits[word] & bit != 0 && (self.remembered_bits[word] & bit == 0 || self.partial_barrier_bits[word] & bit != 0) {
+        if self.mark_bits.contains(handle) && (!self.remembered_bits.contains(handle) || self.partial_barrier_bits.contains(handle)) {
             self.remember_for_full_scan(handle);
         }
     }
@@ -502,9 +501,7 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn remember_for_full_scan(&mut self, handle: u32) {
-        let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        if self.remembered_bits[word] & bit == 0 {
-            self.remembered_bits[word] |= bit;
+        if self.remembered_bits.insert(handle) {
             self.remembered.push(handle);
         } else {
             self.switch_to_full_scan(handle);
@@ -514,9 +511,8 @@ impl Heap {
     /// Switches a partially remembered container to a full scan.
     #[cold]
     fn switch_to_full_scan(&mut self, handle: u32) {
-        let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        self.partial_barrier_bits[word] &= !bit;
-        self.pushed_tail_bits[word] &= !bit;
+        self.partial_barrier_bits.remove(handle);
+        self.pushed_tail_bits.remove(handle);
         self.dirty_containers.remove(&handle);
     }
 
@@ -527,8 +523,7 @@ impl Heap {
     /// length.
     #[inline]
     fn record_partial_container_barrier(&mut self, handle: u32, index: usize, is_push: bool) {
-        let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        if self.mark_bits[word] & bit != 0 {
+        if self.mark_bits.contains(handle) {
             self.remember_for_partial_scan(handle, index, is_push);
         }
     }
@@ -536,16 +531,14 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn remember_for_partial_scan(&mut self, handle: u32, index: usize, is_push: bool) {
-        let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        if self.remembered_bits[word] & bit == 0 {
-            self.remembered_bits[word] |= bit;
+        if self.remembered_bits.insert(handle) {
             self.remembered.push(handle);
             if self.entries_len(handle) < MIN_PARTIAL_BARRIER_LEN {
                 return;
             }
-            self.partial_barrier_bits[word] |= bit;
+            self.partial_barrier_bits.insert(handle);
             self.dirty_containers.insert(handle, DirtyContainer { tail_start: UNSET_TAIL_START, indices: Vec::new() });
-        } else if self.partial_barrier_bits[word] & bit == 0 || (is_push && self.pushed_tail_bits[word] & bit != 0) {
+        } else if !self.partial_barrier_bits.contains(handle) || (is_push && self.pushed_tail_bits.contains(handle)) {
             // Fully remembered, or the pushed tail is already covered.
             return;
         }
@@ -563,13 +556,12 @@ impl Heap {
 
     #[cold]
     fn record_dirty_index(&mut self, handle: u32, index: usize, is_push: bool) {
-        let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
         let index = index.min(UNSET_TAIL_START as usize - 1) as u32;
         let len = self.entries_len(handle);
         let Some(dirty) = self.dirty_containers.get_mut(&handle) else { return };
         if is_push {
             dirty.tail_start = dirty.tail_start.min(index);
-            self.pushed_tail_bits[word] |= bit;
+            self.pushed_tail_bits.insert(handle);
         } else if dirty.indices.len() < len / ELEMS_PER_DIRTY_INDEX {
             dirty.indices.push(index);
         } else {
@@ -629,10 +621,10 @@ impl Heap {
             &self.cycle_mark_bits,
             &self.gray_bits,
         ];
-        let words: usize = bitmaps.iter().map(|bits| bits.capacity()).sum();
+        let bitmap_bytes: usize = bitmaps.iter().map(|bits| bits.capacity_bytes()).sum();
         // `HashMap` allocates 8 buckets and 8 control bytes for every 7 entries of capacity.
         let dirty = self.dirty_containers.capacity() * (std::mem::size_of::<(u32, DirtyContainer)>() + 1) * 8 / 7;
-        self.table_bytes = words * std::mem::size_of::<u64>()
+        self.table_bytes = bitmap_bytes
             + self.remembered.capacity() * std::mem::size_of::<u32>()
             + dirty
             + self.gray_worklist.capacity() * std::mem::size_of::<(u32, usize)>()
@@ -973,7 +965,7 @@ impl Heap {
     pub fn list_mut_truncating(&mut self, list: VmValue) -> Option<&mut Vec<VmValue>> {
         let VmValue::Obj(handle) = list else { return None };
         // Clear the pushed-tail shortcut because truncation can move the list end below `tail_start`.
-        clear_bit(&mut self.pushed_tail_bits, handle);
+        self.pushed_tail_bits.remove(handle);
         match &mut self.slots[handle as usize] {
             Obj::List(items) => Some(items),
             _ => None,
@@ -1096,11 +1088,9 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn remember_channel_for_partial_scan(&mut self, handle: u32) {
-        let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        if self.remembered_bits[word] & bit == 0 {
-            self.remembered_bits[word] |= bit;
+        if self.remembered_bits.insert(handle) {
             self.remembered.push(handle);
-            self.partial_barrier_bits[word] |= bit;
+            self.partial_barrier_bits.insert(handle);
             if let Obj::Channel(chan) = &mut self.slots[handle as usize] {
                 chan.pushed = 0;
             }
@@ -1262,7 +1252,7 @@ impl Heap {
 
     #[inline]
     fn is_marked(&self, handle: u32) -> bool {
-        self.mark_bits[(handle / 64) as usize] & (1 << (handle % 64)) != 0
+        self.mark_bits.contains(handle)
     }
 
     fn trace(&mut self) {
@@ -1297,8 +1287,8 @@ impl Heap {
         let size = self.slots[index].size();
         self.release_slot(handle);
         self.live_objects -= 1;
-        clear_bit(&mut self.cycle_mark_bits, handle);
-        clear_bit(&mut self.gray_bits, handle);
+        self.cycle_mark_bits.remove(handle);
+        self.gray_bits.remove(handle);
         size
     }
 
@@ -1311,7 +1301,7 @@ impl Heap {
         if major {
             self.clear_spares();
             self.abort_incremental_gc();
-            self.mark_bits.iter_mut().for_each(|bits| *bits = 0);
+            self.mark_bits.clear();
         }
         for root in roots {
             mark(&mut self.mark_bits, &mut self.worklist, root);
@@ -1329,11 +1319,10 @@ impl Heap {
             ..
         } = self;
         for &handle in remembered.iter() {
-            let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-            let partial = partial_barrier_bits[word] & bit != 0;
-            remembered_bits[word] &= !bit;
-            partial_barrier_bits[word] &= !bit;
-            pushed_tail_bits[word] &= !bit;
+            let partial = partial_barrier_bits.contains(handle);
+            remembered_bits.remove(handle);
+            partial_barrier_bits.remove(handle);
+            pushed_tail_bits.remove(handle);
             if major {
                 continue;
             }
@@ -1432,7 +1421,6 @@ impl Heap {
         if len == self.slots.len() {
             return;
         }
-        let words = len.div_ceil(64);
         self.arena_peak_slots = self.arena_peak_slots.max(self.slots.len());
         let shrink = self.arena_peak_slots - len >= MIN_SHRINK_SLOTS;
         if shrink {
@@ -1447,12 +1435,7 @@ impl Heap {
             &mut self.cycle_mark_bits,
             &mut self.gray_bits,
         ] {
-            bits.truncate(words);
-            if let Some(last) = bits.last_mut()
-                && !len.is_multiple_of(64)
-            {
-                *last &= (1 << (len % 64)) - 1;
-            }
+            bits.truncate(len);
             if shrink {
                 bits.shrink_to_fit();
             }
@@ -1527,8 +1510,8 @@ impl Heap {
     /// Starts an incremental major collection and marks `roots`.
     pub fn start_incremental_gc(&mut self, roots: impl IntoIterator<Item = VmValue>) {
         self.clear_spares();
-        self.cycle_mark_bits.iter_mut().for_each(|bits| *bits = 0);
-        self.gray_bits.iter_mut().for_each(|bits| *bits = 0);
+        self.cycle_mark_bits.clear();
+        self.gray_bits.clear();
         self.gray_worklist.clear();
         self.cycle_phase = IncrementalGcPhase::Marking;
         for root in roots {
@@ -1579,12 +1562,11 @@ impl Heap {
             self.mark_incremental(root);
         }
         self.step_marking(usize::MAX);
-        self.mark_bits.copy_from_slice(&self.cycle_mark_bits);
+        self.mark_bits.copy_from(&self.cycle_mark_bits);
         for &handle in &self.remembered {
-            let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-            self.remembered_bits[word] &= !bit;
-            self.partial_barrier_bits[word] &= !bit;
-            self.pushed_tail_bits[word] &= !bit;
+            self.remembered_bits.remove(handle);
+            self.partial_barrier_bits.remove(handle);
+            self.pushed_tail_bits.remove(handle);
         }
         self.remembered.clear();
         self.dirty_containers.clear();
@@ -1605,10 +1587,9 @@ impl Heap {
     #[inline]
     fn mark_incremental(&mut self, value: VmValue) {
         if let Some(handle) = value.handle()
-            && !test_bit(&self.cycle_mark_bits, handle)
+            && self.cycle_mark_bits.insert(handle)
         {
-            set_bit(&mut self.cycle_mark_bits, handle);
-            set_bit(&mut self.gray_bits, handle);
+            self.gray_bits.insert(handle);
             self.gray_worklist.push((handle, 0));
         }
     }
@@ -1618,8 +1599,7 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn requeue_for_incremental_scan(&mut self, handle: u32) {
-        if test_bit(&self.cycle_mark_bits, handle) && !test_bit(&self.gray_bits, handle) {
-            set_bit(&mut self.gray_bits, handle);
+        if self.cycle_mark_bits.contains(handle) && self.gray_bits.insert(handle) {
             self.gray_worklist.push((handle, 0));
         }
     }
@@ -1630,7 +1610,7 @@ impl Heap {
         while budget > 0 {
             let Some((handle, start)) = self.gray_worklist.pop() else { break };
             if start == 0 {
-                clear_bit(&mut self.gray_bits, handle);
+                self.gray_bits.remove(handle);
             }
             children.clear();
             let next = visit_children_chunk(&self.slots[handle as usize], start, |value| children.push(value));
@@ -1650,7 +1630,7 @@ impl Heap {
         let end = self.sweep_cursor.saturating_add(budget).min(self.slots.len());
         let mut freed = 0;
         for index in self.sweep_cursor..end {
-            if !matches!(self.slots[index], Obj::Free(_)) && !test_bit(&self.cycle_mark_bits, index as u32) {
+            if !matches!(self.slots[index], Obj::Free(_)) && !self.cycle_mark_bits.contains(index as u32) {
                 freed += self.free_slot(index as u32);
             }
         }
@@ -1669,7 +1649,7 @@ impl Heap {
 ///
 /// Drains `worklist` before advancing `scan_chunks` to bound `worklist` to a
 /// single container chunk at a time.
-fn trace(slots: &[Obj], mark_bits: &mut [u64], worklist: &mut Vec<u32>, scan_chunks: &mut Vec<(u32, usize)>) {
+fn trace(slots: &[Obj], mark_bits: &mut BitSet, worklist: &mut Vec<u32>, scan_chunks: &mut Vec<(u32, usize)>) {
     loop {
         let (handle, start) = match worklist.pop() {
             Some(handle) => (handle, 0),
@@ -1682,21 +1662,6 @@ fn trace(slots: &[Obj], mark_bits: &mut [u64], worklist: &mut Vec<u32>, scan_chu
             scan_chunks.push((handle, next));
         }
     }
-}
-
-#[inline]
-fn test_bit(bits: &[u64], handle: u32) -> bool {
-    bits[(handle / 64) as usize] & (1 << (handle % 64)) != 0
-}
-
-#[inline]
-fn set_bit(bits: &mut [u64], handle: u32) {
-    bits[(handle / 64) as usize] |= 1 << (handle % 64);
-}
-
-#[inline]
-fn clear_bit(bits: &mut [u64], handle: u32) {
-    bits[(handle / 64) as usize] &= !(1 << (handle % 64));
 }
 
 /// Invokes `f` on up to [`SCAN_CHUNK_LEN`] child values of `obj`, starting at
@@ -1750,13 +1715,73 @@ fn visit_children_chunk(obj: &Obj, start: usize, mut f: impl FnMut(VmValue)) -> 
 
 /// Marks `value` and pushes its handle onto `worklist` if unmarked.
 #[inline]
-fn mark(mark_bits: &mut [u64], worklist: &mut Vec<u32>, value: VmValue) {
-    if let Some(handle) = value.handle() {
-        let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        if mark_bits[word] & bit == 0 {
-            mark_bits[word] |= bit;
-            worklist.push(handle);
+fn mark(mark_bits: &mut BitSet, worklist: &mut Vec<u32>, value: VmValue) {
+    if let Some(handle) = value.handle()
+        && mark_bits.insert(handle)
+    {
+        worklist.push(handle);
+    }
+}
+
+/// Dense bitset backed by 64-bit words, indexed by arena slot handles.
+#[derive(Default)]
+struct BitSet {
+    words: Vec<u64>,
+}
+
+impl BitSet {
+    #[inline]
+    fn contains(&self, handle: u32) -> bool {
+        self.words[(handle / 64) as usize] & (1u64 << (handle % 64)) != 0
+    }
+
+    /// Marks `handle` present and returns `true` if it was previously absent.
+    #[inline]
+    fn insert(&mut self, handle: u32) -> bool {
+        let word = &mut self.words[(handle / 64) as usize];
+        let bit = 1u64 << (handle % 64);
+        let was_absent = *word & bit == 0;
+        *word |= bit;
+        was_absent
+    }
+
+    #[inline]
+    fn remove(&mut self, handle: u32) {
+        self.words[(handle / 64) as usize] &= !(1u64 << (handle % 64));
+    }
+
+    fn clear(&mut self) {
+        self.words.fill(0);
+    }
+
+    fn copy_from(&mut self, src: &BitSet) {
+        self.words.copy_from_slice(&src.words);
+    }
+
+    #[inline]
+    fn slot_capacity(&self) -> usize {
+        self.words.len() * 64
+    }
+
+    fn push_word(&mut self) {
+        self.words.push(0);
+    }
+
+    fn truncate(&mut self, slot_len: usize) {
+        self.words.truncate(slot_len.div_ceil(64));
+        if let Some(last) = self.words.last_mut()
+            && !slot_len.is_multiple_of(64)
+        {
+            *last &= (1u64 << (slot_len % 64)) - 1;
         }
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.words.shrink_to_fit();
+    }
+
+    fn capacity_bytes(&self) -> usize {
+        self.words.capacity() * std::mem::size_of::<u64>()
     }
 }
 
