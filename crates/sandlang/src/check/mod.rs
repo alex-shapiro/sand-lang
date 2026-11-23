@@ -1234,7 +1234,6 @@ impl Checker {
             }
         }
 
-        // The traits of type parameters may take types declared later as arguments.
         let type_members = if self.current_module_is_native() { self.declare_rust_types() } else { Vec::new() };
         let mut struct_ids = Vec::new();
         let mut type_params: Vec<(&[ast::GenericParam], Vec<ParamId>)> = Vec::new();
@@ -1278,22 +1277,24 @@ impl Checker {
         }
         if pm.kind == ModKind::Prelude {
             self.find_well_known();
-            if let Some(Def::Trait(t)) = self.scope_def(mi, "Iterator") {
+            if let Some(Def::Trait(t)) = self.lookup_module_def(mi, "Iterator") {
                 self.iter_trait = Some(t);
             }
-            if let Some(Def::Trait(t)) = self.scope_def(mi, "Close") {
+            if let Some(Def::Trait(t)) = self.lookup_module_def(mi, "Close") {
                 self.close_trait = Some(t);
             }
-            if let Some(Def::Type(TyRef::Def(d))) = self.scope_def(mi, "Iter") {
+            if let Some(Def::Type(TyRef::Def(d))) = self.lookup_module_def(mi, "Iter") {
                 self.iter_struct = Some(d);
             }
         }
+
         // Resolve aliases eagerly so errors are reported once.
         for i in 0..self.aliases.len() {
             if self.aliases[i].ty.is_none() && self.aliases[i].decl.as_ref().map(|d| d.0) == Some(mi) {
                 self.resolve_alias(i, Span::default());
             }
         }
+
         // Supertraits, then trait method signatures.
         let trait_decls: Vec<(u32, &ast::TraitDecl)> = items
             .iter()
@@ -1301,6 +1302,7 @@ impl Checker {
             .filter_map(|(i, x)| if let ItemKind::Trait(t) = &x.kind { Some((i as u32, t)) } else { None })
             .collect();
         self.resolve_supertraits(&trait_ids, &trait_decls);
+
         // 3. Resolve struct fields and enum variants, infer implied member
         // bounds, and derive built-in traits. Well-formedness checks on member
         // types run after `impl` declarations are registered.
@@ -1334,7 +1336,7 @@ impl Checker {
         self.derive_impls(first_type, &early);
         if pm.kind == ModKind::Prelude {
             for name in ["Option", "Result"] {
-                if let Some(Def::Type(TyRef::Def(d))) = self.scope_def(mi, name) {
+                if let Some(Def::Type(TyRef::Def(d))) = self.lookup_module_def(mi, name) {
                     let span = self.types[d as usize].span;
                     let vs: Vec<Symbol> = self.types[d as usize].variants().iter().map(|v| v.name).collect();
                     for (i, vn) in vs.into_iter().enumerate() {
@@ -1485,8 +1487,8 @@ impl Checker {
         }
     }
 
-    /// What `name` is bound to in the scope of module `m`.
-    fn scope_def(&self, m: ModId, name: &str) -> Option<Def> {
+    /// Looks up a name in a module's top-level scope. Ignores visibility.
+    fn lookup_module_def(&self, m: ModId, name: &str) -> Option<Def> {
         let s = self.syms.get(name)?;
         self.mods[m as usize].scope.get(&s).map(|b| b.def)
     }
@@ -2142,7 +2144,7 @@ impl Checker {
         let module = self.name(self.mods[mi as usize].name).to_string();
         let key = format!("{module}.{name}");
         let (owner, fn_name) = match name.split_once('.') {
-            Some((ty, method)) => match self.scope_def(mi, ty) {
+            Some((ty, method)) => match self.lookup_module_def(mi, ty) {
                 Some(Def::Type(TyRef::Def(d))) if self.types[d as usize].module == mi => {
                     if !self.types[d as usize].generics.is_empty() {
                         let msg = format!(
@@ -2294,7 +2296,7 @@ impl Checker {
                     "prelude" => self.prelude,
                     m => self.module_named(m),
                 };
-                let declared = module.and_then(|m| match self.scope_def(m, n.name)? {
+                let declared = module.and_then(|m| match self.lookup_module_def(m, n.name)? {
                     Def::Type(TyRef::Def(d)) if self.types[d as usize].module == m => Some(d),
                     _ => None,
                 });

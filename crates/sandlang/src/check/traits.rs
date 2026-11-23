@@ -203,7 +203,7 @@ impl Checker {
             // Only traits can appear after `:`, so a module-local type (`struct Hash`)
             // does not shadow a prelude trait of the same name.
             [one] => match (self.lookup_global(&one.name), self.prelude) {
-                (Some(Def::Type(_)), Some(p)) if p != self.cur_mod => match self.scope_def(p, &one.name) {
+                (Some(Def::Type(_)), Some(p)) if p != self.cur_mod => match self.lookup_module_def(p, &one.name) {
                     Some(Def::Trait(t)) if self.traits[t as usize].is_pub => Some(Def::Trait(t)),
                     _ => self.lookup_global(&one.name),
                 },
