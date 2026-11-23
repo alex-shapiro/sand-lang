@@ -501,7 +501,8 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn remember_for_full_scan(&mut self, handle: u32) {
-        if self.remembered_bits.insert(handle) {
+        if !self.remembered_bits.contains(handle) {
+            self.remembered_bits.insert(handle);
             self.remembered.push(handle);
         } else {
             self.switch_to_full_scan(handle);
@@ -531,7 +532,8 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn remember_for_partial_scan(&mut self, handle: u32, index: usize, is_push: bool) {
-        if self.remembered_bits.insert(handle) {
+        if !self.remembered_bits.contains(handle) {
+            self.remembered_bits.insert(handle);
             self.remembered.push(handle);
             if self.entries_len(handle) < MIN_PARTIAL_BARRIER_LEN {
                 return;
@@ -1088,7 +1090,8 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn remember_channel_for_partial_scan(&mut self, handle: u32) {
-        if self.remembered_bits.insert(handle) {
+        if !self.remembered_bits.contains(handle) {
+            self.remembered_bits.insert(handle);
             self.remembered.push(handle);
             self.partial_barrier_bits.insert(handle);
             if let Obj::Channel(chan) = &mut self.slots[handle as usize] {
@@ -1587,8 +1590,9 @@ impl Heap {
     #[inline]
     fn mark_incremental(&mut self, value: VmValue) {
         if let Some(handle) = value.handle()
-            && self.cycle_mark_bits.insert(handle)
+            && !self.cycle_mark_bits.contains(handle)
         {
+            self.cycle_mark_bits.insert(handle);
             self.gray_bits.insert(handle);
             self.gray_worklist.push((handle, 0));
         }
@@ -1599,7 +1603,8 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn requeue_for_incremental_scan(&mut self, handle: u32) {
-        if self.cycle_mark_bits.contains(handle) && self.gray_bits.insert(handle) {
+        if self.cycle_mark_bits.contains(handle) && !self.gray_bits.contains(handle) {
+            self.gray_bits.insert(handle);
             self.gray_worklist.push((handle, 0));
         }
     }
@@ -1717,8 +1722,9 @@ fn visit_children_chunk(obj: &Obj, start: usize, mut f: impl FnMut(VmValue)) -> 
 #[inline]
 fn mark(mark_bits: &mut BitSet, worklist: &mut Vec<u32>, value: VmValue) {
     if let Some(handle) = value.handle()
-        && mark_bits.insert(handle)
+        && !mark_bits.contains(handle)
     {
+        mark_bits.insert(handle);
         worklist.push(handle);
     }
 }
@@ -1730,22 +1736,17 @@ struct BitSet {
 }
 
 impl BitSet {
-    #[inline]
+    #[inline(always)]
     fn contains(&self, handle: u32) -> bool {
         self.words[(handle / 64) as usize] & (1u64 << (handle % 64)) != 0
     }
 
-    /// Marks `handle` present and returns `true` if it was previously absent.
-    #[inline]
-    fn insert(&mut self, handle: u32) -> bool {
-        let word = &mut self.words[(handle / 64) as usize];
-        let bit = 1u64 << (handle % 64);
-        let was_absent = *word & bit == 0;
-        *word |= bit;
-        was_absent
+    #[inline(always)]
+    fn insert(&mut self, handle: u32) {
+        self.words[(handle / 64) as usize] |= 1u64 << (handle % 64);
     }
 
-    #[inline]
+    #[inline(always)]
     fn remove(&mut self, handle: u32) {
         self.words[(handle / 64) as usize] &= !(1u64 << (handle % 64));
     }
@@ -1758,7 +1759,7 @@ impl BitSet {
         self.words.copy_from_slice(&src.words);
     }
 
-    #[inline]
+    #[inline(always)]
     fn slot_capacity(&self) -> usize {
         self.words.len() * 64
     }
