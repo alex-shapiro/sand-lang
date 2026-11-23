@@ -336,15 +336,12 @@ impl Default for ScratchMemoryTracker {
     }
 }
 
-/// Computes the extra fuel needed to bound straight-line bytecode between safe
-/// points.
+/// Computes extra fuel needed to execute bytecode between safe points.
 ///
-/// The interpreter deducts base fuel only at calls and loop back edges.
-/// Without a surcharge proportional to block length, the interpreter could
-/// execute a huge function or closure capture copy for a single fuel unit and
-/// delay limit checks. Callers add this surcharge to the base cost of entering
-/// a function, starting a task, or copying closure captures. Blocks shorter
-/// than 64 instructions add zero surcharge.
+/// The interpreter deducts base fuel at calls and loop back edges.
+/// This surcharge is proportional to block length. Callers add it to the base
+/// cost of entering a function, starting a task, or copying a closure capture.
+/// Blocks shorter than 64 instructions add zero surcharge.
 #[inline(always)]
 pub const fn code_fuel_surcharge(instructions: usize) -> i64 {
     (instructions >> INSTRUCTIONS_PER_FUEL_SHIFT) as i64
