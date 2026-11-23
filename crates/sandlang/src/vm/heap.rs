@@ -52,74 +52,57 @@ use std::time::Duration;
 
 /// Garbage-collected object arena for a single VM instance.
 pub struct Heap {
-    /// Estimated bytes held by heap objects.
-    ///
-    /// This value is exact after a major collection. Between collections, it
-    /// also includes unreachable objects.
-    pub object_bytes: usize,
-    /// Bytes used by fibers, counted with the heap against `limit`.
-    ///
-    /// The VM increments this value during fiber allocation and recomputes it
-    /// during each collection.
-    pub fiber_bytes: usize,
-    pub live_objects: usize,
-    pub limit: Option<usize>,
-    /// Memory reserved for pending I/O buffers, counted against `limit`.
-    pub io_memory: Arc<IoMemory>,
-    /// Triggers a collection if `object_bytes` exceeds this threshold.
-    pub next_gc_bytes: usize,
-    /// Triggers a major collection while idle if `object_bytes` exceeds this threshold.
-    pub next_major_gc_bytes: usize,
-    /// Enables incremental major collections for large heaps; enabled by default.
-    pub incremental: bool,
-    pub stats: GcStats,
-    /// Triggers garbage collection at every safe point for stress testing.
-    pub gc_stress: bool,
-    /// Forces the next memory-limit check to fail for retry stress testing.
-    pub(crate) fail_next_check: std::cell::Cell<bool>,
-    /// Disables memory-limit checks during post-effect result conversion.
-    pub(crate) ignore_memory_limit: bool,
-
+    // Keep hot arena and allocation fields first for cache locality.
     slots: Vec<Obj>,
-    free_list_head: u32,
-    /// Peak length of `slots` since the collector last shrank the arena.
-    arena_peak_slots: usize,
-    /// Byte capacity of collector bitmaps, worklists, and `dirty_containers`.
-    table_bytes: usize,
-    /// Freed value boxes cached by length for reuse by [`Heap::box_values`].
-    ///
-    /// Cached bytes count toward memory usage until a major collection drops
-    /// them.
-    spare_boxes: [Vec<Box<[VmValue]>>; MAX_SPARE_BOX_LEN],
-    /// Reusable chunks of [`STAGE_CHUNK_LEN`] entries for [`Staging`], dropped on major collections.
-    spare_chunks: Vec<Vec<(u32, Obj)>>,
-    /// Total bytes held in `spare_boxes` and `spare_chunks`.
-    spare_bytes: usize,
-
     /// Sticky mark bits set for old objects retained by a prior collection.
     mark_bits: BitSet,
-    /// Slots allocated since the last collection.
-    young: Vec<u32>,
-    /// Old object slots mutated since the last collection.
-    remembered: Vec<u32>,
     /// Bitmask deduplicating entries in `remembered`.
     remembered_bits: BitSet,
+    /// Old object slots mutated since the last collection.
+    remembered: Vec<u32>,
     /// Bitmask of remembered containers tracked with partial write barriers.
     partial_barrier_bits: BitSet,
     /// Bitmask of partially remembered containers whose pushed tail is already tracked.
     pushed_tail_bits: BitSet,
     /// Modified indices and pushed tails for partially remembered containers.
     dirty_containers: FxHashMap<u32, DirtyContainer>,
+    /// Slots allocated since the last collection.
+    young: Vec<u32>,
+    free_list_head: u32,
+    /// Estimated bytes held by heap objects.
+    ///
+    /// This value is exact after a major collection. Between collections, it
+    /// also includes unreachable objects.
+    pub object_bytes: usize,
+    /// Triggers a collection if `object_bytes` exceeds this threshold.
+    pub next_gc_bytes: usize,
+    /// Triggers a major collection while idle if `object_bytes` exceeds this threshold.
+    pub next_major_gc_bytes: usize,
+    pub limit: Option<usize>,
+    /// Byte capacity of collector bitmaps, worklists, and `dirty_containers`.
+    table_bytes: usize,
+    /// Peak length of `slots` since the collector last shrank the arena.
+    arena_peak_slots: usize,
+    /// Bytes used by fibers, counted with the heap against `limit`.
+    ///
+    /// The VM increments this value during fiber allocation and recomputes it
+    /// during each collection.
+    pub fiber_bytes: usize,
+    pub live_objects: usize,
+    /// Open resources allocated since the last collection; triggers a collection at [`MAX_YOUNG_RESOURCES`].
+    young_resources: usize,
+    /// Triggers garbage collection at every safe point for stress testing.
+    pub gc_stress: bool,
+    /// Forces the next memory-limit check to fail for retry stress testing.
+    pub(crate) fail_next_check: std::cell::Cell<bool>,
+    /// Disables memory-limit checks during post-effect result conversion.
+    pub(crate) ignore_memory_limit: bool,
+    /// Memory reserved for pending I/O buffers, counted against `limit`.
+    pub io_memory: Arc<IoMemory>,
     worklist: Vec<u32>,
     /// Large containers being traced, paired with the next child index to scan.
     scan_chunks: Vec<(u32, usize)>,
-    /// Triggers a minor collection if `object_bytes` exceeds this threshold.
-    next_minor_gc_bytes: usize,
-    /// Open resources allocated since the last collection; triggers a collection at [`MAX_YOUNG_RESOURCES`].
-    young_resources: usize,
-    /// Counter used to interleave minor collections and incremental steps during stress testing.
-    stress_tick: u64,
-
+    pub stats: GcStats,
     cycle_phase: IncrementalGcPhase,
     /// Mark bits for the active incremental major collection.
     cycle_mark_bits: BitSet,
@@ -133,6 +116,21 @@ pub struct Heap {
     bytes_at_last_step: usize,
     /// Value of `object_bytes` at the start of the active incremental cycle.
     cycle_start_bytes: usize,
+    /// Triggers a minor collection if `object_bytes` exceeds this threshold.
+    next_minor_gc_bytes: usize,
+    /// Counter used to interleave minor collections and incremental steps during stress testing.
+    stress_tick: u64,
+    /// Enables incremental major collections for large heaps; enabled by default.
+    pub incremental: bool,
+    /// Freed value boxes cached by length for reuse by [`Heap::box_values`].
+    ///
+    /// Cached bytes count toward memory usage until a major collection drops
+    /// them.
+    spare_boxes: [Vec<Box<[VmValue]>>; MAX_SPARE_BOX_LEN],
+    /// Reusable chunks of [`STAGE_CHUNK_LEN`] entries for [`Staging`], dropped on major collections.
+    spare_chunks: Vec<Vec<(u32, Obj)>>,
+    /// Total bytes held in `spare_boxes` and `spare_chunks`.
+    spare_bytes: usize,
 }
 
 impl Default for Heap {
@@ -146,37 +144,31 @@ impl Heap {
     /// `max_resources` open resources.
     pub fn new(limit: Option<usize>, max_resources: usize) -> Heap {
         Heap {
-            object_bytes: 0,
-            fiber_bytes: 0,
-            live_objects: 0,
-            limit,
-            io_memory: IoMemory::new(limit, max_resources),
-            next_gc_bytes: MIN_GC_BYTES,
-            next_major_gc_bytes: MIN_GC_BYTES,
-            incremental: true,
-            stats: GcStats::default(),
-            gc_stress: false,
-            fail_next_check: std::cell::Cell::new(false),
-            ignore_memory_limit: false,
             slots: Vec::new(),
-            free_list_head: FREE_LIST_END,
-            arena_peak_slots: 0,
-            table_bytes: 0,
-            spare_boxes: Default::default(),
-            spare_chunks: Vec::new(),
-            spare_bytes: 0,
             mark_bits: BitSet::default(),
-            young: Vec::new(),
-            remembered: Vec::new(),
             remembered_bits: BitSet::default(),
+            remembered: Vec::new(),
             partial_barrier_bits: BitSet::default(),
             pushed_tail_bits: BitSet::default(),
             dirty_containers: FxHashMap::default(),
+            young: Vec::new(),
+            free_list_head: FREE_LIST_END,
+            object_bytes: 0,
+            next_gc_bytes: MIN_GC_BYTES,
+            next_major_gc_bytes: MIN_GC_BYTES,
+            limit,
+            table_bytes: 0,
+            arena_peak_slots: 0,
+            fiber_bytes: 0,
+            live_objects: 0,
+            young_resources: 0,
+            gc_stress: false,
+            fail_next_check: std::cell::Cell::new(false),
+            ignore_memory_limit: false,
+            io_memory: IoMemory::new(limit, max_resources),
             worklist: Vec::new(),
             scan_chunks: Vec::new(),
-            next_minor_gc_bytes: MIN_GC_BYTES,
-            young_resources: 0,
-            stress_tick: 0,
+            stats: GcStats::default(),
             cycle_phase: IncrementalGcPhase::Idle,
             cycle_mark_bits: BitSet::default(),
             gray_bits: BitSet::default(),
@@ -184,6 +176,12 @@ impl Heap {
             sweep_cursor: 0,
             bytes_at_last_step: 0,
             cycle_start_bytes: 0,
+            next_minor_gc_bytes: MIN_GC_BYTES,
+            stress_tick: 0,
+            incremental: true,
+            spare_boxes: Default::default(),
+            spare_chunks: Vec::new(),
+            spare_bytes: 0,
         }
     }
 
