@@ -226,8 +226,8 @@ fn main() {
             ms(avg)
         );
     }
-    // One number to compare builds by (the interpreter's speed is sensitive
-    // to code layout, see `vm::interp`).
+    // Code layout changes the time of a single benchmark by up to 4% between
+    // builds with the same instructions. The geometric mean is more stable.
     if count > 1 {
         println!("geometric mean of best times: {:.2}ms over {count} benchmarks", (log_sum / count as f64).exp());
     }
