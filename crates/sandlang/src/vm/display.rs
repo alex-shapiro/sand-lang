@@ -3,8 +3,8 @@
 use super::Fail;
 use super::bytecode::Program;
 use super::compare::MAX_DEPTH;
-use super::heap::Heap;
-use super::meter::{BYTES_PER_FUEL_UNIT, Meter, ScratchMemoryTracker};
+use super::heap::{Heap, ScratchMemoryTracker};
+use super::meter::{BYTES_PER_FUEL_UNIT, Meter};
 use super::value::*;
 use crate::hir::FormatSpec;
 use std::fmt::Write as _;

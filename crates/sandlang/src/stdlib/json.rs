@@ -11,8 +11,8 @@ use crate::types::traits;
 use crate::vm::bytecode::{Program, VariantRt};
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
-use crate::vm::heap::{Heap, Staging};
-use crate::vm::meter::{SLOW_BYTES_PER_FUEL_UNIT, ScratchMemoryTracker, VmMeter};
+use crate::vm::heap::{Heap, ScratchMemoryTracker, Staging};
+use crate::vm::meter::{SLOW_BYTES_PER_FUEL_UNIT, VmMeter};
 use crate::vm::value::{
     FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, ReflectVariantDesc, TypeDesc, ValueRef, VmValue,
     slot_fits,

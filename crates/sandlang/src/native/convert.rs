@@ -3,7 +3,7 @@
 use super::ty::{Never, Num, Param, Reflect, SandType, VmVal};
 use crate::types::traits;
 use crate::value::{NativeValue, Value, qualified_name, qualified_name_module};
-use crate::vm::meter::ScratchMemoryTracker;
+use crate::vm::heap::ScratchMemoryTracker;
 use crate::vm::value::{Obj, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

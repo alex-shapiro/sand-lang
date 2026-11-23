@@ -40,7 +40,6 @@
 //! output rather than by the input's heap size.
 
 use super::Fail;
-use super::heap::Heap;
 use crate::engine::LimitKind;
 use crate::platform::{Clock, Deadline, Instant};
 use std::cell::Cell;
@@ -293,43 +292,6 @@ impl Meter for UnlimitedMeter {
     fn refund_to(&self, _: i64) {}
 }
 
-/// Prevents growing Rust-side temporary buffers from bypassing the VM memory
-/// limit.
-///
-/// Native functions and runtime helpers build temporary strings and vectors in
-/// Rust memory outside the SandLang heap. Checking the heap limit on every byte
-/// appended is too expensive. This tracker amortizes checks to every
-/// [`SCRATCH_CHECK_BYTES`] bytes of growth.
-pub struct ScratchMemoryTracker {
-    next_check_bytes: usize,
-}
-
-impl ScratchMemoryTracker {
-    /// Creates a tracker.
-    pub fn new() -> ScratchMemoryTracker {
-        ScratchMemoryTracker { next_check_bytes: SCRATCH_CHECK_BYTES }
-    }
-
-    /// Verifies that temporary Rust buffer space fits within the VM memory limit.
-    ///
-    /// Skips the heap check until `bytes` reaches the next threshold, unless
-    /// retry stress testing forces a check.
-    #[inline]
-    pub fn check_memory(&mut self, heap: &Heap, bytes: usize) -> Result<(), Fail> {
-        if bytes < self.next_check_bytes && !heap.fail_next_check.get() {
-            return Ok(());
-        }
-        self.next_check_bytes = bytes.saturating_add(SCRATCH_CHECK_BYTES);
-        heap.check_memory(bytes)
-    }
-}
-
-impl Default for ScratchMemoryTracker {
-    fn default() -> Self {
-        ScratchMemoryTracker::new()
-    }
-}
-
 /// Computes extra fuel needed to execute bytecode between safe points.
 ///
 /// The interpreter deducts base fuel at calls and loop back edges.
@@ -362,10 +324,6 @@ pub const SLOW_BYTES_PER_FUEL_UNIT: usize = 8;
 
 /// Fuel units spent between limit checks after the current slice is exhausted.
 pub const LIMIT_CHECK_FUEL_INTERVAL: i64 = 20_000;
-
-/// Buffer growth in bytes between memory-limit checks in
-/// [`ScratchMemoryTracker`].
-pub const SCRATCH_CHECK_BYTES: usize = 64 << 10;
 
 /// Bit shift for straight-line bytecode instructions per fuel unit: `1 << 6`,
 /// or 64 instructions.

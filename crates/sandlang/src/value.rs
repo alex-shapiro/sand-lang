@@ -3,8 +3,8 @@
 use crate::native::ty::Never;
 use crate::vm::bytecode::Program;
 use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
-use crate::vm::heap::Heap;
-use crate::vm::meter::{VmMeter, ScratchMemoryTracker};
+use crate::vm::heap::{Heap, ScratchMemoryTracker};
+use crate::vm::meter::VmMeter;
 use crate::vm::value::{FxHashMap, Obj, ValueRef, ValueType, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
 use smallvec::SmallVec;

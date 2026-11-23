@@ -22,7 +22,8 @@ use super::compare::{
     values_le_metered, values_lt, values_lt_metered,
 };
 use super::display;
-use super::meter::{ScratchMemoryTracker, back_edge_fuel, code_fuel_surcharge};
+use super::heap::ScratchMemoryTracker;
+use super::meter::{back_edge_fuel, code_fuel_surcharge};
 use super::*;
 use crate::engine::LimitKind;
 
