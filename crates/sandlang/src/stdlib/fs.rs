@@ -17,7 +17,7 @@ use crate::native::ty::VmVal;
 use crate::native::{NativeModule, NativeObject};
 use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
-use crate::vm::meter::{OffloadAllowance, OffloadStopped};
+use crate::vm::meter::{WorkerMeter, WorkerStopped};
 use crate::vm::value::to_usize_saturating;
 use crate::vm::{Ctl, CtlKind, Fail, Permits, Vm};
 use std::io;
@@ -300,15 +300,15 @@ enum Halt {
     Denied(PathBuf),
 }
 
-impl From<OffloadStopped> for Halt {
-    fn from(_: OffloadStopped) -> Halt {
+impl From<WorkerStopped> for Halt {
+    fn from(_: WorkerStopped) -> Halt {
         Halt::Stopped
     }
 }
 
 /// Charges for visiting the entry `path` of a tree, which includes reading
 /// the entry, checking it against the policy and acting on it.
-fn charge_entry(allowance: &mut OffloadAllowance, path: &Path) -> Result<(), OffloadStopped> {
+fn charge_entry(allowance: &mut WorkerMeter, path: &Path) -> Result<(), WorkerStopped> {
     allowance.charge(4 + SYSCALL_FUEL)?;
     allowance.charge_bytes(path.as_os_str().len().saturating_mul(4))
 }
@@ -323,7 +323,7 @@ fn scan_tree(
     to: Option<&Path>,
     permits: Option<&Permits>,
     res: &mut Reservation,
-    allowance: &mut OffloadAllowance,
+    allowance: &mut WorkerMeter,
 ) -> Result<io::Result<()>, Halt> {
     let space = fs.space();
     let denies = policy.denies_under_normalized_in(&t.path, space) || to.is_some_and(|to| policy.denies_under_normalized_in(to, space));
@@ -903,7 +903,7 @@ fn read_rest<R: IntoVmValue>(
         let (data, res) = match read {
             Ok(Ok(read)) => read,
             Ok(Err(e)) => return Ok(Err(e)),
-            Err(OffloadStopped) => unreachable!("`offload` reports a stopped read"),
+            Err(WorkerStopped) => unreachable!("`offload` reports a stopped read"),
         };
         // What was read is consumed: from here on, a failure is not a retry.
         drop(res);
@@ -919,11 +919,11 @@ fn read_to_end(
     f: &mut OpenedFile,
     data: &mut Vec<u8>,
     res: &mut Reservation,
-    allowance: &mut OffloadAllowance,
-) -> Result<io::Result<()>, OffloadStopped> {
+    meter: &mut WorkerMeter,
+) -> Result<io::Result<()>, WorkerStopped> {
     let mut chunk = [0u8; 8192];
     loop {
-        allowance.charge(SYSCALL_FUEL)?;
+        meter.charge(SYSCALL_FUEL)?;
         let start = data.len();
         let n = if data.capacity() > start {
             data.resize(data.capacity(), 0);

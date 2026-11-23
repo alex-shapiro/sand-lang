@@ -210,8 +210,8 @@ impl Meter {
 
     /// Creates an [`OffloadAllowance`] so work running off the VM thread can
     /// enforce execution limits independently of this meter.
-    pub(crate) fn offload_allowance(&self) -> OffloadAllowance {
-        OffloadAllowance {
+    pub(crate) fn offload_allowance(&self) -> WorkerMeter {
+        WorkerMeter {
             interrupt_flag: self.interrupt_flag.clone(),
             abandoned_flag: Arc::new(AtomicBool::new(false)),
             wall_deadline: self.wall_deadline.get().map(|at| Deadline { at, clock: self.clock.clone() }),
@@ -384,8 +384,8 @@ pub const INSTRUCTIONS_PER_FUEL_SHIFT: u32 = 6;
 /// A charge returns [`OffloadStopped`] if the engine is interrupted, the clock
 /// passes the wall-clock deadline, the worker exceeds the starting instruction
 /// budget, or the VM stops waiting. After the job finishes, the VM charges its
-/// [`Meter`] for [`OffloadAllowance::fuel_used`].
-pub(crate) struct OffloadAllowance {
+/// [`Meter`] for [`WorkerMeter::fuel_used`].
+pub(crate) struct WorkerMeter {
     interrupt_flag: Arc<AtomicBool>,
     abandoned_flag: Arc<AtomicBool>,
     wall_deadline: Option<Deadline>,
@@ -395,15 +395,15 @@ pub(crate) struct OffloadAllowance {
     stopped: bool,
 }
 
-/// Signal that an offloaded job hit an execution limit or cancellation and
+/// Signal that a worker hit an execution limit or cancellation and
 /// must stop immediately.
 #[derive(Debug)]
-pub(crate) struct OffloadStopped;
+pub(crate) struct WorkerStopped;
 
-impl OffloadAllowance {
-    /// Charges fuel for offloaded work.
+impl WorkerMeter {
+    /// Charges fuel for work.
     /// Returns [`OffloadStopped`] if the worker must abort.
-    pub fn charge(&mut self, units: u64) -> Result<(), OffloadStopped> {
+    pub fn charge(&mut self, units: u64) -> Result<(), WorkerStopped> {
         self.fuel_used = self.fuel_used.saturating_add(units);
         self.stopped |=
             self.fuel_used > self.fuel_limit || self.interrupt_flag.load(Ordering::Relaxed) || self.abandoned_flag.load(Ordering::Relaxed);
@@ -411,11 +411,11 @@ impl OffloadAllowance {
             self.next_deadline_check_fuel = self.fuel_used.saturating_add(LIMIT_CHECK_FUEL_INTERVAL as u64 / 16);
             self.stopped = self.wall_deadline.as_ref().is_some_and(Deadline::passed);
         }
-        if self.stopped { Err(OffloadStopped) } else { Ok(()) }
+        if self.stopped { Err(WorkerStopped) } else { Ok(()) }
     }
 
     /// Charges fuel for bulk memory work on a worker thread.
-    pub fn charge_bytes(&mut self, byte_count: usize) -> Result<(), OffloadStopped> {
+    pub fn charge_bytes(&mut self, byte_count: usize) -> Result<(), WorkerStopped> {
         self.charge((byte_count / BYTES_PER_FUEL_UNIT) as u64)
     }
 

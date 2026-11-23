@@ -1154,10 +1154,7 @@ impl Vm {
     /// [`meter::OffloadAllowance`], and the meter is then charged the same amount.
     /// If a charge to the allowance failed, the job's result is discarded
     /// and the meter's error is returned.
-    pub(crate) fn offload<T: Send + 'static>(
-        &self,
-        job: impl FnOnce(&mut meter::OffloadAllowance) -> T + Send + 'static,
-    ) -> Result<T, Fail> {
+    pub(crate) fn offload<T: Send + 'static>(&self, job: impl FnOnce(&mut meter::WorkerMeter) -> T + Send + 'static) -> Result<T, Fail> {
         let mut allowance = self.meter.offload_allowance();
         let finish = |t: T, used: u64, stopped: bool| {
             self.meter.charge(used)?;
