@@ -1233,10 +1233,10 @@ impl Checker {
                 trait_ids.push(id);
             }
         }
-        let bound_members = if self.current_module_is_native() { self.declare_rust_types() } else { Vec::new() };
-        let mut struct_ids = Vec::new();
 
         // The traits of type parameters may take types declared later as arguments.
+        let type_members = if self.current_module_is_native() { self.declare_rust_types() } else { Vec::new() };
+        let mut struct_ids = Vec::new();
         let mut type_params: Vec<(&[ast::GenericParam], Vec<ParamId>)> = Vec::new();
         for item in items {
             match &item.kind {
@@ -1307,11 +1307,11 @@ impl Checker {
         let mut member_types: Vec<(TypeDefId, TypeId, Span)> = Vec::new();
         let mut bound_ids = Vec::new();
         let mut bound_defaults = Vec::new();
-        for (id, members) in bound_members {
-            bound_defaults.extend(self.resolve_bound_members(id, members));
+        for (id, members) in type_members {
+            bound_defaults.extend(self.resolve_type_members(id, members));
             bound_ids.push(id);
         }
-        self.resolve_bound_defaults(bound_defaults);
+        self.resolve_rust_field_defaults(bound_defaults);
         let mut k = 0;
         for (idx, item) in items.iter().enumerate() {
             match &item.kind {
@@ -1728,9 +1728,9 @@ impl Checker {
         members
     }
 
-    /// Resolves field or payload types for a Rust-bound type after the checker
+    /// Resolves field or payload types for a Rust type after the checker
     /// declares all types in the module. Returns any struct field defaults.
-    fn resolve_bound_members(&mut self, id: TypeDefId, members: RustTypeMembers) -> Option<RustFieldDefaults> {
+    fn resolve_type_members(&mut self, id: TypeDefId, members: RustTypeMembers) -> Option<RustFieldDefaults> {
         let span = self.types[id as usize].span;
         let qual = format!("{}.{}", self.name(self.types[id as usize].module_name), self.name(self.types[id as usize].name));
         let generics = self.types[id as usize].generics.clone();
@@ -1770,7 +1770,7 @@ impl Checker {
 
     /// Resolves each Rust field default into a constant of the declared field
     /// type and registers its default helper function.
-    fn resolve_bound_defaults(&mut self, defaults: Vec<RustFieldDefaults>) {
+    fn resolve_rust_field_defaults(&mut self, defaults: Vec<RustFieldDefaults>) {
         let rust_defaults =
             defaults.iter().flat_map(|d| d.values.iter().enumerate().filter_map(|(field, value)| Some((d.def, field, value.as_ref()?))));
         for (def, field, value) in rust_defaults {
@@ -1782,7 +1782,7 @@ impl Checker {
             if ty == TypeId::ERROR {
                 continue;
             }
-            let Some(const_default) = self.resolve_bound_const(value, ty).filter(|c| c.measure().is_some()) else {
+            let Some(const_default) = self.resolve_const_val(value, ty).filter(|c| c.measure().is_some()) else {
                 let def = &self.types[def as usize];
                 let (module, name, field) = (self.name(def.module_name), self.name(def.name), self.name(field_name));
                 let ty = self.printer().show(ty);
@@ -1853,7 +1853,7 @@ impl Checker {
 
     /// Converts `value` into a [`ConstVal`] of type `ty`, or returns `None` if
     /// `value` is not a valid constant of `ty`.
-    fn resolve_bound_const(&mut self, value: &Value, ty: TypeId) -> Option<ConstVal> {
+    fn resolve_const_val(&mut self, value: &Value, ty: TypeId) -> Option<ConstVal> {
         Some(match (value, self.arena.get(ty)) {
             (Value::Unit, Ty::Unit) => ConstVal::Unit,
             (Value::Bool(b), Ty::Bool) => ConstVal::Bool(*b),
@@ -1863,29 +1863,29 @@ impl Checker {
             (Value::Str(s), Ty::Str) => ConstVal::Str(s.clone()),
             (Value::Bytes(b), Ty::Bytes) => ConstVal::Bytes(b.clone()),
             (Value::Range { start, end, inclusive }, Ty::Range) => ConstVal::Range(*start, *end, *inclusive),
-            (Value::List(items), Ty::List(e)) => ConstVal::List(self.resolve_bound_consts(items, std::iter::repeat(e))?),
-            (Value::Set(items), Ty::Set(e)) => ConstVal::Set(self.resolve_bound_consts(items, std::iter::repeat(e))?),
+            (Value::List(items), Ty::List(e)) => ConstVal::List(self.resolve_const_vals(items, std::iter::repeat(e))?),
+            (Value::Set(items), Ty::Set(e)) => ConstVal::Set(self.resolve_const_vals(items, std::iter::repeat(e))?),
             (Value::Tuple(items), Ty::Tuple(ts)) if items.len() == self.arena.list_len(ts) => {
                 let ts = self.arena.list(ts).to_vec();
-                ConstVal::Tuple(self.resolve_bound_consts(items, ts)?)
+                ConstVal::Tuple(self.resolve_const_vals(items, ts)?)
             }
             (Value::Map(entries), Ty::Map(k, v)) => ConstVal::Map(
                 entries
                     .iter()
-                    .map(|(key, value)| Some((self.resolve_bound_const(key, k)?, self.resolve_bound_const(value, v)?)))
+                    .map(|(key, value)| Some((self.resolve_const_val(key, k)?, self.resolve_const_val(value, v)?)))
                     .collect::<Option<_>>()?,
             ),
             (Value::Struct(s), Ty::Named(def, args)) if self.matches_struct_def(def, s) => {
                 let args = self.arena.list(args).to_vec();
                 let tys: Vec<TypeId> = (0..s.fields.len()).map(|i| self.field_type(def, i, &args)).collect();
-                ConstVal::Struct(def, self.resolve_bound_consts(&s.fields, tys)?)
+                ConstVal::Struct(def, self.resolve_const_vals(&s.fields, tys)?)
             }
             (Value::Variant(v), Ty::Named(def, args)) => {
                 let variant = self.declared_variant(def, v)?;
                 let (rt_id, fields, generics) = (variant.rt_id, variant.fields.clone(), self.types[def as usize].generics.clone());
                 let args = self.arena.list(args).to_vec();
                 let tys: Vec<TypeId> = fields.into_iter().map(|t| self.arena.instantiate(t, &generics, &args)).collect();
-                ConstVal::Variant(rt_id, self.resolve_bound_consts(&v.payload, tys)?)
+                ConstVal::Variant(rt_id, self.resolve_const_vals(&v.payload, tys)?)
             }
             _ => return None,
         })
@@ -1893,8 +1893,8 @@ impl Checker {
 
     /// Converts each element of `values` into a [`ConstVal`] of the
     /// corresponding type in `tys`.
-    fn resolve_bound_consts(&mut self, values: &[Value], tys: impl IntoIterator<Item = TypeId>) -> Option<Vec<ConstVal>> {
-        values.iter().zip(tys).map(|(value, ty)| self.resolve_bound_const(value, ty)).collect()
+    fn resolve_const_vals(&mut self, values: &[Value], tys: impl IntoIterator<Item = TypeId>) -> Option<Vec<ConstVal>> {
+        values.iter().zip(tys).map(|(value, ty)| self.resolve_const_val(value, ty)).collect()
     }
 
     /// Returns `true` if `s` matches the qualified name and field names of the
