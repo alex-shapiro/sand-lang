@@ -1,10 +1,11 @@
 //! Lazy iterator functions.
 //!
 //! An iterator visits collection entries without copying them up front. It
-//! reads each entry in place, skipping removed ones, and pins the map or set.
-//! A modification must call [`Vm::unpin`], which moves the iterators still
-//! reading it to a private copy and clears the pins. Thus iterating does not
-//! copy unless the collection is modified during iteration.
+//! reads each entry in place, skipping removed ones, and registers itself in
+//! the map or set's [`ActiveIters`]. Any modification must call
+//! [`Vm::detach_iters`], which moves the iterators still reading in place to a
+//! private copy and clears `active_iters`. Thus iterating does not copy unless
+//! the collection is modified during iteration.
 
 use super::*;
 use crate::vm::interp::internal;
@@ -18,38 +19,38 @@ impl Vm {
     /// The iterator of map `c` (its (key, value) entries) or set `c`.
     pub fn container_iter(&mut self, c: VmValue) -> Result<VmValue, Fail> {
         let VmValue::Obj(h) = c else { return Err(internal("not a map or set")) };
-        let (state, slots, live, pins) = match self.heap.get(c) {
-            Obj::Map(m) => (IterState::Map { map: h, slot: 0 }, m.entries.len(), m.live, &m.pins),
-            Obj::Set(s) => (IterState::Set { set: h, slot: 0 }, s.entries.len(), s.live, &s.pins),
+        let (state, slots, live, active_iters) = match self.heap.get(c) {
+            Obj::Map(m) => (IterState::Map { map: h, slot: 0 }, m.entries.len(), m.live, &m.active_iters),
+            Obj::Set(s) => (IterState::Set { set: h, slot: 0 }, s.entries.len(), s.live, &s.active_iters),
             _ => return Err(internal("not a map or set")),
         };
         if live == 0 {
             return Ok(self.iter_fn(IterState::Done));
         }
-        let prune = pins.its.len() >= pins.prune_at.max(MIN_PRUNE);
+        let prune = active_iters.handles.len() >= active_iters.prune_at.max(MIN_PRUNE);
         // Charge here for the tombstones that the iterator will skip and for 1
-        // pin slot. Charging 1 unit per iterator keeps prune and detach fuel
-        // independent of how many dead iterators remain in `pins.its`.
+        // handle slot. Charging 1 unit per iterator keeps prune and detach fuel
+        // independent of how many dead iterators remain in `active_iters.handles`.
         self.meter.charge((slots - live) as u64 + 1)?;
         let it = self.iter_fn(state);
         let VmValue::Obj(ih) = it else { unreachable!() };
         let kept = if prune {
-            let Some(pins) = self.heap.pins_mut(c) else { unreachable!() };
-            let mut its = std::mem::take(&mut pins.its);
-            its.retain(|&p| reads_in_place(&self.heap, p, h));
-            Some(its)
+            let Some(active_iters) = self.heap.active_iters_mut(c) else { unreachable!() };
+            let mut handles = std::mem::take(&mut active_iters.handles);
+            handles.retain(|&handle| reads_in_place(&self.heap, handle, h));
+            Some(handles)
         } else {
             None
         };
-        let Some(pins) = self.heap.pins_mut(c) else { unreachable!() };
-        let before = pins.bytes();
-        if let Some(its) = kept {
-            pins.prune_at = 2 * its.len();
-            pins.its = its;
+        let Some(active_iters) = self.heap.active_iters_mut(c) else { unreachable!() };
+        let before = active_iters.bytes();
+        if let Some(handles) = kept {
+            active_iters.prune_at = 2 * handles.len();
+            active_iters.handles = handles;
         }
-        pins.its.push(ih);
-        pins.open += 1;
-        let after = pins.bytes();
+        active_iters.handles.push(ih);
+        active_iters.open += 1;
+        let after = active_iters.bytes();
         self.heap.report_size_change(before, after);
         Ok(it)
     }
@@ -96,14 +97,14 @@ impl Vm {
                     (Some(pair), IterState::Map { map, slot: s + 1 })
                 }
                 None => {
-                    self.close_iterator(map);
+                    self.close_iter(map);
                     (None, IterState::Done)
                 }
             },
             IterState::Set { set, slot } => match set_entry(&self.heap, set, slot) {
                 Some((s, x)) => (Some(x), IterState::Set { set, slot: s + 1 }),
                 None => {
-                    self.close_iterator(set);
+                    self.close_iter(set);
                     (None, IterState::Done)
                 }
             },
@@ -125,7 +126,7 @@ impl Vm {
                 (IterState::Set { set, slot: s + 1 }, true)
             }
             None => {
-                self.close_iterator(set);
+                self.close_iter(set);
                 (IterState::Done, false)
             }
         };
@@ -147,7 +148,7 @@ impl Vm {
                 (IterState::Map { map, slot: s + 1 }, true)
             }
             None => {
-                self.close_iterator(map);
+                self.close_iter(map);
                 (IterState::Done, false)
             }
         };
@@ -157,19 +158,18 @@ impl Vm {
         more
     }
 
-    /// Call before map or set `c` changes: moves the iterators reading it in
-    /// place to a copy of its entries, so that they go on with the entries
-    /// they started with. On error nothing has changed.
+    /// Detaches iterators reading map or set `c` in place onto a snapshot copy
+    /// before `c` is modified. Leaves `c` unchanged on error.
     #[inline]
-    pub(crate) fn unpin(&mut self, c: VmValue) -> Result<(), Fail> {
-        // Check `pins.open` so `detach_iters` charges for the copy even if
-        // garbage collection already freed the unreachable iterators.
-        let pinned = match self.heap.get(c) {
-            Obj::Map(m) => m.pins.open > 0,
-            Obj::Set(s) => s.pins.open > 0,
+    pub(crate) fn detach_iters(&mut self, c: VmValue) -> Result<(), Fail> {
+        // Check `active_iters.open` so `detach_iters_slow` charges for the copy
+        // even if garbage collection already freed the unreachable iterators.
+        let has_open = match self.heap.get(c) {
+            Obj::Map(m) => m.active_iters.open > 0,
+            Obj::Set(s) => s.active_iters.open > 0,
             _ => false,
         };
-        if pinned { self.detach_iters(c) } else { Ok(()) }
+        if has_open { self.detach_iters_slow(c) } else { Ok(()) }
     }
 
     // ------------------------------------------------------------------
@@ -177,15 +177,15 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn detach_iters(&mut self, c: VmValue) -> Result<(), Fail> {
+    fn detach_iters_slow(&mut self, c: VmValue) -> Result<(), Fail> {
         let VmValue::Obj(h) = c else { return Ok(()) };
-        let (pins, slots, bytes) = match self.heap.get(c) {
-            Obj::Map(m) => (&m.pins, m.entries.len(), m.entries.len() * MAP_ENTRY_SIZE),
-            Obj::Set(s) => (&s.pins, s.entries.len(), s.entries.len() * SET_ENTRY_SIZE),
+        let (active_iters, slots, bytes) = match self.heap.get(c) {
+            Obj::Map(m) => (&m.active_iters, m.entries.len(), m.entries.len() * MAP_ENTRY_SIZE),
+            Obj::Set(s) => (&s.active_iters, s.entries.len(), s.entries.len() * SET_ENTRY_SIZE),
             _ => return Ok(()),
         };
         self.meter.charge(slots as u64)?;
-        let live: Vec<u32> = pins.its.iter().copied().filter(|&p| reads_in_place(&self.heap, p, h)).collect();
+        let live: Vec<u32> = active_iters.handles.iter().copied().filter(|&handle| reads_in_place(&self.heap, handle, h)).collect();
         if !live.is_empty() {
             self.check_memory(bytes.saturating_add(std::mem::size_of::<Obj>()))?;
             let copy = match self.heap.get(c) {
@@ -195,27 +195,27 @@ impl Vm {
             };
             let snap = self.heap.alloc(copy);
             let VmValue::Obj(sh) = snap else { unreachable!() };
-            for p in live {
+            for handle in live {
                 if let Obj::IterFn(IterState::Map { map: o, .. } | IterState::Set { set: o, .. }) =
-                    self.heap.get_mut_storing(VmValue::Obj(p), &[snap])
+                    self.heap.get_mut_storing(VmValue::Obj(handle), &[snap])
                     && *o == h
                 {
                     *o = sh;
                 }
             }
         }
-        if let Some(pins) = self.heap.pins_mut(c) {
-            let before = pins.bytes();
-            *pins = Pins::default();
+        if let Some(active_iters) = self.heap.active_iters_mut(c) {
+            let before = active_iters.bytes();
+            *active_iters = ActiveIters::default();
             self.heap.report_size_change(before, 0);
         }
         Ok(())
     }
 
     /// Records that an iterator reading map or set `container` finished.
-    fn close_iterator(&mut self, container: u32) {
-        if let Some(pins) = self.heap.pins_mut(VmValue::Obj(container)) {
-            pins.open = pins.open.saturating_sub(1);
+    fn close_iter(&mut self, container: u32) {
+        if let Some(active_iters) = self.heap.active_iters_mut(VmValue::Obj(container)) {
+            active_iters.open = active_iters.open.saturating_sub(1);
         }
     }
 }
@@ -223,7 +223,7 @@ impl Vm {
 // ------------------------------------------------------------------
 // Internal utilities and constants
 
-/// Pins are checked for staleness when there are at least this many.
+/// Minimum handle count before pruning stale entries from [`ActiveIters`].
 const MIN_PRUNE: usize = 8;
 
 /// Whether `it` is an iterator reading map or set `h` in place.

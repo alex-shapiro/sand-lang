@@ -731,16 +731,16 @@ impl Heap {
         }
     }
 
-    /// Returns a mutable reference to the active iterator pins of map or set
+    /// Returns a mutable reference to the active iterators of map or set
     /// `value`, or `None` for other objects.
     ///
-    /// Pins do not hold traced VM values, so this method skips the write
-    /// barrier.
-    pub fn pins_mut(&mut self, value: VmValue) -> Option<&mut Pins> {
+    /// Active iterator records do not hold traced VM values, so this method
+    /// skips the write barrier.
+    pub fn active_iters_mut(&mut self, value: VmValue) -> Option<&mut ActiveIters> {
         match value {
             VmValue::Obj(handle) => match &mut self.slots[handle as usize] {
-                Obj::Map(map) => Some(&mut map.pins),
-                Obj::Set(set) => Some(&mut set.pins),
+                Obj::Map(map) => Some(&mut map.active_iters),
+                Obj::Set(set) => Some(&mut set.active_iters),
                 _ => None,
             },
             _ => None,

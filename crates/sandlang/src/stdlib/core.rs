@@ -997,7 +997,7 @@ fn alloc_copy(vm: &mut Vm, copy: Obj) -> Result<VmValue, Fail> {
 
 /// Empties map or set `v`, accounting for the memory freed.
 fn clear_container(vm: &mut Vm, v: VmValue) -> Result<(), Fail> {
-    vm.unpin(v)?;
+    vm.detach_iters(v)?;
     let before = vm.heap.get(v).size();
     match vm.heap.get_mut(v) {
         Obj::Map(m) => m.clear(),
