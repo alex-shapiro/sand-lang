@@ -1202,19 +1202,19 @@ impl Checker {
         self.define(name, def, is_pub, id.span);
     }
 
-    fn check_module(&mut self, pm: &ParsedModule) {
+    fn check_module(&mut self, module: &ParsedModule) {
         let mi = self.cur_mod;
         let first_global = self.globals.len();
         let error_mark = self.diags.len();
         let first_fn = self.fns.len();
         let first_type = self.types.len();
         self.first_type = first_type;
-        let items = &pm.ast.items;
+        let items = &module.ast.items;
 
         // 1. Imports.
         for (idx, item) in items.iter().enumerate() {
             if let ItemKind::Import(imp) = &item.kind {
-                let Some(&target) = pm.imports.get(&idx) else {
+                let Some(&target) = module.imports.get(&idx) else {
                     continue;
                 };
                 self.bind_import(imp, target, item.span);
@@ -1227,7 +1227,7 @@ impl Checker {
         for item in items {
             if let ItemKind::Trait(t) = &item.kind {
                 let id = self.declare_trait(t);
-                if Builtin::parse(&t.name.name).is_none() || pm.kind == ModKind::Prelude {
+                if Builtin::parse(&t.name.name).is_none() || module.kind == ModKind::Prelude {
                     self.define_ident(&t.name, Def::Trait(id), t.is_pub);
                 }
                 trait_ids.push(id);
@@ -1236,7 +1236,7 @@ impl Checker {
 
         // 2b. Declare types
         let type_members = if self.current_module_is_native() { self.declare_rust_types() } else { Vec::new() };
-        let mut struct_ids = Vec::new();
+        let mut typedef_ids = Vec::new();
         let mut type_params: Vec<(&[ast::GenericParam], Vec<ParamId>)> = Vec::new();
         for item in items {
             match &item.kind {
@@ -1246,7 +1246,7 @@ impl Checker {
                     let kind = TypeDefKind::Struct { fields: vec![] };
                     let id = self.new_typedef(&s.name, generics, kind, s.is_pub, s.doc.as_deref());
                     self.define_ident(&s.name, Def::Type(TyRef::Def(id)), s.is_pub);
-                    struct_ids.push(id);
+                    typedef_ids.push(id);
                 }
                 ItemKind::Enum(e) => {
                     let generics = self.declare_param_names(&e.generics);
@@ -1254,7 +1254,7 @@ impl Checker {
                     let kind = TypeDefKind::Enum { variants: vec![] };
                     let id = self.new_typedef(&e.name, generics, kind, e.is_pub, e.doc.as_deref());
                     self.define_ident(&e.name, Def::Type(TyRef::Def(id)), e.is_pub);
-                    struct_ids.push(id);
+                    typedef_ids.push(id);
                 }
                 ItemKind::TypeAlias(a) => {
                     for g in a.generics.iter().filter(|g| !g.traits.is_empty()) {
@@ -1272,11 +1272,13 @@ impl Checker {
                 _ => {}
             }
         }
-        for (gs, ps) in type_params {
-            let scope = self.generic_scope(&ps);
-            self.resolve_param_traits(gs, &ps, &scope, None);
+
+        for (generic_params, param_ids) in type_params {
+            let scope = self.generic_scope(&param_ids);
+            self.resolve_param_traits(generic_params, &param_ids, &scope, None);
         }
-        if pm.kind == ModKind::Prelude {
+
+        if module.kind == ModKind::Prelude {
             self.find_well_known();
             if let Some(Def::Trait(t)) = self.lookup_module_def(mi, "Iterator") {
                 self.iter_trait = Some(t);
@@ -1319,12 +1321,12 @@ impl Checker {
         for (idx, item) in items.iter().enumerate() {
             match &item.kind {
                 ItemKind::Struct(s) => {
-                    let id = struct_ids[k];
+                    let id = typedef_ids[k];
                     k += 1;
                     self.fill_struct(id, s, idx as u32, &mut member_types);
                 }
                 ItemKind::Enum(e) => {
-                    let id = struct_ids[k];
+                    let id = typedef_ids[k];
                     k += 1;
                     self.fill_enum(id, e, &mut member_types);
                 }
@@ -1335,7 +1337,7 @@ impl Checker {
         // Derive `Decode` after method declarations because structs with `init` do not implement `Decode`.
         let early: Vec<Builtin> = Builtin::ALL.iter().copied().filter(|&b| b.is_derived() && b != Builtin::Decode).collect();
         self.derive_impls(first_type, &early);
-        if pm.kind == ModKind::Prelude {
+        if module.kind == ModKind::Prelude {
             for name in ["Option", "Result"] {
                 if let Some(Def::Type(TyRef::Def(d))) = self.lookup_module_def(mi, name) {
                     let span = self.types[d as usize].span;
@@ -1359,7 +1361,7 @@ impl Checker {
                     self.define_ident(&f.name, Def::Fn(id), f.is_pub);
                 }
                 ItemKind::Struct(ast::StructDecl { methods, .. }) | ItemKind::Enum(ast::EnumDecl { methods, .. }) => {
-                    let id = struct_ids[k];
+                    let id = typedef_ids[k];
                     k += 1;
                     for (j, m) in methods.iter().enumerate() {
                         self.declare_method(m, at(j), Ctor::Def(id), id);
@@ -1406,7 +1408,7 @@ impl Checker {
             has_self: false,
             kind: FnKind::Init,
             doc: None,
-            span: pm.ast.span,
+            span: module.ast.span,
             is_pub: false,
             owner: None,
             self_ty: None,
@@ -1416,7 +1418,7 @@ impl Checker {
             trait_of: None,
         });
         self.mods[mi as usize].init = Some(init);
-        self.check_init(init, pm);
+        self.check_init(init, module);
         // 6. Function bodies (including default helpers, which may be added while checking).
         let mut i = first_fn;
         while i < self.fns.len() {
@@ -1424,7 +1426,7 @@ impl Checker {
                 && !matches!(self.fns[i].kind, FnKind::Native(_) | FnKind::Init)
                 && let Some(decl) = self.fns[i].decl
             {
-                self.check_fn_body(i as FnId, decl, &pm.ast);
+                self.check_fn_body(i as FnId, decl, &module.ast);
             }
             i += 1;
         }
@@ -1452,14 +1454,14 @@ impl Checker {
                     impl_of: None,
                     trait_of: None,
                 });
-                self.check_fn_body(id, FnDeclRef::Test { item: idx as u32 }, &pm.ast);
-                if pm.kind == (ModKind::Script { main: true }) {
+                self.check_fn_body(id, FnDeclRef::Test { item: idx as u32 }, &module.ast);
+                if module.kind == (ModKind::Script { main: true }) {
                     self.tests.push((t.name.clone(), id));
                 }
             }
         }
         // Where resources go (for the resource lints).
-        self.resource_flows(first_fn, &pm.ast);
+        self.resource_flows(first_fn, &module.ast);
         // 8. Globals must have fully inferred types.
         for g in first_global..self.globals.len() {
             if self.globals[g].module == mi {
@@ -1540,12 +1542,17 @@ impl Checker {
 
     /// Declares type parameters `gs` and resolves their trait bounds against
     /// `outer` and the newly declared parameters.
-    fn declare_params(&mut self, gs: &[ast::GenericParam], outer: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<ParamId> {
-        let out = self.declare_param_names(gs);
+    fn declare_params(
+        &mut self,
+        generic_params: &[ast::GenericParam],
+        outer: &[(Symbol, ParamId)],
+        self_ty: Option<TypeId>,
+    ) -> Vec<ParamId> {
+        let param_ids = self.declare_param_names(generic_params);
         let mut scope = outer.to_vec();
-        scope.extend(self.generic_scope(&out));
-        self.resolve_param_traits(gs, &out, &scope, self_ty);
-        out
+        scope.extend(self.generic_scope(&param_ids));
+        self.resolve_param_traits(generic_params, &param_ids, &scope, self_ty);
+        param_ids
     }
 
     fn declare_param_names(&mut self, gs: &[ast::GenericParam]) -> Vec<ParamId> {
@@ -1557,8 +1564,14 @@ impl Checker {
             .collect()
     }
 
-    fn resolve_param_traits(&mut self, gs: &[ast::GenericParam], ps: &[ParamId], scope: &[(Symbol, ParamId)], self_ty: Option<TypeId>) {
-        for (g, &p) in gs.iter().zip(ps) {
+    fn resolve_param_traits(
+        &mut self,
+        generic_params: &[ast::GenericParam],
+        param_ids: &[ParamId],
+        scope: &[(Symbol, ParamId)],
+        self_ty: Option<TypeId>,
+    ) {
+        for (g, &p) in generic_params.iter().zip(param_ids) {
             let traits = self.resolve_traits(&g.traits, scope, self_ty);
             self.add_traits(p, traits);
         }

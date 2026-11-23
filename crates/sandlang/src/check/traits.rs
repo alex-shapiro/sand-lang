@@ -169,9 +169,14 @@ impl Checker {
     }
 
     /// Resolves trait bounds written after `:` (`T: Ord + geo.Shape`).
-    pub(crate) fn resolve_traits(&mut self, ts: &[TypeExpr], scope: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<TraitRef> {
+    pub(crate) fn resolve_traits(
+        &mut self,
+        type_epxrs: &[TypeExpr],
+        scope: &[(Symbol, ParamId)],
+        self_ty: Option<TypeId>,
+    ) -> Vec<TraitRef> {
         let mut traits = Vec::new();
-        for t in ts {
+        for t in type_epxrs {
             let TypeExprKind::Named { path, args } = &t.kind else {
                 self.error(t.span, "expected a trait");
                 continue;
