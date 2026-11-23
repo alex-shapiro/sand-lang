@@ -1333,7 +1333,7 @@ impl Checker {
                 _ => {}
             }
         }
-        self.infer_member_requirements(first_type);
+        self.infer_type_param_bounds(first_type);
         // Derive `Decode` after method declarations because structs with `init` do not implement `Decode`.
         let early: Vec<Builtin> = Builtin::ALL.iter().copied().filter(|&b| b.is_derived() && b != Builtin::Decode).collect();
         self.derive_impls(first_type, &early);
