@@ -1221,12 +1221,12 @@ impl Checker {
             }
         }
 
-        // 2. Declare traits, then types.
+        // 2a. Declare traits
+        // Keep any built-in trait in scope if a user module redefines its name.
         let mut trait_ids = Vec::new();
         for item in items {
             if let ItemKind::Trait(t) = &item.kind {
                 let id = self.declare_trait(t);
-                // Keep the prelude built-in trait in scope if a user module redefines its name.
                 if Builtin::parse(&t.name.name).is_none() || pm.kind == ModKind::Prelude {
                     self.define_ident(&t.name, Def::Trait(id), t.is_pub);
                 }
@@ -1234,6 +1234,7 @@ impl Checker {
             }
         }
 
+        // 2b. Declare types
         let type_members = if self.current_module_is_native() { self.declare_rust_types() } else { Vec::new() };
         let mut struct_ids = Vec::new();
         let mut type_params: Vec<(&[ast::GenericParam], Vec<ParamId>)> = Vec::new();
@@ -1308,12 +1309,12 @@ impl Checker {
         // types run after `impl` declarations are registered.
         let mut member_types: Vec<(TypeDefId, TypeId, Span)> = Vec::new();
         let mut bound_ids = Vec::new();
-        let mut bound_defaults = Vec::new();
+        let mut rust_field_defaults = Vec::new();
         for (id, members) in type_members {
-            bound_defaults.extend(self.resolve_type_members(id, members));
+            rust_field_defaults.extend(self.resolve_type_members(id, members));
             bound_ids.push(id);
         }
-        self.resolve_rust_field_defaults(bound_defaults);
+        self.resolve_rust_field_defaults(rust_field_defaults);
         let mut k = 0;
         for (idx, item) in items.iter().enumerate() {
             match &item.kind {
