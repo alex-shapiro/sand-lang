@@ -85,8 +85,8 @@ impl Meter {
         }
     }
 
-    /// Charges fuel for native or runtime work, and enforces execution limits
-    /// limits at periodic checkpoints.
+    /// Charges fuel for native or runtime work and enforces execution limits at
+    /// periodic checkpoints.
     ///
     /// Returns immediately if remaining fuel is at or above the next
     /// checkpoint. Runs a full limit check if remaining fuel is below the
@@ -383,11 +383,11 @@ pub const INSTRUCTIONS_PER_FUEL_SHIFT: u32 = 6;
 /// Enforces fuel, deadline, and cancellation limits for blocking work offloaded
 /// to a worker thread.
 ///
-/// Because [`Meter`] is bound to the VM thread, offloaded jobs charge this
-/// allowance instead. A charge returns [`OffloadStopped`] if the engine is
-/// interrupted, the clock passes the wall-clock deadline, the worker exceeds
-/// the starting instruction budget, or the VM stops waiting. After the job
-/// finishes, the VM charges its [`Meter`] for [`OffloadAllowance::fuel_used`].
+/// [`Meter`] is bound to the VM thread, so offloaded jobs charge this instead.
+/// A charge returns [`OffloadStopped`] if the engine is interrupted, the clock
+/// passes the wall-clock deadline, the worker exceeds the starting instruction
+/// budget, or the VM stops waiting. After the job finishes, the VM charges its
+/// [`Meter`] for [`OffloadAllowance::fuel_used`].
 pub(crate) struct OffloadAllowance {
     interrupt_flag: Arc<AtomicBool>,
     abandoned_flag: Arc<AtomicBool>,
@@ -398,14 +398,14 @@ pub(crate) struct OffloadAllowance {
     stopped: bool,
 }
 
-/// Signals that an offloaded job hit an execution limit or cancellation and
+/// Signal that an offloaded job hit an execution limit or cancellation and
 /// must stop immediately.
 #[derive(Debug)]
 pub(crate) struct OffloadStopped;
 
 impl OffloadAllowance {
-    /// Charges `units` of fuel for offloaded work and returns
-    /// [`OffloadStopped`] if the worker must abort.
+    /// Charges fuel for offloaded work.
+    /// Returns [`OffloadStopped`] if the worker must abort.
     pub fn charge(&mut self, units: u64) -> Result<(), OffloadStopped> {
         self.fuel_used = self.fuel_used.saturating_add(units);
         self.stopped |=
@@ -417,21 +417,18 @@ impl OffloadAllowance {
         if self.stopped { Err(OffloadStopped) } else { Ok(()) }
     }
 
-    /// Charges fuel for `byte_count` bytes of bulk memory work on a worker
-    /// thread.
+    /// Charges fuel for bulk memory work on a worker thread.
     pub fn charge_bytes(&mut self, byte_count: usize) -> Result<(), OffloadStopped> {
         self.charge((byte_count / BYTES_PER_FUEL_UNIT) as u64)
     }
 
     /// Returns `true` if a previous charge triggered a stop.
-    ///
     /// The VM uses this flag to discard the offloaded result.
     pub fn is_stopped(&self) -> bool {
         self.stopped
     }
 
-    /// Returns total fuel charged on the worker thread so the VM can apply it
-    /// to [`Meter`].
+    /// Returns total fuel charged on the worker thread.
     pub fn fuel_used(&self) -> u64 {
         self.fuel_used
     }
@@ -459,7 +456,6 @@ mod tests {
         assert_eq!(meter.start_slice(None, None), SLICE_FUEL);
         assert!(meter.charge(50).is_ok());
         assert_eq!((meter.remaining_slice_fuel(), meter.total_fuel_used()), (SLICE_FUEL - 50, 50));
-        // Overspending the slice triggers a limit check. The budget is still sufficient.
         assert!(meter.charge(SLICE_FUEL as u64).is_ok());
         assert_eq!(meter.total_fuel_used(), SLICE_FUEL as u64 + 50);
         assert!(matches!(meter.charge(100_000).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
@@ -468,22 +464,18 @@ mod tests {
     #[test]
     fn the_instruction_limit_is_checked_exactly() {
         let meter = Meter::new(Some(1000), Arc::new(AtomicBool::new(false)), system_clock());
-        // The slice ends at the instruction budget.
         assert_eq!(meter.start_slice(None, None), 1000);
-        // The interpreter spends 300 units, then a native call spends the rest.
         meter.flush_interpreter_fuel(700);
         assert_eq!(meter.total_fuel_used(), 300);
         assert!(meter.charge(700).is_ok(), "1000 units used");
         assert!(matches!(meter.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
         assert_eq!(meter.reload_interpreter_fuel(), -1);
-        // After the slice ends, checkpoints stay at or before the instruction limit.
         let meter = Meter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)), system_clock());
         meter.start_slice(None, None);
         assert!(meter.charge(SLICE_FUEL as u64 + 1).is_ok());
         assert_eq!(meter.next_limit_check_fuel.get(), -1 - LIMIT_CHECK_FUEL_INTERVAL);
         assert!(meter.charge(1_000_000 - SLICE_FUEL as u64 - 1).is_ok(), "1,000,000 units used");
         assert!(matches!(meter.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
-        // Charges between slices count toward the run total.
         let mut meter = Meter::new(Some(100), Arc::new(AtomicBool::new(false)), system_clock());
         assert!(meter.charge(60).is_ok());
         assert_eq!(meter.start_slice(None, None), 40);
