@@ -1551,7 +1551,7 @@ impl std::fmt::Debug for TypeDesc {
 
 /// The state of an [`Obj::IterFn`].
 #[derive(Debug, Clone, Copy)]
-pub enum IterSrc {
+pub enum IterState {
     /// The indices of list `list` (a heap handle) below `n` (its length
     /// when the iterator was made), stopping early if it shrinks; `i` is
     /// the next one.
@@ -1590,7 +1590,7 @@ pub enum Obj {
     /// The `next` function of the iterator of a list, range, string, map
     /// or set: a function value (`fn() -> T?`) that the interpreter steps
     /// directly.
-    IterFn(IterSrc),
+    IterFn(IterState),
     Cell(VmValue),
     Range(i64, i64, bool),
     Task(Box<TaskObj>),
@@ -1681,10 +1681,11 @@ impl Obj {
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.iter().for_each(|v| f(*v)),
             Obj::Cell(v) => f(*v),
             Obj::IterFn(it) => match *it {
-                IterSrc::List { list: h, .. } | IterSrc::Chars { s: h, .. } | IterSrc::Map { map: h, .. } | IterSrc::Set { set: h, .. } => {
-                    f(VmValue::Obj(h))
-                }
-                IterSrc::Range { .. } | IterSrc::Done => {}
+                IterState::List { list: h, .. }
+                | IterState::Chars { s: h, .. }
+                | IterState::Map { map: h, .. }
+                | IterState::Set { set: h, .. } => f(VmValue::Obj(h)),
+                IterState::Range { .. } | IterState::Done => {}
             },
             Obj::Task(t) => f(t.result),
             Obj::TypeDesc(d) => d.args().iter().for_each(|v| f(*v)),

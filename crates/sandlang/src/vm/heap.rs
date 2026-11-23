@@ -715,19 +715,19 @@ impl Heap {
         &mut self.slots[handle as usize]
     }
 
-    /// Returns a mutable reference to the state of iterator `value`, or `None`
-    /// if `value` is not an `Obj::IterFn`.
+    /// Returns a mutable reference to the value's iterator state, or `None`
+    /// if it is not an iterator function.
     ///
     /// Callers must not store a new object handle through this reference, so
     /// this method skips the write barrier.
     #[inline]
-    pub fn iter_src_mut(&mut self, value: VmValue) -> Option<&mut IterSrc> {
-        match value {
-            VmValue::Obj(handle) => match &mut self.slots[handle as usize] {
-                Obj::IterFn(src) => Some(src),
-                _ => None,
-            },
-            _ => None,
+    pub fn iter_state_mut(&mut self, value: VmValue) -> Option<&mut IterState> {
+        if let VmValue::Obj(handle) = value
+            && let Obj::IterFn(iter_state) = &mut self.slots[handle as usize]
+        {
+            Some(iter_state)
+        } else {
+            None
         }
     }
 

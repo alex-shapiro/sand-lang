@@ -451,7 +451,7 @@ fn strings(m: &mut NativeModule) {
     m.function("str.is_upper", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_uppercase));
     m.function("str.is_lower", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_lowercase));
     m.function("str.chars_iter_next", |vm: &mut Vm, s: Str| -> Result<IterFn<String>, Fail> {
-        Ok(VmVal::from_raw(vm.iter_fn(IterSrc::Chars { s: s.raw().handle().unwrap_or(0), i: 0 })))
+        Ok(VmVal::from_raw(vm.iter_fn(IterState::Chars { s: s.raw().handle().unwrap_or(0), i: 0 })))
     });
     m.function("str.char_at", |vm: &mut Vm, s: Str, i: i64| -> Result<Option<Str>, Fail> {
         let t = s.str(&vm.heap);
@@ -646,7 +646,7 @@ fn lists(m: &mut NativeModule) {
     });
     m.function("List.iter_next", |vm: &mut Vm, xs: List| -> Result<IterFn<Param<0>>, Fail> {
         let n = list_len(vm, xs) as i64;
-        Ok(VmVal::from_raw(vm.iter_fn(IterSrc::List { list: xs.raw().handle().unwrap_or(0), i: 0, n })))
+        Ok(VmVal::from_raw(vm.iter_fn(IterState::List { list: xs.raw().handle().unwrap_or(0), i: 0, n })))
     });
     m.function("List.pop", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Fail> {
         Ok(vm.heap.list_mut_truncating(xs.raw()).and_then(Vec::pop).map(Param::from_raw))
@@ -868,11 +868,11 @@ fn exact(n: i128) -> Result<i64, Fail> {
 
 fn ranges(m: &mut NativeModule) {
     m.function("Range.iter_next", |vm: &mut Vm, r: Range| -> Result<IterFn<i64>, Fail> {
-        let src = match inclusive(vm, r)? {
-            Some((i, last)) => IterSrc::Range { i, last },
-            None => IterSrc::Done,
+        let iter_state = match inclusive(vm, r)? {
+            Some((i, last)) => IterState::Range { i, last },
+            None => IterState::Done,
         };
-        Ok(VmVal::from_raw(vm.iter_fn(src)))
+        Ok(VmVal::from_raw(vm.iter_fn(iter_state)))
     });
     m.function("Range.start", |vm: &mut Vm, r: Range| -> Result<i64, Fail> { Ok(r.bounds(&vm.heap)?.0) });
     m.function("Range.end", |vm: &mut Vm, r: Range| match r.bounds(&vm.heap)? {
