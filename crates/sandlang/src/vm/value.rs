@@ -624,14 +624,14 @@ pub fn compact_entries<T: Copy>(entries: &mut Vec<Option<T>>, live: usize, table
 /// removed ones, compacted when they are the majority), indexed by key.
 ///
 /// Iterators read the entries in place while the map is unchanged; every
-/// change first calls `Vm::unpin`, which moves the iterators still reading
-/// it (its `pins`) to a copy of the entries (see `vm/iter.rs`).
+/// change first calls `Vm::detach_iters`, which moves the iterators still
+/// reading it (`active_iters`) to a copy of the entries (see `vm/iter.rs`).
 #[derive(Debug, Default, Clone)]
 pub struct MapObj {
     pub index: KeyIndex,
     pub entries: Vec<Option<(VmValue, VmValue)>>,
     pub live: usize,
-    pub pins: Pins,
+    pub active_iters: ActiveIters,
     /// Direct key-to-value table used while `index` is dense and at least 25%
     /// full. Absent keys hold [`VmValue::Uninit`]. Lookups read `vals[k]`
     /// directly. [`MapObj::set_dense`] updates `vals` on every write.
@@ -644,7 +644,7 @@ pub struct SetObj {
     pub index: KeyIndex,
     pub entries: Vec<Option<VmValue>>,
     pub live: usize,
-    pub pins: Pins,
+    pub active_iters: ActiveIters,
 }
 
 /// Weak handles of `Obj::IterFn` objects that may be reading a map or set in
@@ -652,25 +652,25 @@ pub struct SetObj {
 /// become stale after its iterator finishes, detaches to a copy, or is
 /// collected and its arena slot is reused or truncated.
 #[derive(Debug, Default)]
-pub struct Pins {
-    pub its: Vec<u32>,
-    /// Length of `its` at which stale handles are pruned.
+pub struct ActiveIters {
+    pub handles: Vec<u32>,
+    /// Length of `handles` at which stale handles are pruned.
     pub prune_at: usize,
     /// Active iterators created since the last detach. This count changes only
     /// as iterators start, finish, or detach.
     pub open: usize,
 }
 
-impl Clone for Pins {
-    fn clone(&self) -> Pins {
-        Pins::default()
+impl Clone for ActiveIters {
+    fn clone(&self) -> ActiveIters {
+        ActiveIters::default()
     }
 }
 
-impl Pins {
-    /// The memory the pins own.
+impl ActiveIters {
+    /// Returns the memory owned by the handle table.
     pub fn bytes(&self) -> usize {
-        self.its.capacity() * std::mem::size_of::<u32>()
+        self.handles.capacity() * std::mem::size_of::<u32>()
     }
 }
 
@@ -1551,7 +1551,7 @@ impl std::fmt::Debug for TypeDesc {
 
 /// The state of an [`Obj::IterFn`].
 #[derive(Debug, Clone, Copy)]
-pub enum IterSrc {
+pub enum IterState {
     /// The indices of list `list` (a heap handle) below `n` (its length
     /// when the iterator was made), stopping early if it shrinks; `i` is
     /// the next one.
@@ -1561,7 +1561,7 @@ pub enum IterSrc {
     /// The characters of string `s` (a heap handle) from byte offset `i`.
     Chars { s: u32, i: i64 },
     /// The (key, value) entries of map `map` (a heap handle: the map
-    /// itself, pinned, or a copy of its entries) from slot `slot` on.
+    /// itself or a snapshot copy of its entries) from slot `slot` on.
     Map { map: u32, slot: usize },
     /// The elements of set `set` (as for `Map`) from slot `slot` on.
     Set { set: u32, slot: usize },
@@ -1590,7 +1590,7 @@ pub enum Obj {
     /// The `next` function of the iterator of a list, range, string, map
     /// or set: a function value (`fn() -> T?`) that the interpreter steps
     /// directly.
-    IterFn(IterSrc),
+    IterFn(IterState),
     Cell(VmValue),
     Range(i64, i64, bool),
     Task(Box<TaskObj>),
@@ -1650,8 +1650,8 @@ impl Obj {
             Obj::StrBuf(s) => s.capacity(),
             Obj::Bytes(b) => b.len(),
             Obj::List(l) => l.capacity() * VALUE_SIZE,
-            Obj::Map(m) => m.entries.capacity() * MAP_ENTRY_SIZE + m.index_bytes() + m.pins.bytes(),
-            Obj::Set(s) => s.entries.capacity() * SET_ENTRY_SIZE + s.index.bytes() + s.pins.bytes(),
+            Obj::Map(m) => m.entries.capacity() * MAP_ENTRY_SIZE + m.index_bytes() + m.active_iters.bytes(),
+            Obj::Set(s) => s.entries.capacity() * SET_ENTRY_SIZE + s.index.bytes() + s.active_iters.bytes(),
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.len() * VALUE_SIZE,
             Obj::IterFn(_) => 0,
             Obj::Task(_) => 32,
@@ -1681,10 +1681,11 @@ impl Obj {
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t.iter().for_each(|v| f(*v)),
             Obj::Cell(v) => f(*v),
             Obj::IterFn(it) => match *it {
-                IterSrc::List { list: h, .. } | IterSrc::Chars { s: h, .. } | IterSrc::Map { map: h, .. } | IterSrc::Set { set: h, .. } => {
-                    f(VmValue::Obj(h))
-                }
-                IterSrc::Range { .. } | IterSrc::Done => {}
+                IterState::List { list: h, .. }
+                | IterState::Chars { s: h, .. }
+                | IterState::Map { map: h, .. }
+                | IterState::Set { set: h, .. } => f(VmValue::Obj(h)),
+                IterState::Range { .. } | IterState::Done => {}
             },
             Obj::Task(t) => f(t.result),
             Obj::TypeDesc(d) => d.args().iter().for_each(|v| f(*v)),

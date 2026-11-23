@@ -2291,7 +2291,7 @@ impl Vm {
             }
         };
         let Some(s) = found else { return self.map_push(m, k, v, int_hash(k.as_int())) };
-        self.unpin(m)?;
+        self.detach_iters(m)?;
         // The key stays: it equals `k`.
         let Obj::Map(mo) = self.heap.entries_mut_storing(m, s, false, &[v]) else { unreachable!() };
         if let Some(e) = &mut mo.entries[s] {
@@ -2316,7 +2316,7 @@ impl Vm {
             if !replace {
                 return Ok(mo.entries[s].map(|(_, old)| old));
             }
-            self.unpin(m)?;
+            self.detach_iters(m)?;
             let Obj::Map(mo) = self.heap.entries_mut_storing(m, s, false, &[k, v]) else { unreachable!() };
             let old = mo.entries[s].replace((k, v)).map(|(_, old)| old);
             mo.set_dense(k, v);
@@ -2335,7 +2335,7 @@ impl Vm {
             return Err(Fail::runtime_error("limit", "map too large"));
         }
         let new_cap = self.entries_capacity(end, mo.entries.capacity(), MAP_ENTRY_SIZE, mo.index_growth(k))?;
-        self.unpin(m)?;
+        self.detach_iters(m)?;
         let Obj::Map(mo) = self.heap.entries_mut_storing(m, end, true, &[k, v]) else { unreachable!() };
         let keys = mo.entries.iter().enumerate().filter_map(|(s, e)| e.map(|(k, _)| (s, k)));
         mo.index.densify(mo.live + 1, keys);
@@ -2382,7 +2382,7 @@ impl Vm {
         }
         let hash = hash_key(&self.heap, &self.meter, k)?;
         let Some(s) = find_key(&self.heap, &self.meter, &mo.index, hash, k, |i| mo.entries[i].map(|(k, _)| k))? else { return Ok(None) };
-        self.unpin(m)?;
+        self.detach_iters(m)?;
         let Obj::Map(mo) = self.heap.get(m) else { unreachable!() };
         let before = mo.entries.capacity() * MAP_ENTRY_SIZE + mo.index_bytes();
         // Compaction moves entries: the full write barrier.
@@ -2409,7 +2409,7 @@ impl Vm {
             return Err(Fail::runtime_error("limit", "set too large"));
         }
         let new_cap = self.entries_capacity(end, so.entries.capacity(), SET_ENTRY_SIZE, so.index_growth(k))?;
-        self.unpin(s)?;
+        self.detach_iters(s)?;
         let Obj::Set(so) = self.heap.entries_mut_storing(s, end, true, &[k]) else { unreachable!() };
         let keys = so.entries.iter().enumerate().filter_map(|(s, e)| e.map(|k| (s, k)));
         so.index.densify(so.live + 1, keys);
@@ -2452,7 +2452,7 @@ impl Vm {
         }
         let hash = hash_key(&self.heap, &self.meter, k)?;
         let Some(slot) = find_key(&self.heap, &self.meter, &so.index, hash, k, |i| so.entries[i])? else { return Ok(false) };
-        self.unpin(s)?;
+        self.detach_iters(s)?;
         let Obj::Set(so) = self.heap.get(s) else { unreachable!() };
         let before = so.entries.capacity();
         let Obj::Set(so) = self.heap.get_mut(s) else { unreachable!() };
