@@ -1147,15 +1147,15 @@ impl Vm {
         }
     }
 
-    /// Runs `job`, which may block. With the host's file system, the job
+    /// Runs a job that may block. With the host's file system, the job
     /// runs on a worker thread, and the VM stops waiting for it when the
     /// meter reports an interrupt or a limit. With a memory file system,
-    /// the job runs on this thread. The job charges its
-    /// [`meter::OffloadAllowance`], and the meter is then charged the same amount.
-    /// If a charge to the allowance failed, the job's result is discarded
-    /// and the meter's error is returned.
+    /// the job runs on this thread. The job charges its [`meter::WorkerMeter`],
+    /// and the meter is then charged the same amount. If a charge to the
+    /// allowance failed, the job's result is discarded and the meter's error is
+    /// returned.
     pub(crate) fn offload<T: Send + 'static>(&self, job: impl FnOnce(&mut meter::WorkerMeter) -> T + Send + 'static) -> Result<T, Fail> {
-        let mut allowance = self.meter.offload_allowance();
+        let mut allowance = self.meter.worker_meter();
         let finish = |t: T, used: u64, stopped: bool| {
             self.meter.charge(used)?;
             if stopped { Err(self.stopped()) } else { Ok(t) }
@@ -1184,7 +1184,7 @@ impl Vm {
         unreachable!("without the `os` feature, the file system is in memory")
     }
 
-    /// The error to return when a charge to a [`meter::OffloadAllowance`] failed.
+    /// The error to return if a charge to a [`meter::WorkerMeter`] failed.
     fn stopped(&self) -> Fail {
         self.meter.check_limits().err().unwrap_or_else(Fail::interrupted)
     }

@@ -67,8 +67,7 @@ pub trait Meter {
     fn refund_to(&self, mark: i64);
 }
 
-/// Tracks execution fuel and enforces instruction, time, and cancellation
-/// limits for a VM.
+/// Tracks fuel and enforces limits inside the VM.
 pub struct VmMeter {
     /// Remaining fuel in the current slice. Negative if the slice is overspent.
     remaining_slice_fuel: Cell<i64>,
@@ -227,9 +226,9 @@ impl VmMeter {
         self.interrupt_flag = interrupt_flag;
     }
 
-    /// Creates an [`OffloadAllowance`] so work running off the VM thread can
-    /// enforce execution limits independently of this meter.
-    pub(crate) fn offload_allowance(&self) -> WorkerMeter {
+    /// Creates a [`WorkerMeter`] so work running off the VM thread can
+    /// enforce execution limits independently.
+    pub(crate) fn worker_meter(&self) -> WorkerMeter {
         WorkerMeter {
             interrupt_flag: self.interrupt_flag.clone(),
             abandoned_flag: Arc::new(AtomicBool::new(false)),
