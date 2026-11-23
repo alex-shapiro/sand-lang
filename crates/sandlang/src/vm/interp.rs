@@ -2393,7 +2393,7 @@ impl Vm {
         mo.set_dense(k, VmValue::Uninit);
         compact_entries(&mut mo.entries, mo.live, &mut mo.index);
         let after = mo.entries.capacity() * MAP_ENTRY_SIZE + mo.index_bytes();
-        self.heap.adjust_bytes(before, after);
+        self.heap.report_size_change(before, after);
         Ok(old)
     }
 
@@ -2461,7 +2461,7 @@ impl Vm {
         so.live -= 1;
         compact_entries(&mut so.entries, so.live, &mut so.index);
         let after = so.entries.capacity();
-        self.heap.adjust_bytes(before * SET_ENTRY_SIZE, after * SET_ENTRY_SIZE);
+        self.heap.report_size_change(before * SET_ENTRY_SIZE, after * SET_ENTRY_SIZE);
         Ok(true)
     }
 

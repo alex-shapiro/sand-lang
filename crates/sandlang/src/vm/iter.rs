@@ -78,7 +78,7 @@ impl Vm {
         pins.its.push(ih);
         pins.open += 1;
         let after = pins.bytes();
-        self.heap.adjust_bytes(before, after);
+        self.heap.report_size_change(before, after);
         Ok(it)
     }
 
@@ -129,7 +129,7 @@ impl Vm {
         if let Some(pins) = self.heap.pins_mut(c) {
             let before = pins.bytes();
             *pins = Pins::default();
-            self.heap.adjust_bytes(before, 0);
+            self.heap.report_size_change(before, 0);
         }
         Ok(())
     }

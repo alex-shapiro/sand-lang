@@ -715,10 +715,10 @@ impl Heap {
         }
     }
 
-    /// Updates `object_bytes` after changing an object's accounted size from
-    /// `before` to `after`.
+    /// Reports an in-place change in an object's memory usage.
+    /// Call after mutating an object's internal buffers directly.
     #[inline]
-    pub fn adjust_bytes(&mut self, before: usize, after: usize) {
+    pub fn report_size_change(&mut self, before: usize, after: usize) {
         if after >= before {
             self.object_bytes += after - before;
         } else {

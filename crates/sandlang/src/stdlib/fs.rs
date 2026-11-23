@@ -658,7 +658,7 @@ fn with_file<R: IntoVmValue>(
     let f = file.get_mut(&mut vm.heap)?;
     f.open = Some(st);
     let after = f.size();
-    vm.heap.adjust_bytes(before, after);
+    vm.heap.report_size_change(before, after);
     match r? {
         Ok(x) => Ok(x),
         Err(e) => {
@@ -777,7 +777,7 @@ fn register_file(m: &mut NativeModule) {
         let before = f.size();
         let open = f.open.take();
         let after = f.size();
-        vm.heap.adjust_bytes(before, after);
+        vm.heap.report_size_change(before, after);
         // Closing can block, for example while data is flushed to a network
         // file system. Dropping the state releases its resource slot.
         if let Some(mut st) = open

@@ -210,7 +210,7 @@ fn with_regex<T>(vm: &mut Vm, re: VmVal<RegexObj>, search: impl FnOnce(&Vm, &Reg
         let result = search(vm, obj, &mut obj.cache.borrow_mut());
         (result, obj.refresh_size())
     };
-    vm.heap.adjust_bytes(before, after);
+    vm.heap.report_size_change(before, after);
     result
 }
 

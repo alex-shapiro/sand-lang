@@ -1005,7 +1005,7 @@ fn clear_container(vm: &mut Vm, v: VmValue) -> Result<(), Fail> {
         _ => return internal("not a map or set"),
     }
     let after = vm.heap.get(v).size();
-    vm.heap.adjust_bytes(before, after);
+    vm.heap.report_size_change(before, after);
     Ok(())
 }
 
