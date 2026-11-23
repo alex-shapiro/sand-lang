@@ -564,7 +564,7 @@ fn run_ready<U: DriveUntil>(
         vm.meter.sync(fuel);
         timer.ran(vm.meter.spent());
         // Share current heap usage with background I/O readers for `max_memory` checks.
-        let used = vm.heap.used();
+        let used = vm.heap.used_bytes();
         vm.heap.io_memory.publish_heap(used);
         vm.current = u32::MAX;
         let stop = match turn_result {

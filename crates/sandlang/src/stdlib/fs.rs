@@ -604,7 +604,7 @@ fn unbuffer(f: &mut OpenedFile, unread: u64) -> io::Result<()> {
 /// Whether `bytes` more fit in the memory limit, asking for a collection
 /// first if they do not.
 fn fits(vm: &Vm, bytes: usize) -> Result<bool, Ctl> {
-    if !vm.heap.would_exceed(bytes) {
+    if !vm.heap.would_exceed_memory_limit(bytes) {
         return Ok(true);
     }
     if !vm.collected {
@@ -658,7 +658,7 @@ fn with_file<R: IntoVmValue>(
     let f = file.get_mut(&mut vm.heap)?;
     f.open = Some(st);
     let after = f.size();
-    vm.heap.account(before, after);
+    vm.heap.report_size_change(before, after);
     match r? {
         Ok(x) => Ok(x),
         Err(e) => {
@@ -777,7 +777,7 @@ fn register_file(m: &mut NativeModule) {
         let before = f.size();
         let open = f.open.take();
         let after = f.size();
-        vm.heap.account(before, after);
+        vm.heap.report_size_change(before, after);
         // Closing can block, for example while data is flushed to a network
         // file system. Dropping the state releases its resource slot.
         if let Some(mut st) = open
@@ -907,7 +907,7 @@ fn read_rest<R: IntoVmValue>(
         };
         // What was read is consumed: from here on, a failure is not a retry.
         drop(res);
-        if vm.heap.would_exceed(data.len()) {
+        if vm.heap.would_exceed_memory_limit(data.len()) {
             return Ok(Err(too_large()));
         }
         finish(vm, data)

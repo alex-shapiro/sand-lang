@@ -205,7 +205,7 @@ fn main() {
             gc.collections += s.collections;
             gc.total_pause += s.total_pause;
             gc.max_pause = gc.max_pause.max(s.max_pause);
-            gc.majors += s.majors;
+            gc.major_collections += s.major_collections;
             gc.max_minor_pause = gc.max_minor_pause.max(s.max_minor_pause);
         }
         times.sort();
@@ -220,14 +220,14 @@ fn main() {
             ms(times[times.len() / 2]),
             ns_op,
             gc.collections / runs as u64,
-            gc.majors / runs as u64,
+            gc.major_collections / runs as u64,
             ms(gc.max_pause),
             ms(gc.max_minor_pause),
             ms(avg)
         );
     }
-    // One number to compare builds by (the interpreter's speed is sensitive
-    // to code layout, see `vm::interp`).
+    // Code layout changes the time of a single benchmark by up to 4% between
+    // builds with the same instructions. The geometric mean is more stable.
     if count > 1 {
         println!("geometric mean of best times: {:.2}ms over {count} benchmarks", (log_sum / count as f64).exp());
     }

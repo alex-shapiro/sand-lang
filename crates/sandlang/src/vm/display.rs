@@ -408,7 +408,7 @@ pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v
 
 /// Charges for and checks the memory limit before building `n` bytes of output.
 fn reserve(heap: &Heap, budget: &impl Budget, n: usize) -> Result<(), Fail> {
-    if n > MAX_OUTPUT || heap.would_exceed(n) {
+    if n > MAX_OUTPUT || heap.would_exceed_memory_limit(n) {
         return Err(Fail::limit(crate::engine::LimitKind::Memory));
     }
     budget.charge_bytes(n)

@@ -505,7 +505,7 @@ pub trait NativeObject: Any + Send {
     /// Approximate heap memory used by `self`, in bytes.
     ///
     /// The VM reads this value on allocation and deallocation; call
-    /// [`Heap::account`] if the object's size changes in place.
+    /// [`Heap::adjust_bytes`] if the object's size changes in place.
     fn size(&self) -> usize {
         64
     }
@@ -619,7 +619,7 @@ impl VmVal<String> {
 
 impl VmVal<Vec<u8>> {
     pub fn bytes(self, heap: &Heap) -> &[u8] {
-        heap.bytes_of(self.raw())
+        heap.bytes(self.raw())
     }
 }
 

@@ -1326,8 +1326,8 @@ impl Engine {
         };
         let mut vm = Vm::new(prog, host_modules.0.natives.clone(), host);
         if c.gc_stress {
-            vm.heap.stress = true;
-            vm.heap.next_gc = 0;
+            vm.heap.gc_stress = true;
+            vm.heap.next_gc_bytes = 0;
         }
         vm.retry_stress = c.retry_stress;
         Arc::new(Mutex::new(vm))

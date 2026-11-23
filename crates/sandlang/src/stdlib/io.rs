@@ -77,7 +77,7 @@ fn output<T: Output>(m: &mut NativeModule) {
 fn write_out(vm: &mut Vm, which: u8, v: VmValue) -> Result<(), HostError> {
     let len = match vm.heap.get(v) {
         Obj::Str(s) => s.len(),
-        _ => vm.heap.bytes_of(v).len(),
+        _ => vm.heap.bytes(v).len(),
     };
     vm.charge_bytes(len)?;
     vm.write_stream_value(which, v)
@@ -170,7 +170,7 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     if len == 0 {
         return Some(None);
     }
-    if vm.heap.would_exceed(len) {
+    if vm.heap.would_exceed_memory_limit(len) {
         return None;
     }
     let mut line = buf[..len].to_vec();

@@ -996,26 +996,26 @@ impl Vm {
 
     /// Runs `f` with heap memory-limit checks disabled so post-effect result conversion cannot trigger a retry. Call [`Vm::enforce_limit`] after rooting the result.
     pub(crate) fn unchecked<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
-        self.heap.unchecked = true;
+        self.heap.ignore_memory_limit = true;
         let r = f(self);
-        self.heap.unchecked = false;
+        self.heap.ignore_memory_limit = false;
         r
     }
 
     /// Runs a full garbage collection if the heap exceeds the memory limit, and returns `Err(LimitKind::Memory)` if it still exceeds the limit. All live values must be rooted.
     pub(crate) fn enforce_limit(&mut self, current: Option<&mut Fiber>) -> Result<(), LimitKind> {
-        if !self.heap.over_limit() {
+        if !self.heap.is_over_memory_limit() {
             return Ok(());
         }
         self.collect_all_garbage(current);
-        if self.heap.over_limit() { Err(LimitKind::Memory) } else { Ok(()) }
+        if self.heap.is_over_memory_limit() { Err(LimitKind::Memory) } else { Ok(()) }
     }
 
     /// Starts accounting for the buffers of an I/O operation that are not
     /// yet heap values (see [`iomem`]); the operation grows the reservation
     /// as its buffers grow and drops it before turning them into values.
     pub fn io_reservation(&self) -> iomem::Reservation {
-        self.heap.io_memory.publish_heap(self.heap.used());
+        self.heap.io_memory.publish_heap(self.heap.used_bytes());
         iomem::Reservation::new(&self.heap.io_memory)
     }
 
@@ -1059,7 +1059,7 @@ impl Vm {
     /// (such as `"a connection"`).
     pub fn resource_slot_with(&mut self, buffers: usize, what: &str) -> Result<iomem::ResourceSlot, HostError> {
         let mut slot = self.resource_slot()?;
-        self.heap.io_memory.publish_heap(self.heap.used());
+        self.heap.io_memory.publish_heap(self.heap.used_bytes());
         match slot.reserve_buffers(buffers) {
             Ok(()) => Ok(slot),
             Err(_) if !self.collected => Err(Ctl::from(CtlKind::Collect).into()),
@@ -1286,7 +1286,7 @@ impl Vm {
     pub fn write_stream_value(&mut self, which: u8, v: VmValue) -> Result<(), HostError> {
         let len = match self.heap.get(v) {
             Obj::Str(s) => s.len(),
-            _ => self.heap.bytes_of(v).len(),
+            _ => self.heap.bytes(v).len(),
         };
         if !self.output_allowed(which)? {
             let name = if which == 1 { "stdout" } else { "stderr" };
@@ -1295,7 +1295,7 @@ impl Vm {
         self.count_output(which, len)?;
         let data = match self.heap.get(v) {
             Obj::Str(s) => s.as_bytes(),
-            _ => self.heap.bytes_of(v),
+            _ => self.heap.bytes(v),
         };
         match self.stream_sink(which).write(data) {
             Ok(()) => Ok(self.limit_backlog(which)?),
@@ -1381,7 +1381,7 @@ impl Vm {
                     self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
                 }
                 let stack = nregs.max(INITIAL_STACK_SLOTS);
-                if self.heap.would_exceed(stack * std::mem::size_of::<VmValue>()) {
+                if self.heap.would_exceed_memory_limit(stack * std::mem::size_of::<VmValue>()) {
                     return Err(Fail::limit(LimitKind::Memory));
                 }
                 let mut frames = Vec::with_capacity(8);
@@ -1691,42 +1691,42 @@ impl Vm {
         let mut full = force_major;
         if force_major {
             self.free_spare_fibers();
-        } else if self.heap.cycle_active() {
-            if self.heap.minor_due() {
+        } else if self.heap.is_incremental_gc_active() {
+            if self.heap.needs_minor_gc() {
                 let roots = self.gc_roots(current.as_deref_mut());
                 self.heap.collect(roots, false);
                 self.heap.stats.record(start.elapsed(), false);
             }
             let step = crate::platform::Instant::now();
-            if self.heap.cycle_step() {
+            if self.heap.step_incremental_gc() {
                 let roots = self.gc_roots(current.as_deref_mut());
-                self.heap.finish_marking(roots);
+                self.heap.finish_incremental_marking(roots);
             }
             self.heap.stats.record_step(step.elapsed());
         } else {
             let roots = self.gc_roots(current.as_deref_mut());
             // Major collection if the old generation is large enough; minor otherwise.
-            let major = self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
+            let major = self.heap.needs_major_gc() || (self.heap.gc_stress && self.heap.stats.collections.is_multiple_of(8));
             if !major {
                 self.heap.collect(roots, false);
                 self.heap.stats.record(start.elapsed(), false);
-            } else if self.heap.major_is_incremental() {
-                self.heap.start_cycle(roots);
+            } else if self.heap.should_start_incremental_gc() {
+                self.heap.start_incremental_gc(roots);
                 self.heap.stats.record_step(start.elapsed());
             } else {
                 full = true;
             }
         }
         // Old garbage may keep the heap over the limit.
-        if !full && self.heap.over_limit() {
+        if !full && self.heap.is_over_memory_limit() {
             self.free_spare_fibers();
-            full = self.heap.over_limit();
+            full = self.heap.is_over_memory_limit();
         }
         if full {
             let start = crate::platform::Instant::now();
             let roots = self.gc_roots(current);
             self.heap.collect(roots, true);
-            if self.heap.over_limit() {
+            if self.heap.is_over_memory_limit() {
                 self.free_spare_fibers();
             }
             self.heap.stats.record(start.elapsed(), true);

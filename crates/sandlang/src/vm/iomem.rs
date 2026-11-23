@@ -1,7 +1,7 @@
 //! Off-heap memory and open-resource accounting for pending I/O operations.
 //!
 //! Pending I/O tasks must reserve off-heap buffer capacity through a
-//! [`Reservation`] before allocating. [`Heap::would_exceed`](super::heap::Heap::would_exceed)
+//! [`Reservation`] before allocating. [`Heap::would_exceed_memory_limit`](super::heap::Heap::would_exceed_memory_limit)
 //! counts reserved bytes together with heap memory against `max_memory`. If the
 //! total exceeds `max_memory`, the I/O operation fails with kind `"limit"`
 //! without allocating. Reserve bytes incrementally as data arrives instead of
