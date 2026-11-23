@@ -1590,6 +1590,7 @@ impl Checker {
         ps.iter().map(|&p| (self.params[p as usize].name, p)).collect()
     }
 
+    /// Populates a struct's `TypeDef` with its resolved fields.
     fn fill_struct(&mut self, id: TypeDefId, s: &ast::StructDecl, item: u32, written: &mut Vec<(TypeDefId, TypeId, Span)>) {
         let gens = self.types[id as usize].generics.clone();
         let scope = self.generic_scope(&gens);
@@ -1649,7 +1650,7 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Struct { fields };
     }
 
-    /// Resolves the variants of enum `id` and appends their payload types to `written`.
+    /// Populates an enum's `TypeDef` with its resolved variants.
     fn fill_enum(&mut self, id: TypeDefId, e: &ast::EnumDecl, written: &mut Vec<(TypeDefId, TypeId, Span)>) {
         let gens = self.types[id as usize].generics.clone();
         let scope = self.generic_scope(&gens);
