@@ -325,7 +325,7 @@ impl Checker {
                     let rt_id = self.types[d as usize].variants()[i as usize].rt_id;
                     return self.pat(HPatKind::Variant { rt_id, args: vec![] }, ty, span);
                 }
-                if let Some(Def::Variant(d, i)) = self.scope_def(self.prelude.unwrap_or(0), &id.name) {
+                if let Some(Def::Variant(d, i)) = self.lookup_module_def(self.prelude.unwrap_or(0), &id.name) {
                     let v = &self.types[d as usize].variants()[i as usize];
                     if v.fields.is_empty() {
                         let rt_id = v.rt_id;

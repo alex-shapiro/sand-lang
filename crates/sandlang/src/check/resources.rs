@@ -823,7 +823,7 @@ impl Ctx<'_> {
                 }
                 _ => continue,
             };
-            let Some(Def::Type(TyRef::Def(d))) = self.ck.scope_def(self.ck.cur_mod, &name.name) else { continue };
+            let Some(Def::Type(TyRef::Def(d))) = self.ck.lookup_module_def(self.ck.cur_mod, &name.name) else { continue };
             let def = self.ck.types[d as usize].clone();
             if def.module != self.ck.cur_mod {
                 continue;

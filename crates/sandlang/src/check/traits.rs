@@ -169,9 +169,14 @@ impl Checker {
     }
 
     /// Resolves trait bounds written after `:` (`T: Ord + geo.Shape`).
-    pub(crate) fn resolve_traits(&mut self, ts: &[TypeExpr], scope: &[(Symbol, ParamId)], self_ty: Option<TypeId>) -> Vec<TraitRef> {
+    pub(crate) fn resolve_traits(
+        &mut self,
+        type_epxrs: &[TypeExpr],
+        scope: &[(Symbol, ParamId)],
+        self_ty: Option<TypeId>,
+    ) -> Vec<TraitRef> {
         let mut traits = Vec::new();
-        for t in ts {
+        for t in type_epxrs {
             let TypeExprKind::Named { path, args } = &t.kind else {
                 self.error(t.span, "expected a trait");
                 continue;
@@ -203,7 +208,7 @@ impl Checker {
             // Only traits can appear after `:`, so a module-local type (`struct Hash`)
             // does not shadow a prelude trait of the same name.
             [one] => match (self.lookup_global(&one.name), self.prelude) {
-                (Some(Def::Type(_)), Some(p)) if p != self.cur_mod => match self.scope_def(p, &one.name) {
+                (Some(Def::Type(_)), Some(p)) if p != self.cur_mod => match self.lookup_module_def(p, &one.name) {
                     Some(Def::Trait(t)) if self.traits[t as usize].is_pub => Some(Def::Trait(t)),
                     _ => self.lookup_global(&one.name),
                 },
@@ -1167,7 +1172,7 @@ impl Checker {
     /// Collects all trait bounds required by type constructors in `t` (`Hash`
     /// on `Set` elements and `Map` keys, and declared type parameter bounds on
     /// named types).
-    fn written_requirements(&mut self, t: TypeId) -> Vec<Requirement> {
+    fn required_trait_bounds(&mut self, t: TypeId) -> Vec<Requirement> {
         let hash = self.builtin_trait(Builtin::Hash);
         let mut out = Vec::new();
         let mut seen = HashSet::new();
@@ -1213,7 +1218,7 @@ impl Checker {
 
     /// Returns the first unsatisfied type-constructor trait bound in `ty`.
     pub(crate) fn first_unmet_requirement(&mut self, ty: TypeId) -> Option<Box<Unmet>> {
-        for r in self.written_requirements(ty) {
+        for r in self.required_trait_bounds(ty) {
             if let Err(mut m) = self.resolve_evidence(r.arg, r.tr, 0) {
                 let owner = match self.ty(r.owner) {
                     Ty::Set(_) => format!("the elements of {}", self.show(r.owner)),
@@ -1227,15 +1232,15 @@ impl Checker {
         None
     }
 
-    /// Propagates trait bounds required by field and variant payload types onto
-    /// the type parameters of type definitions starting at `first`.
-    pub(crate) fn infer_member_requirements(&mut self, first: usize) {
+    /// Infers trait bounds on generic type parameters from struct fields and
+    /// enum variants for types starting at `first`.
+    pub(crate) fn infer_type_param_bounds(&mut self, first: usize) {
         let dependents = self.dependent_types(first);
         self.propagate_to_fixed_point(first, &dependents, &mut |c, d| {
             let gens = c.types[d].generics.clone();
             let mut changed = false;
             for m in c.member_types(d) {
-                for r in c.written_requirements(m) {
+                for r in c.required_trait_bounds(m) {
                     if let Ty::Param(p) = c.ty(r.arg)
                         && gens.contains(&p)
                         && !c.param_traits(p).contains(&r.tr)
