@@ -348,7 +348,7 @@ impl Heap {
     }
 
     /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
-    /// Allocate the bytes immediately after this check, or use [`Scratch`](super::meter::Scratch) to track a growing buffer.
+    /// Allocate the bytes immediately after this check, or use [`ScratchMemoryTracker`](super::meter::ScratchMemoryTracker) to track a growing buffer.
     pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Fail> {
         if self.would_exceed_memory_limit(extra) { Err(crate::vm::Fail::limit(LimitKind::Memory)) } else { Ok(()) }
     }

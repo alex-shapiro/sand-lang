@@ -1,42 +1,43 @@
-//! Fuel metering for bytecode execution, native functions, and runtime
-//! operations (deep comparison, display, concatenation, and slicing).
+//! Enforces execution limits and cancellation for the SandLang VM.
 //!
-//! [`Meter`] enforces `max_instructions`, CPU-time limits, wall-clock limits,
-//! and cancellation through a single fuel counter:
+//! Checking system clocks and atomic flags on every bytecode instruction is
+//! expensive. [`Meter`] amortizes checks through a single fuel counter that
+//! enforces instruction, CPU-time, and wall-clock limits.
 //!
-//! * The scheduler grants each task a fuel slice bounded by `SLICE_FUEL` and by
-//!   the remaining `max_instructions` budget.
-//! * The interpreter keeps the active slice fuel in a register, deducts fuel at
-//!   calls and loop back edges, writes spent fuel to [`Meter::sync`] before a
-//!   native call, and reloads the register with [`Meter::resync`] afterward.
-//! * Native functions and runtime operations deduct fuel through shared `&Meter`
-//!   references (`Cell` fields allow charging while [`Heap`] is borrowed).
-//! * After a slice is exhausted, [`Meter`] checks the interrupt flag,
-//!   instruction budget, and CPU and wall-clock deadlines every
-//!   [`CHECK_INTERVAL`] units and returns `Fail::interrupted()` or
-//!   `Fail::limit(kind)` if a limit is exceeded.
+//! ## How Fuel Works
 //!
-//! # Cost model
+//! - At the start of a fiber's turn, the scheduler grants it a fuel slice.
+//! - The interpreter keeps the active fiber's slice fuel in a local counter.
+//!   It deducts fuel at calls and loop iterations. Before a native call, the
+//!   interpreter commits its bytecode spending. After the call, it reloads its
+//!   counter.
+//! - Native functions and runtime helpers charge fuel through a shared meter.
+//! - Once a slice is exhausted, the meter checks the interrupt flag, instruction
+//!   budget, and CPU and wall-clock deadlines every of often. It returns an
+//!   interrupt or limit failure if a limit is exceeded.
+//!
+//! ## Cost Model
 //!
 //! A fuel unit corresponds to a simple bytecode loop iteration. Native
-//! functions and runtime helpers must charge fuel proportional to their work:
+//! functions and runtime helpers must charge fuel in proportion to their work
+//! so they cannot bypass execution limits.
 //!
-//! * [`Meter::charge`]`(n)`: a unit per element visited, compared, hashed,
-//!   copied, or produced (container elements, comparison and display nodes,
-//!   JSON values, and regex matches).
-//! * [`Meter::charge_bytes`]`(n)`: a unit per [`BYTES_PER_UNIT`] bytes
-//!   scanned, copied, or produced (strings, byte slices, and output buffers).
-//! * [`Meter::charge_slow_bytes`]`(n)`: a unit per [`SLOW_BYTES_PER_UNIT`]
-//!   bytes for byte-at-a-time algorithms (cryptographic and hash functions,
-//!   regex searches, base64, percent-encoding, and case mapping).
+//! - [`Meter::charge`] charges a unit for each logical item processed, such as
+//!   a container element, traversal node, or match.
+//! - [`Meter::charge_bytes`] charges a unit per [`BYTES_PER_FUEL_UNIT`] bytes
+//!   for bulk memory work such as copying, comparing, or scanning.
+//! - [`Meter::charge_slow_bytes`] charges a unit per
+//!   [`SLOW_BYTES_PER_FUEL_UNIT`] bytes for per-byte algorithms such as
+//!   hashing, regex search, and encoding.
 //!
-//! Charge the estimated cost of an uninterruptible operation before executing
-//! it so that it fails immediately if the remaining instruction budget is
-//! insufficient. If an operation's cost cannot be estimated in advance, meter
-//! it by elapsed time (see `stdlib/regex.rs`). Because formatting, encoding, or
-//! comparing a value with shared substructure can expand it exponentially,
-//! charge fuel as output or traversal steps are produced rather than by the
-//! input's heap size.
+//! Charge the estimated cost of an uninterruptible operation before starting
+//! it. The operation then stops immediately if the remaining budget is too
+//! small. If you cannot estimate cost in advance, meter the operation by
+//! elapsed time. See `stdlib/regex.rs` for an example.
+//!
+//! Shared substructure can cause formatting, encoding, or comparison to expand
+//! a small heap graph exponentially. Charge fuel as you traverse nodes or emit
+//! output rather than by the input's heap size.
 
 use super::Fail;
 use super::heap::Heap;
@@ -47,68 +48,241 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Bytes per fuel unit for memcpy-like work (copying, comparing, scanning).
-pub const BYTES_PER_UNIT: usize = 64;
-
-/// Bytes per fuel unit for byte-at-a-time work (hashing, regex, encoding).
-pub const SLOW_BYTES_PER_UNIT: usize = 8;
-
-/// Fuel units between limit checks once a slice's fuel is exhausted.
-pub const CHECK_INTERVAL: i64 = 20_000;
-
-/// Scratch-buffer growth between memory-limit checks.
-pub const SCRATCH_STEP: usize = 64 << 10;
-
-/// Instructions of straight-line bytecode per fuel unit, as a shift (64).
-pub const CODE_UNIT_SHIFT: u32 = 6;
-
-/// The extra fuel for running up to `n` instructions without passing a safe
-/// point: one unit per 64.
-///
-/// Bytecode consumes fuel only at back edges and calls, and between those it
-/// only moves forward, so it runs at most the instructions of the loop body
-/// or function entered. Without this surcharge one unit could stand for
-/// hundreds of thousands of instructions, making `max_instructions` that
-/// inaccurate and delaying the limit and interrupt checks between slices by
-/// seconds. So a back edge costs one unit plus one per 64 instructions it
-/// jumps back over, entering a function (a call, a tail call, a task's
-/// start) one plus one per 64 instructions of its code, and `MakeClosure`
-/// one per 64 captures it copies. Typical loop bodies and functions are
-/// shorter than 64 instructions and cost one unit.
-#[inline(always)]
-pub const fn code_fuel(n: usize) -> i64 {
-    (n >> CODE_UNIT_SHIFT) as i64
+/// Tracks execution fuel and enforces instruction, time, and cancellation
+/// limits for a VM.
+pub struct Meter {
+    /// Remaining fuel in the current slice. Negative if the slice is overspent.
+    remaining_slice_fuel: Cell<i64>,
+    /// Interpreter fuel counter recorded at the last sync boundary.
+    interpreter_fuel_baseline: Cell<i64>,
+    /// Threshold below which the next charge triggers a limit checkpoint.
+    next_limit_check_fuel: Cell<i64>,
+    /// Fuel granted at the start of the current slice.
+    slice_initial_fuel: Cell<i64>,
+    /// Total fuel spent across earlier slices in the current run.
+    prior_slices_fuel: Cell<u64>,
+    max_instructions: Option<u64>,
+    cpu_deadline: Cell<Option<Duration>>,
+    wall_deadline: Cell<Option<Instant>>,
+    interrupt_flag: Arc<AtomicBool>,
+    clock: Arc<dyn Clock>,
 }
 
-/// The fuel of a back edge with offset `off < 0`: one unit per 64
-/// instructions jumped back over, rounded up. This includes the edge's base
-/// unit, so the back edge's path pays one shift for it.
-#[inline(always)]
-pub const fn loop_fuel(off: i32) -> i64 {
-    -((off >> CODE_UNIT_SHIFT) as i64)
-}
-
-/// Something that can be charged for work: the engine's [`Meter`], or
-/// [`Unmetered`] for callers outside an engine run.
-pub trait Budget {
-    fn charge(&self, units: u64) -> Result<(), Fail>;
-
-    #[inline]
-    fn charge_bytes(&self, n: usize) -> Result<(), Fail> {
-        self.charge((n / BYTES_PER_UNIT) as u64)
+impl Meter {
+    /// Creates a meter.
+    pub fn new(max_instructions: Option<u64>, interrupt_flag: Arc<AtomicBool>, clock: Arc<dyn Clock>) -> Meter {
+        Meter {
+            remaining_slice_fuel: Cell::new(0),
+            interpreter_fuel_baseline: Cell::new(0),
+            next_limit_check_fuel: Cell::new(0),
+            slice_initial_fuel: Cell::new(0),
+            prior_slices_fuel: Cell::new(0),
+            max_instructions,
+            cpu_deadline: Cell::new(None),
+            wall_deadline: Cell::new(None),
+            interrupt_flag,
+            clock,
+        }
     }
 
-    /// Returns the current fuel position for [`Budget::refund_to`].
+    /// Charges fuel for native or runtime work, and enforces execution limits
+    /// limits at periodic checkpoints.
+    ///
+    /// Returns immediately if remaining fuel is at or above the next
+    /// checkpoint. Runs a full limit check if remaining fuel is below the
+    /// checkpoint.
+    #[inline]
+    pub fn charge(&self, units: u64) -> Result<(), Fail> {
+        let remaining = self.remaining_slice_fuel.get().saturating_sub(units.min(i64::MAX as u64) as i64);
+        self.remaining_slice_fuel.set(remaining);
+        if remaining < self.next_limit_check_fuel.get() { self.run_limit_checkpoint() } else { Ok(()) }
+    }
+
+    /// Charges fuel for bulk memory work like copying, comparing, or scanning.
+    #[inline]
+    pub fn charge_bytes(&self, byte_count: usize) -> Result<(), Fail> {
+        self.charge((byte_count / BYTES_PER_FUEL_UNIT) as u64)
+    }
+
+    /// Charges fuel for per-byte work like hashing, regex search, or encoding.
+    #[inline]
+    pub fn charge_slow_bytes(&self, byte_count: usize) -> Result<(), Fail> {
+        self.charge((byte_count / SLOW_BYTES_PER_FUEL_UNIT) as u64)
+    }
+
+    /// Verifies immediately whether execution must stop due to cancellation,
+    /// `max_instructions`, CPU time, or wall-clock time.
+    pub fn check_limits(&self) -> Result<(), Fail> {
+        if self.interrupt_flag.load(Ordering::Relaxed) {
+            return Err(Fail::interrupted());
+        }
+        if let Some(max) = self.max_instructions
+            && self.total_fuel_used() > max
+        {
+            return Err(Fail::limit(LimitKind::Instructions));
+        }
+        if self.cpu_deadline.get().is_some_and(|deadline| self.clock.cpu_time() >= deadline) {
+            return Err(Fail::limit(LimitKind::CpuTime));
+        }
+        if self.wall_deadline.get().is_some_and(|deadline| self.clock.now() >= deadline) {
+            return Err(Fail::limit(LimitKind::WallTime));
+        }
+        Ok(())
+    }
+
+    /// Returns the remaining fuel in the current slice.
+    /// A negative value indicates an overspent slice.
+    #[inline]
+    pub fn remaining_slice_fuel(&self) -> i64 {
+        self.remaining_slice_fuel.get()
+    }
+
+    /// Returns fuel spent in the current slice.
+    pub fn slice_fuel_spent(&self) -> u64 {
+        self.slice_initial_fuel.get().saturating_sub(self.remaining_slice_fuel.get()).max(0) as u64
+    }
+
+    /// Returns fuel spent across the current run.
+    pub fn total_fuel_used(&self) -> u64 {
+        self.prior_slices_fuel.get().saturating_add(self.slice_fuel_spent())
+    }
+
+    /// Begins a scheduling slice with a fuel allowance and time deadline.
+    ///
+    /// The scheduler calls this before each fiber turn. The fiber yields
+    /// after `SLICE_FUEL` units or stops at `max_instructions`. Returns the
+    /// starting fuel for the interpreter's local counter.
+    pub(crate) fn start_slice(&self, cpu_deadline: Option<Duration>, wall_deadline: Option<Instant>) -> i64 {
+        let used = self.total_fuel_used();
+        let slice_fuel = match self.max_instructions {
+            Some(max) => max.saturating_sub(used).min(super::SLICE_FUEL as u64) as i64,
+            None => super::SLICE_FUEL,
+        };
+        self.prior_slices_fuel.set(used);
+        self.slice_initial_fuel.set(slice_fuel);
+        self.remaining_slice_fuel.set(slice_fuel);
+        self.interpreter_fuel_baseline.set(slice_fuel);
+        self.next_limit_check_fuel.set(0);
+        self.cpu_deadline.set(cpu_deadline);
+        self.wall_deadline.set(wall_deadline);
+        slice_fuel
+    }
+
+    /// Commits bytecode fuel spent in the interpreter's local counter back into
+    /// the meter.
+    ///
+    /// Call this before a native call or at the end of a slice so the meter
+    /// holds the full run total before checking limits or running native code.
+    /// Pass the interpreter's current `interpreter_fuel` counter.
+    #[inline]
+    pub(crate) fn flush_interpreter_fuel(&self, interpreter_fuel: i64) {
+        let bytecode_spent = self.interpreter_fuel_baseline.get() - interpreter_fuel;
+        self.remaining_slice_fuel.set(self.remaining_slice_fuel.get() - bytecode_spent);
+    }
+
+    /// Synchronizes the interpreter's local counter with fuel spent during a
+    /// native call.
+    ///
+    /// Call this after a native call returns. The returned value becomes the
+    /// interpreter's remaining slice fuel and the new sync baseline.
+    #[inline]
+    pub(crate) fn reload_interpreter_fuel(&self) -> i64 {
+        let remaining = self.remaining_slice_fuel.get();
+        self.interpreter_fuel_baseline.set(remaining);
+        remaining
+    }
+
+    /// Restores remaining slice fuel so the VM does not charge twice for
+    /// retried operations.
+    #[inline]
+    pub(crate) fn refund_to(&self, mark: i64) {
+        self.remaining_slice_fuel.set(mark);
+        self.next_limit_check_fuel.set(self.next_limit_check_fuel.get().max(mark.saturating_sub(LIMIT_CHECK_FUEL_INTERVAL)));
+    }
+
+    /// Clears accumulated run fuel and installs a fresh interrupt flag to begin
+    /// a new session run.
+    pub(crate) fn reset_for_run(&mut self, interrupt_flag: Arc<AtomicBool>) {
+        self.prior_slices_fuel.set(0);
+        self.slice_initial_fuel.set(self.remaining_slice_fuel.get());
+        self.interrupt_flag = interrupt_flag;
+    }
+
+    /// Creates an [`OffloadAllowance`] so work running off the VM thread can
+    /// enforce execution limits independently of this meter.
+    pub(crate) fn offload_allowance(&self) -> OffloadAllowance {
+        OffloadAllowance {
+            interrupt_flag: self.interrupt_flag.clone(),
+            abandoned_flag: Arc::new(AtomicBool::new(false)),
+            wall_deadline: self.wall_deadline.get().map(|at| Deadline { at, clock: self.clock.clone() }),
+            fuel_limit: self.max_instructions.map_or(u64::MAX, |max| max.saturating_sub(self.total_fuel_used())),
+            fuel_used: 0,
+            next_deadline_check_fuel: 0,
+            stopped: false,
+        }
+    }
+
+    /// Advances the limit checkpoint and verifies execution limits.
+    #[cold]
+    #[inline(never)]
+    fn run_limit_checkpoint(&self) -> Result<(), Fail> {
+        // Remaining slice fuel is below `instruction_limit_fuel` once total
+        // fuel exceeds `max_instructions`. Clamping to this bound ensures that
+        // the meter runs a limit check right at the budget boundary.
+        let instruction_limit_fuel = match self.max_instructions {
+            Some(max) => (i128::from(self.prior_slices_fuel.get()) + i128::from(self.slice_initial_fuel.get()) - i128::from(max))
+                .clamp(i64::MIN.into(), i64::MAX.into()) as i64,
+            None => i64::MIN,
+        };
+        self.next_limit_check_fuel
+            .set(self.remaining_slice_fuel.get().saturating_sub(LIMIT_CHECK_FUEL_INTERVAL).max(instruction_limit_fuel));
+        self.check_limits()
+    }
+}
+
+/// Fuel charging trait for helpers inside and outside a metered VM.
+///
+/// Engine code passes [`Meter`] to enforce execution limits. Standalone callers
+/// and tests pass [`UnmeteredFuel`] to reuse helpers with unlimited fuel.
+pub trait FuelBudget {
+    /// Charges fuel for runtime work.
+    fn charge(&self, units: u64) -> Result<(), Fail>;
+
+    /// Charges fuel for bulk memory work.
+    #[inline]
+    fn charge_bytes(&self, byte_count: usize) -> Result<(), Fail> {
+        self.charge((byte_count / BYTES_PER_FUEL_UNIT) as u64)
+    }
+
+    /// Returns the current fuel position.
     fn fuel_mark(&self) -> i64;
 
-    /// Refunds the fuel charged since [`Budget::fuel_mark`] returned `mark`.
+    /// Restores fuel to `mark` so the VM does not charge for aborted retries or
+    /// discarded probes.
     fn refund_to(&self, mark: i64);
 }
 
-/// A budget that never runs out.
-pub struct Unmetered;
+impl FuelBudget for Meter {
+    #[inline]
+    fn charge(&self, units: u64) -> Result<(), Fail> {
+        Meter::charge(self, units)
+    }
 
-impl Budget for Unmetered {
+    #[inline]
+    fn fuel_mark(&self) -> i64 {
+        self.remaining_slice_fuel()
+    }
+
+    #[inline]
+    fn refund_to(&self, mark: i64) {
+        Meter::refund_to(self, mark);
+    }
+}
+
+/// A [`FuelBudget`] that ignores all charges.
+pub struct UnlimitedMeter;
+
+impl FuelBudget for UnlimitedMeter {
     #[inline(always)]
     fn charge(&self, _: u64) -> Result<(), Fail> {
         Ok(())
@@ -123,275 +297,150 @@ impl Budget for Unmetered {
     fn refund_to(&self, _: i64) {}
 }
 
-/// The fuel counter of an engine.
-pub struct Meter {
-    /// Fuel left in the current slice; negative once overspent.
-    fuel: Cell<i64>,
-    /// The interpreter's count of the slice's fuel as of its last
-    /// [`Meter::sync`] or [`Meter::resync`].
-    synced: Cell<i64>,
-    /// The next limit check happens when `fuel` drops below this.
-    check_at: Cell<i64>,
-    /// The fuel the current slice started with.
-    slice: Cell<i64>,
-    /// Fuel used by the run before the current slice.
-    base: Cell<u64>,
-    max_instructions: Option<u64>,
-    cpu_deadline: Cell<Option<Duration>>,
-    wall_deadline: Cell<Option<Instant>>,
-    interrupt: Arc<AtomicBool>,
-    clock: Arc<dyn Clock>,
+/// Prevents growing Rust-side temporary buffers from bypassing the VM memory
+/// limit.
+///
+/// Native functions and runtime helpers build temporary strings and vectors in
+/// Rust memory outside the SandLang heap. Checking the heap limit on every byte
+/// appended is too expensive. This tracker amortizes checks to every
+/// [`SCRATCH_CHECK_BYTES`] bytes of growth.
+pub struct ScratchMemoryTracker {
+    next_check_bytes: usize,
 }
 
-impl Meter {
-    pub fn new(max_instructions: Option<u64>, interrupt: Arc<AtomicBool>, clock: Arc<dyn Clock>) -> Meter {
-        Meter {
-            fuel: Cell::new(0),
-            synced: Cell::new(0),
-            check_at: Cell::new(0),
-            slice: Cell::new(0),
-            base: Cell::new(0),
-            max_instructions,
-            cpu_deadline: Cell::new(None),
-            wall_deadline: Cell::new(None),
-            interrupt,
-            clock,
-        }
+impl ScratchMemoryTracker {
+    /// Creates a tracker that runs its first memory check at
+    /// [`SCRATCH_CHECK_BYTES`] bytes.
+    pub fn new() -> ScratchMemoryTracker {
+        ScratchMemoryTracker { next_check_bytes: SCRATCH_CHECK_BYTES }
     }
 
-    /// Allocates execution fuel for the next slice and sets execution deadlines.
-    pub(crate) fn start_slice(&self, cpu_deadline: Option<Duration>, wall_deadline: Option<Instant>) -> i64 {
-        let used = self.used();
-        let fuel = match self.max_instructions {
-            Some(max) => max.saturating_sub(used).min(super::SLICE_FUEL as u64) as i64,
-            None => super::SLICE_FUEL,
-        };
-        self.base.set(used);
-        self.slice.set(fuel);
-        self.fuel.set(fuel);
-        self.synced.set(fuel);
-        self.check_at.set(0);
-        self.cpu_deadline.set(cpu_deadline);
-        self.wall_deadline.set(wall_deadline);
-        fuel
-    }
-
-    /// Applies the bytecode fuel the interpreter spent since its last sync,
-    /// given the fuel it has `left` (before it calls a native, and when it
-    /// returns).
-    #[inline]
-    pub(crate) fn sync(&self, left: i64) {
-        self.fuel.set(self.fuel.get() - (self.synced.get() - left));
-    }
-
-    /// The fuel left for the interpreter (after it called a native).
-    #[inline]
-    pub(crate) fn resync(&self) -> i64 {
-        let f = self.fuel.get();
-        self.synced.set(f);
-        f
-    }
-
-    /// Fuel left in the current slice (negative if overspent).
-    #[inline]
-    pub fn fuel(&self) -> i64 {
-        self.fuel.get()
-    }
-
-    /// Fuel spent in the current slice.
-    pub fn spent(&self) -> u64 {
-        self.slice.get().saturating_sub(self.fuel.get()).max(0) as u64
-    }
-
-    /// Fuel used by the run so far (the interpreter's up to its last sync).
-    pub fn used(&self) -> u64 {
-        self.base.get().saturating_add(self.spent())
-    }
-
-    /// Refunds the fuel charged since [`Meter::fuel`] returned `mark`.
+    /// Verifies that `bytes` of temporary Rust buffer space fits within the VM
+    /// memory limit.
     ///
-    /// Keeps the next limit check within [`CHECK_INTERVAL`] of `mark`.
+    /// Skips the heap check until `bytes` reaches the next threshold, unless
+    /// retry stress testing forces a check.
     #[inline]
-    pub(crate) fn refund_to(&self, mark: i64) {
-        self.fuel.set(mark);
-        self.check_at.set(self.check_at.get().max(mark.saturating_sub(CHECK_INTERVAL)));
-    }
-
-    /// Resets the fuel counter to zero and replaces the interrupt flag for a
-    /// new session run.
-    pub(crate) fn reset(&mut self, interrupt: Arc<AtomicBool>) {
-        self.base.set(0);
-        self.slice.set(self.fuel.get());
-        self.interrupt = interrupt;
-    }
-
-    /// Charges `units` of fuel. Cheap; checks limits only at checkpoints.
-    #[inline]
-    pub fn charge(&self, units: u64) -> Result<(), Fail> {
-        let f = self.fuel.get().saturating_sub(units.min(i64::MAX as u64) as i64);
-        self.fuel.set(f);
-        if f < self.check_at.get() { self.checkpoint() } else { Ok(()) }
-    }
-
-    /// Charges for `n` bytes of memcpy-like work.
-    #[inline]
-    pub fn charge_bytes(&self, n: usize) -> Result<(), Fail> {
-        self.charge((n / BYTES_PER_UNIT) as u64)
-    }
-
-    /// Charges for `n` bytes of byte-at-a-time work.
-    #[inline]
-    pub fn charge_slow_bytes(&self, n: usize) -> Result<(), Fail> {
-        self.charge((n / SLOW_BYTES_PER_UNIT) as u64)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn checkpoint(&self) -> Result<(), Fail> {
-        // `fuel` falls below `limit_at` exactly when the fuel used exceeds
-        // the instruction budget: the next check is no later than that.
-        let limit_at = match self.max_instructions {
-            Some(max) => (i128::from(self.base.get()) + i128::from(self.slice.get()) - i128::from(max))
-                .clamp(i64::MIN.into(), i64::MAX.into()) as i64,
-            None => i64::MIN,
-        };
-        self.check_at.set(self.fuel.get().saturating_sub(CHECK_INTERVAL).max(limit_at));
-        self.check()
-    }
-
-    /// Checks the interrupt flag, the instruction budget and the time
-    /// limits now.
-    pub fn check(&self) -> Result<(), Fail> {
-        if self.interrupt.load(Ordering::Relaxed) {
-            return Err(Fail::interrupted());
+    pub fn check_memory(&mut self, heap: &Heap, bytes: usize) -> Result<(), Fail> {
+        if bytes < self.next_check_bytes && !heap.fail_next_check.get() {
+            return Ok(());
         }
-        if let Some(max) = self.max_instructions
-            && self.used() > max
-        {
-            return Err(Fail::limit(LimitKind::Instructions));
-        }
-        if self.cpu_deadline.get().is_some_and(|d| self.clock.cpu_time() >= d) {
-            return Err(Fail::limit(LimitKind::CpuTime));
-        }
-        if self.wall_deadline.get().is_some_and(|d| self.clock.now() >= d) {
-            return Err(Fail::limit(LimitKind::WallTime));
-        }
-        Ok(())
+        self.next_check_bytes = bytes.saturating_add(SCRATCH_CHECK_BYTES);
+        heap.check_memory(bytes)
     }
 }
 
-impl Budget for Meter {
-    #[inline]
-    fn charge(&self, units: u64) -> Result<(), Fail> {
-        Meter::charge(self, units)
-    }
-
-    #[inline]
-    fn fuel_mark(&self) -> i64 {
-        self.fuel()
-    }
-
-    #[inline]
-    fn refund_to(&self, mark: i64) {
-        Meter::refund_to(self, mark);
+impl Default for ScratchMemoryTracker {
+    fn default() -> Self {
+        ScratchMemoryTracker::new()
     }
 }
 
-impl Meter {
-    /// A new allowance for work about to run off the VM thread.
-    pub(crate) fn allowance(&self) -> Allowance {
-        Allowance {
-            interrupt: self.interrupt.clone(),
-            abandoned: Arc::new(AtomicBool::new(false)),
-            deadline: self.wall_deadline.get().map(|at| Deadline { at, clock: self.clock.clone() }),
-            left: self.max_instructions.map_or(u64::MAX, |max| max.saturating_sub(self.used())),
-            used: 0,
-            next_check: 0,
-            stopped: false,
-        }
-    }
+/// Computes the extra fuel needed to bound straight-line bytecode between safe
+/// points.
+///
+/// The interpreter deducts base fuel only at calls and loop back edges.
+/// Without a surcharge proportional to block length, the interpreter could
+/// execute a huge function or closure capture copy for a single fuel unit and
+/// delay limit checks. Callers add this surcharge to the base cost of entering
+/// a function, starting a task, or copying closure captures. Blocks shorter
+/// than 64 instructions add zero surcharge.
+#[inline(always)]
+pub const fn code_fuel_surcharge(instructions: usize) -> i64 {
+    (instructions >> INSTRUCTIONS_PER_FUEL_SHIFT) as i64
 }
 
-/// Fuel for work done off the VM thread, such as walking a directory tree
-/// on a worker. The meter cannot see that work while it runs, so the work
-/// charges its allowance instead. A charge fails once the engine is
-/// interrupted, the wall-time deadline passes, the instructions left when
-/// the work started are spent, or the VM stops waiting for it; the work
-/// must then stop. Afterwards the VM charges the meter for what was used.
-pub(crate) struct Allowance {
-    interrupt: Arc<AtomicBool>,
-    abandoned: Arc<AtomicBool>,
-    deadline: Option<Deadline>,
-    left: u64,
-    used: u64,
-    next_check: u64,
+/// Computes the total fuel cost of a loop back edge so long loop bodies cannot
+/// bypass execution limits.
+///
+/// Pass the negative jump offset of the backward branch. The returned cost
+/// includes the base unit for the back edge plus an extra unit for each 64
+/// instructions jumped over.
+#[inline(always)]
+pub const fn back_edge_fuel(back_offset: i32) -> i64 {
+    -((back_offset >> INSTRUCTIONS_PER_FUEL_SHIFT) as i64)
+}
+
+/// Bytes charged as a single fuel unit for bulk memory work such as copying,
+/// comparing, and scanning.
+pub const BYTES_PER_FUEL_UNIT: usize = 64;
+
+/// Bytes charged as a single fuel unit for per-byte work such as hashing,
+/// regex search, and encoding.
+pub const SLOW_BYTES_PER_FUEL_UNIT: usize = 8;
+
+/// Fuel units spent between limit checks after the current slice is exhausted.
+pub const LIMIT_CHECK_FUEL_INTERVAL: i64 = 20_000;
+
+/// Buffer growth in bytes between memory-limit checks in
+/// [`ScratchMemoryTracker`].
+pub const SCRATCH_CHECK_BYTES: usize = 64 << 10;
+
+/// Bit shift for straight-line bytecode instructions per fuel unit: `1 << 6`,
+/// or 64 instructions.
+pub const INSTRUCTIONS_PER_FUEL_SHIFT: u32 = 6;
+
+/// Enforces fuel, deadline, and cancellation limits for blocking work offloaded
+/// to a worker thread.
+///
+/// Because [`Meter`] is bound to the VM thread, offloaded jobs charge this
+/// allowance instead. A charge returns [`OffloadStopped`] if the engine is
+/// interrupted, the clock passes the wall-clock deadline, the worker exceeds
+/// the starting instruction budget, or the VM stops waiting. After the job
+/// finishes, the VM charges its [`Meter`] for [`OffloadAllowance::fuel_used`].
+pub(crate) struct OffloadAllowance {
+    interrupt_flag: Arc<AtomicBool>,
+    abandoned_flag: Arc<AtomicBool>,
+    wall_deadline: Option<Deadline>,
+    fuel_limit: u64,
+    fuel_used: u64,
+    next_deadline_check_fuel: u64,
     stopped: bool,
 }
 
-/// The error of a failed [`Allowance`] charge: the work must stop.
+/// Signals that an offloaded job hit an execution limit or cancellation and
+/// must stop immediately.
 #[derive(Debug)]
-pub(crate) struct Stopped;
+pub(crate) struct OffloadStopped;
 
-impl Allowance {
-    /// Charges `units` of fuel.
-    pub fn charge(&mut self, units: u64) -> Result<(), Stopped> {
-        self.used = self.used.saturating_add(units);
-        self.stopped |= self.used > self.left || self.interrupt.load(Ordering::Relaxed) || self.abandoned.load(Ordering::Relaxed);
-        if !self.stopped && self.used >= self.next_check {
-            self.next_check = self.used.saturating_add(CHECK_INTERVAL as u64 / 16);
-            self.stopped = self.deadline.as_ref().is_some_and(Deadline::passed);
+impl OffloadAllowance {
+    /// Charges `units` of fuel for offloaded work and returns
+    /// [`OffloadStopped`] if the worker must abort.
+    pub fn charge(&mut self, units: u64) -> Result<(), OffloadStopped> {
+        self.fuel_used = self.fuel_used.saturating_add(units);
+        self.stopped |=
+            self.fuel_used > self.fuel_limit || self.interrupt_flag.load(Ordering::Relaxed) || self.abandoned_flag.load(Ordering::Relaxed);
+        if !self.stopped && self.fuel_used >= self.next_deadline_check_fuel {
+            self.next_deadline_check_fuel = self.fuel_used.saturating_add(LIMIT_CHECK_FUEL_INTERVAL as u64 / 16);
+            self.stopped = self.wall_deadline.as_ref().is_some_and(Deadline::passed);
         }
-        if self.stopped { Err(Stopped) } else { Ok(()) }
+        if self.stopped { Err(OffloadStopped) } else { Ok(()) }
     }
 
-    /// Whether a charge has failed.
-    pub fn stopped(&self) -> bool {
+    /// Charges fuel for `byte_count` bytes of bulk memory work on a worker
+    /// thread.
+    pub fn charge_bytes(&mut self, byte_count: usize) -> Result<(), OffloadStopped> {
+        self.charge((byte_count / BYTES_PER_FUEL_UNIT) as u64)
+    }
+
+    /// Returns `true` if a previous charge triggered a stop.
+    ///
+    /// The VM uses this flag to discard the offloaded result.
+    pub fn is_stopped(&self) -> bool {
         self.stopped
     }
 
-    /// Charges for `n` bytes of memcpy-like work.
-    pub fn charge_bytes(&mut self, n: usize) -> Result<(), Stopped> {
-        self.charge((n / BYTES_PER_UNIT) as u64)
+    /// Returns total fuel charged on the worker thread so the VM can apply it
+    /// to [`Meter`].
+    pub fn fuel_used(&self) -> u64 {
+        self.fuel_used
     }
 
-    pub fn used(&self) -> u64 {
-        self.used
-    }
-
-    /// The flag that makes further charges fail. The VM sets it when it
-    /// stops waiting for the work.
+    /// Returns a shared flag that the VM sets to cancel the worker after the VM
+    /// stops waiting for it.
     #[cfg(feature = "os")]
     pub fn abandon_flag(&self) -> Arc<AtomicBool> {
-        self.abandoned.clone()
-    }
-}
-
-/// Tracks a growing Rust-side buffer (output string, scratch vector) against
-/// the memory limit, checking every [`SCRATCH_STEP`] bytes of growth.
-pub struct Scratch {
-    next: usize,
-}
-
-impl Default for Scratch {
-    fn default() -> Self {
-        Scratch::new()
-    }
-}
-
-impl Scratch {
-    pub fn new() -> Scratch {
-        Scratch { next: SCRATCH_STEP }
-    }
-
-    /// Fails with a memory limit error if `len` bytes of scratch space would
-    /// exceed the limit (checked only when `len` has grown enough).
-    #[inline]
-    pub fn check(&mut self, heap: &Heap, len: usize) -> Result<(), Fail> {
-        if len < self.next && !heap.fail_next_check.get() {
-            return Ok(());
-        }
-        self.next = len.saturating_add(SCRATCH_STEP);
-        heap.check_memory(len)
+        self.abandoned_flag.clone()
     }
 }
 
@@ -400,76 +449,76 @@ mod tests {
     use super::super::{FailKind, SLICE_FUEL};
     use super::*;
 
-    fn system() -> Arc<dyn Clock> {
+    fn system_clock() -> Arc<dyn Clock> {
         Arc::new(crate::platform::SystemClock)
     }
 
     #[test]
     fn charges_are_free_until_the_slice_is_spent() {
-        let m = Meter::new(Some(100_000), Arc::new(AtomicBool::new(false)), system());
-        assert_eq!(m.start_slice(None, None), SLICE_FUEL);
-        assert!(m.charge(50).is_ok());
-        assert_eq!((m.fuel(), m.used()), (SLICE_FUEL - 50, 50));
-        // Overspending the slice triggers a check: the budget is not exceeded.
-        assert!(m.charge(SLICE_FUEL as u64).is_ok());
-        assert_eq!(m.used(), SLICE_FUEL as u64 + 50);
-        assert!(matches!(m.charge(100_000).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
+        let meter = Meter::new(Some(100_000), Arc::new(AtomicBool::new(false)), system_clock());
+        assert_eq!(meter.start_slice(None, None), SLICE_FUEL);
+        assert!(meter.charge(50).is_ok());
+        assert_eq!((meter.remaining_slice_fuel(), meter.total_fuel_used()), (SLICE_FUEL - 50, 50));
+        // Overspending the slice triggers a limit check. The budget is still sufficient.
+        assert!(meter.charge(SLICE_FUEL as u64).is_ok());
+        assert_eq!(meter.total_fuel_used(), SLICE_FUEL as u64 + 50);
+        assert!(matches!(meter.charge(100_000).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
     }
 
     #[test]
     fn the_instruction_limit_is_checked_exactly() {
-        let m = Meter::new(Some(1000), Arc::new(AtomicBool::new(false)), system());
-        // The slice ends where the budget does.
-        assert_eq!(m.start_slice(None, None), 1000);
-        // The interpreter spends 300 units, then a native the rest.
-        m.sync(700);
-        assert_eq!(m.used(), 300);
-        assert!(m.charge(700).is_ok(), "1000 units used");
-        assert!(matches!(m.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
-        assert_eq!(m.resync(), -1);
-        // Past the end of a slice, checks stay no later than the limit.
-        let m = Meter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)), system());
-        m.start_slice(None, None);
-        assert!(m.charge(SLICE_FUEL as u64 + 1).is_ok());
-        assert_eq!(m.check_at.get(), -1 - CHECK_INTERVAL);
-        assert!(m.charge(1_000_000 - SLICE_FUEL as u64 - 1).is_ok(), "1,000,000 units used");
-        assert!(matches!(m.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
-        // Charges between slices count too.
-        let mut m = Meter::new(Some(100), Arc::new(AtomicBool::new(false)), system());
-        assert!(m.charge(60).is_ok());
-        assert_eq!(m.start_slice(None, None), 40);
-        m.reset(Arc::new(AtomicBool::new(false)));
-        assert_eq!((m.used(), m.start_slice(None, None)), (0, 100));
+        let meter = Meter::new(Some(1000), Arc::new(AtomicBool::new(false)), system_clock());
+        // The slice ends at the instruction budget.
+        assert_eq!(meter.start_slice(None, None), 1000);
+        // The interpreter spends 300 units, then a native call spends the rest.
+        meter.flush_interpreter_fuel(700);
+        assert_eq!(meter.total_fuel_used(), 300);
+        assert!(meter.charge(700).is_ok(), "1000 units used");
+        assert!(matches!(meter.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
+        assert_eq!(meter.reload_interpreter_fuel(), -1);
+        // After the slice ends, checkpoints stay at or before the instruction limit.
+        let meter = Meter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)), system_clock());
+        meter.start_slice(None, None);
+        assert!(meter.charge(SLICE_FUEL as u64 + 1).is_ok());
+        assert_eq!(meter.next_limit_check_fuel.get(), -1 - LIMIT_CHECK_FUEL_INTERVAL);
+        assert!(meter.charge(1_000_000 - SLICE_FUEL as u64 - 1).is_ok(), "1,000,000 units used");
+        assert!(matches!(meter.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
+        // Charges between slices count toward the run total.
+        let mut meter = Meter::new(Some(100), Arc::new(AtomicBool::new(false)), system_clock());
+        assert!(meter.charge(60).is_ok());
+        assert_eq!(meter.start_slice(None, None), 40);
+        meter.reset_for_run(Arc::new(AtomicBool::new(false)));
+        assert_eq!((meter.total_fuel_used(), meter.start_slice(None, None)), (0, 100));
     }
 
     #[test]
     fn refund_to_restores_checkpoint_interval() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let m = Meter::new(None, flag.clone(), system());
-        m.start_slice(None, None);
-        let mark = m.fuel();
-        assert!(m.charge(SLICE_FUEL as u64 + 1).is_ok(), "checkpoint advances check_at");
-        m.refund_to(mark);
-        flag.store(true, Ordering::SeqCst);
-        assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Interrupted)));
+        let interrupt_flag = Arc::new(AtomicBool::new(false));
+        let meter = Meter::new(None, interrupt_flag.clone(), system_clock());
+        meter.start_slice(None, None);
+        let mark = meter.remaining_slice_fuel();
+        assert!(meter.charge(SLICE_FUEL as u64 + 1).is_ok(), "checkpoint advances next_limit_check_fuel");
+        meter.refund_to(mark);
+        interrupt_flag.store(true, Ordering::SeqCst);
+        assert!(matches!(meter.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Interrupted)));
     }
 
     #[test]
     fn interrupt_is_seen_at_checkpoints() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let m = Meter::new(None, flag.clone(), system());
-        m.start_slice(None, None);
-        flag.store(true, Ordering::SeqCst);
-        assert!(m.charge(5).is_ok(), "no check while fuel is left");
-        assert!(matches!(m.charge(SLICE_FUEL as u64).map_err(Fail::into_kind), Err(FailKind::Interrupted)));
+        let interrupt_flag = Arc::new(AtomicBool::new(false));
+        let meter = Meter::new(None, interrupt_flag.clone(), system_clock());
+        meter.start_slice(None, None);
+        interrupt_flag.store(true, Ordering::SeqCst);
+        assert!(meter.charge(5).is_ok(), "limit check is skipped while slice fuel remains");
+        assert!(matches!(meter.charge(SLICE_FUEL as u64).map_err(Fail::into_kind), Err(FailKind::Interrupted)));
     }
 
     #[test]
     fn deadlines() {
-        let m = Meter::new(None, Arc::new(AtomicBool::new(false)), system());
-        m.start_slice(Some(system().cpu_time()), None);
-        assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::CpuTime))));
-        m.start_slice(None, Some(Instant::now()));
-        assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::WallTime))));
+        let meter = Meter::new(None, Arc::new(AtomicBool::new(false)), system_clock());
+        meter.start_slice(Some(system_clock().cpu_time()), None);
+        assert!(matches!(meter.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::CpuTime))));
+        meter.start_slice(None, Some(Instant::now()));
+        assert!(matches!(meter.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::WallTime))));
     }
 }

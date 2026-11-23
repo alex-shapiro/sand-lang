@@ -126,7 +126,7 @@ pub(crate) enum FailKind {
     /// Broken engine invariant that ends the session.
     Internal(String),
     Limit(LimitKind),
-    /// Host interrupt (see `Meter::check`).
+    /// Host interrupt (see `Meter::check_limits`).
     Interrupted,
     Exit(i32),
 }
@@ -785,7 +785,7 @@ impl Vm {
     /// Attaches `call` as the active interrupt. `call` must share the VM's
     /// [`sched::HostWakeState`].
     pub(crate) fn begin_session_run(&mut self, call: &crate::engine::CallInterrupt) {
-        self.meter.reset(call.flag.clone());
+        self.meter.reset_for_run(call.flag.clone());
         self.host.output_bytes = 0;
         self.host.interrupt = call.clone();
     }
@@ -1151,27 +1151,30 @@ impl Vm {
     /// runs on a worker thread, and the VM stops waiting for it when the
     /// meter reports an interrupt or a limit. With a memory file system,
     /// the job runs on this thread. The job charges its
-    /// [`meter::Allowance`], and the meter is then charged the same amount.
+    /// [`meter::OffloadAllowance`], and the meter is then charged the same amount.
     /// If a charge to the allowance failed, the job's result is discarded
     /// and the meter's error is returned.
-    pub(crate) fn offload<T: Send + 'static>(&self, job: impl FnOnce(&mut meter::Allowance) -> T + Send + 'static) -> Result<T, Fail> {
-        let mut allowance = self.meter.allowance();
+    pub(crate) fn offload<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&mut meter::OffloadAllowance) -> T + Send + 'static,
+    ) -> Result<T, Fail> {
+        let mut allowance = self.meter.offload_allowance();
         let finish = |t: T, used: u64, stopped: bool| {
             self.meter.charge(used)?;
             if stopped { Err(self.stopped()) } else { Ok(t) }
         };
         if self.host.fs.memory().is_some() {
             let t = job(&mut allowance);
-            return finish(t, allowance.used(), allowance.stopped());
+            return finish(t, allowance.fuel_used(), allowance.is_stopped());
         }
         #[cfg(feature = "os")]
         {
             let abandon = allowance.abandon_flag();
             let pending = crate::platform::offload(move || {
                 let t = job(&mut allowance);
-                (t, allowance.used(), allowance.stopped())
+                (t, allowance.fuel_used(), allowance.is_stopped())
             });
-            match pending.wait(|| self.meter.check()) {
+            match pending.wait(|| self.meter.check_limits()) {
                 Ok(Ok((t, used, stopped))) => finish(t, used, stopped),
                 Ok(Err(panic)) => Err(Fail::internal(panic)),
                 Err(c) => {
@@ -1184,9 +1187,9 @@ impl Vm {
         unreachable!("without the `os` feature, the file system is in memory")
     }
 
-    /// The error to return when a charge to a [`meter::Allowance`] failed.
+    /// The error to return when a charge to a [`meter::OffloadAllowance`] failed.
     fn stopped(&self) -> Fail {
-        self.meter.check().err().unwrap_or_else(Fail::interrupted)
+        self.meter.check_limits().err().unwrap_or_else(Fail::interrupted)
     }
 
     /// Forgets "once" answers. They hold while a native is retried after
@@ -1236,7 +1239,7 @@ impl Vm {
     /// meter reports an interrupt or a limit first.
     fn wait_backlog(&self, sink: &SharedSink, max: usize) -> Result<(), Fail> {
         while !sink.wait_backlog(max, std::time::Duration::from_millis(5)) {
-            self.meter.check()?;
+            self.meter.check_limits()?;
         }
         Ok(())
     }
@@ -1465,7 +1468,7 @@ impl Vm {
         }
         if let Obj::Closure(p, _) = self.heap.get(closure) {
             let p = &self.prog.protos[*p as usize];
-            self.meter.charge(meter::code_fuel(p.code.len() + p.nregs as usize) as u64)?;
+            self.meter.charge(meter::code_fuel_surcharge(p.code.len() + p.nregs as usize) as u64)?;
         }
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: u32::MAX, state: TaskState::Running, result: VmValue::Unit })));
         let fid = self.spawn_fiber(closure, task)?;

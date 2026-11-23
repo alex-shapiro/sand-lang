@@ -17,7 +17,7 @@ use crate::native::ty::VmVal;
 use crate::native::{NativeModule, NativeObject};
 use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
-use crate::vm::meter::{Allowance, Stopped};
+use crate::vm::meter::{OffloadAllowance, OffloadStopped};
 use crate::vm::value::to_usize_saturating;
 use crate::vm::{Ctl, CtlKind, Fail, Permits, Vm};
 use std::io;
@@ -300,15 +300,15 @@ enum Halt {
     Denied(PathBuf),
 }
 
-impl From<Stopped> for Halt {
-    fn from(_: Stopped) -> Halt {
+impl From<OffloadStopped> for Halt {
+    fn from(_: OffloadStopped) -> Halt {
         Halt::Stopped
     }
 }
 
 /// Charges for visiting the entry `path` of a tree, which includes reading
 /// the entry, checking it against the policy and acting on it.
-fn charge_entry(allowance: &mut Allowance, path: &Path) -> Result<(), Stopped> {
+fn charge_entry(allowance: &mut OffloadAllowance, path: &Path) -> Result<(), OffloadStopped> {
     allowance.charge(4 + SYSCALL_FUEL)?;
     allowance.charge_bytes(path.as_os_str().len().saturating_mul(4))
 }
@@ -323,7 +323,7 @@ fn scan_tree(
     to: Option<&Path>,
     permits: Option<&Permits>,
     res: &mut Reservation,
-    allowance: &mut Allowance,
+    allowance: &mut OffloadAllowance,
 ) -> Result<io::Result<()>, Halt> {
     let space = fs.space();
     let denies = policy.denies_under_normalized_in(&t.path, space) || to.is_some_and(|to| policy.denies_under_normalized_in(to, space));
@@ -903,7 +903,7 @@ fn read_rest<R: IntoVmValue>(
         let (data, res) = match read {
             Ok(Ok(read)) => read,
             Ok(Err(e)) => return Ok(Err(e)),
-            Err(Stopped) => unreachable!("`offload` reports a stopped read"),
+            Err(OffloadStopped) => unreachable!("`offload` reports a stopped read"),
         };
         // What was read is consumed: from here on, a failure is not a retry.
         drop(res);
@@ -919,8 +919,8 @@ fn read_to_end(
     f: &mut OpenedFile,
     data: &mut Vec<u8>,
     res: &mut Reservation,
-    allowance: &mut Allowance,
-) -> Result<io::Result<()>, Stopped> {
+    allowance: &mut OffloadAllowance,
+) -> Result<io::Result<()>, OffloadStopped> {
     let mut chunk = [0u8; 8192];
     loop {
         allowance.charge(SYSCALL_FUEL)?;

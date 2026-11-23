@@ -1,11 +1,11 @@
 //! Structural equality, ordering and hashing of values. All algorithms are
 //! iterative (deep values cannot overflow the host stack), use scratch space
-//! proportional to nesting depth, and charge a [`Budget`] one unit per node
+//! proportional to nesting depth, and charge a [`FuelBudget`] one unit per node
 //! plus the bytes compared, so comparing huge values can be interrupted.
 
 use super::bytecode::Program;
 use super::heap::Heap;
-use super::meter::{Budget, Unmetered};
+use super::meter::{FuelBudget, UnlimitedMeter};
 use super::value::*;
 use super::{Fail, without_trait};
 use std::cmp::Ordering;
@@ -112,7 +112,7 @@ impl Small {
         (self.nodes <= SMALL_NODES).then_some(())
     }
 
-    fn charge(&self, budget: &impl Budget) -> Result<(), Fail> {
+    fn charge(&self, budget: &impl FuelBudget) -> Result<(), Fail> {
         budget.charge(self.nodes as u64)?;
         budget.charge_bytes(self.bytes)
     }
@@ -214,7 +214,7 @@ fn hash_small(heap: &Heap, v: VmValue, depth: u32, w: &mut Small) -> Option<u64>
                 return Some(bytes_hash(b));
             }
             Obj::Tuple(f) | Obj::Struct(_, f) | Obj::Variant(_, f) => &**f,
-            _ => return leaf_hash(heap, &Unmetered, v).ok()?,
+            _ => return leaf_hash(heap, &UnlimitedMeter, v).ok()?,
         },
         _ => match v.as_inline_variant() {
             Some((_, p)) => {
@@ -222,7 +222,7 @@ fn hash_small(heap: &Heap, v: VmValue, depth: u32, w: &mut Small) -> Option<u64>
                 h.write_u64(hash_small(heap, p, depth.checked_sub(1)?, w)?);
                 return Some(h.finish());
             }
-            None => return leaf_hash(heap, &Unmetered, v).ok()?,
+            None => return leaf_hash(heap, &UnlimitedMeter, v).ok()?,
         },
     };
     let depth = depth.checked_sub(1)?;
@@ -236,7 +236,7 @@ fn hash_small(heap: &Heap, v: VmValue, depth: u32, w: &mut Small) -> Option<u64>
 /// Deep structural equality. Floats at the top level use IEEE semantics;
 /// inside composites NaN equals NaN.
 pub fn values_eq(heap: &Heap, a: VmValue, b: VmValue) -> bool {
-    values_eq_metered(heap, &Unmetered, a, b).unwrap_or(false)
+    values_eq_metered(heap, &UnlimitedMeter, a, b).unwrap_or(false)
 }
 
 /// Pending work of an equality check.
@@ -249,7 +249,7 @@ enum EqWork {
 }
 
 /// [`values_eq`], charging `budget` for the work.
-pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
+pub fn values_eq_metered(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => return Ok(x == y),
         (VmValue::Obj(x), VmValue::Obj(y)) if x == y => return Ok(true),
@@ -382,13 +382,13 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: VmValue, b: VmVal
     Ok(true)
 }
 
-fn map_lookup_value(heap: &Heap, budget: &impl Budget, m: &MapObj, k: VmValue) -> Result<Option<VmValue>, Fail> {
+fn map_lookup_value(heap: &Heap, budget: &impl FuelBudget, m: &MapObj, k: VmValue) -> Result<Option<VmValue>, Fail> {
     Ok(map_slot(heap, budget, m, k)?.and_then(|s| m.entries[s].map(|(_, v)| v)))
 }
 
 /// The slot of key `k` in map `m`.
 #[inline]
-pub fn map_slot(heap: &Heap, budget: &impl Budget, m: &MapObj, k: VmValue) -> Result<Option<usize>, Fail> {
+pub fn map_slot(heap: &Heap, budget: &impl FuelBudget, m: &MapObj, k: VmValue) -> Result<Option<usize>, Fail> {
     if m.live == 0 {
         return Ok(None);
     }
@@ -428,7 +428,7 @@ pub fn set_has_int(s: &SetObj, i: i64) -> bool {
 #[inline]
 pub fn find_entry<T>(
     heap: &Heap,
-    budget: &impl Budget,
+    budget: &impl FuelBudget,
     table: &KeyIndex,
     hash: u64,
     k: VmValue,
@@ -442,7 +442,7 @@ pub fn find_entry<T>(
 }
 
 /// The slot of the tuple key whose elements are `items` in map `m`.
-pub fn map_slot_tuple(heap: &Heap, budget: &impl Budget, m: &MapObj, items: &[VmValue]) -> Result<Option<usize>, Fail> {
+pub fn map_slot_tuple(heap: &Heap, budget: &impl FuelBudget, m: &MapObj, items: &[VmValue]) -> Result<Option<usize>, Fail> {
     if let [a, b] = *items
         && let Some(k) = VmValue::tuple2(a, b)
     {
@@ -476,7 +476,7 @@ pub fn map_slot_tuple(heap: &Heap, budget: &impl Budget, m: &MapObj, items: &[Vm
 
 /// The slot of element `k` in set `s`.
 #[inline]
-pub fn set_slot(heap: &Heap, budget: &impl Budget, s: &SetObj, k: VmValue) -> Result<Option<usize>, Fail> {
+pub fn set_slot(heap: &Heap, budget: &impl FuelBudget, s: &SetObj, k: VmValue) -> Result<Option<usize>, Fail> {
     if s.live == 0 {
         return Ok(None);
     }
@@ -489,7 +489,7 @@ pub fn set_slot(heap: &Heap, budget: &impl Budget, s: &SetObj, k: VmValue) -> Re
     find_key(heap, budget, &s.index, hash, k, |i| s.entries[i])
 }
 
-fn set_lookup(heap: &Heap, budget: &impl Budget, s: &SetObj, k: VmValue) -> Result<Option<usize>, Fail> {
+fn set_lookup(heap: &Heap, budget: &impl FuelBudget, s: &SetObj, k: VmValue) -> Result<Option<usize>, Fail> {
     set_slot(heap, budget, s, k)
 }
 
@@ -498,7 +498,7 @@ fn set_lookup(heap: &Heap, budget: &impl Budget, s: &SetObj, k: VmValue) -> Resu
 #[inline]
 pub fn find_key(
     heap: &Heap,
-    budget: &impl Budget,
+    budget: &impl FuelBudget,
     table: &KeyIndex,
     hash: u64,
     k: VmValue,
@@ -516,7 +516,7 @@ pub fn find_key(
 /// charges `budget`.
 #[inline]
 fn find_metered(
-    budget: &impl Budget,
+    budget: &impl FuelBudget,
     table: &KeyIndex,
     key: VmValue,
     hash: u64,
@@ -543,7 +543,7 @@ fn find_metered(
 
 /// Equality of two keys (of a `Hash` type).
 #[inline]
-pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
+pub fn keys_eq(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     match (a, b) {
         (VmValue::Int(x), VmValue::Int(y)) => Ok(x == y),
         (VmValue::Obj(x), VmValue::Obj(y)) if x == y => Ok(true),
@@ -567,7 +567,7 @@ pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: VmValue, b: VmValue) -> Res
 /// substructure are hashed in time linear in their heap size. Returns an
 /// internal error if `v` has a type that does not implement `Hash`.
 #[inline]
-pub fn hash_key(heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<u64, Fail> {
+pub fn hash_key(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<u64, Fail> {
     // Fast paths, inlined: the common scalar and string keys.
     match v {
         VmValue::Int(i) => Ok(int_hash(i)),
@@ -585,7 +585,7 @@ pub fn hash_key(heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<u64, Fa
 
 /// [`hash_key`] for keys that are not ints or strings.
 #[inline(never)]
-fn hash_composite(heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<u64, Fail> {
+fn hash_composite(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<u64, Fail> {
     let mut w = Small::default();
     match hash_small(heap, v, SMALL_DEPTH, &mut w) {
         Some(h) => {
@@ -597,7 +597,7 @@ fn hash_composite(heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<u64, 
 }
 
 /// [`hash_key`] of any key, memoizing the hashes of large ones.
-fn hash_tree(heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<u64, Fail> {
+fn hash_tree(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<u64, Fail> {
     let mut stack = HashStack::default();
     let mut memo: Option<FxHashMap<u32, u64>> = None;
     let mut nodes = 0usize;
@@ -684,7 +684,7 @@ fn bytes_hash(b: &[u8]) -> u64 {
 /// Computes the hash of `v` if `v` is a scalar or leaf object, or returns
 /// `Ok(None)` if `v` is a composite container (tuple, struct, or payload variant).
 #[inline]
-fn leaf_hash(heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<Option<u64>, Fail> {
+fn leaf_hash(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<Option<u64>, Fail> {
     let mut h = FxHasher::default();
     match v {
         VmValue::Unit | VmValue::Uninit => h.write_u8(0),
@@ -833,7 +833,7 @@ fn variant_index(prog: &Program, id: u32) -> u32 {
 
 /// Total ordering used by `sort` and comparisons of composite values.
 pub fn values_cmp(prog: &Program, heap: &Heap, a: VmValue, b: VmValue) -> Ordering {
-    values_cmp_metered(prog, heap, &Unmetered, a, b).unwrap_or(Ordering::Equal)
+    values_cmp_metered(prog, heap, &UnlimitedMeter, a, b).unwrap_or(Ordering::Equal)
 }
 
 /// Pending work of an ordering comparison.
@@ -850,7 +850,7 @@ enum CmpWork {
 
 /// [`values_cmp`], charging `budget` for the work. Comparisons are
 /// lexicographic and stop at the first difference.
-pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: VmValue, b: VmValue) -> Result<Ordering, Fail> {
+pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<Ordering, Fail> {
     // Fast paths for the common element types of sorted lists.
     match (a, b) {
         (VmValue::Int(x), VmValue::Int(y)) | (VmValue::Dur(x), VmValue::Dur(y)) => {
@@ -867,7 +867,7 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: 
         }
         (VmValue::Obj(_), VmValue::Obj(_)) => match (heap.get(a), heap.get(b)) {
             (Obj::Str(p), Obj::Str(q)) => {
-                budget.charge(1 + (p.len().min(q.len()) / super::meter::BYTES_PER_UNIT) as u64)?;
+                budget.charge(1 + (p.len().min(q.len()) / super::meter::BYTES_PER_FUEL_UNIT) as u64)?;
                 return Ok(p.as_bytes().cmp(q.as_bytes()));
             }
             (x, y)
@@ -999,7 +999,7 @@ pub fn values_le(prog: &Program, heap: &Heap, a: VmValue, b: VmValue) -> bool {
 }
 
 /// [`values_lt`], charging `budget`.
-pub fn values_lt_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
+pub fn values_lt_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => x < y,
         _ => values_cmp_metered(prog, heap, budget, a, b)? == Ordering::Less,
@@ -1007,7 +1007,7 @@ pub fn values_lt_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: V
 }
 
 /// [`values_le`], charging `budget`.
-pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
+pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => x <= y,
         _ => values_cmp_metered(prog, heap, budget, a, b)? != Ordering::Greater,
@@ -1016,7 +1016,7 @@ pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: V
 
 /// If all elements in `v` have the same packed value type with `ordered_bits`,
 /// sorts `v` by its packed bits. Returns `None` otherwise.
-pub fn try_sort_packed(v: &mut [VmValue], heap: &Heap, budget: &impl Budget) -> Option<Result<(), Fail>> {
+pub fn try_sort_packed(v: &mut [VmValue], heap: &Heap, budget: &impl FuelBudget) -> Option<Result<(), Fail>> {
     let packed = |x: &VmValue| match x {
         VmValue::Obj(h) => match heap.obj(*h) {
             Obj::Packed(t, bits) => Some((*t, *bits)),
@@ -1037,7 +1037,7 @@ pub fn try_sort_packed(v: &mut [VmValue], heap: &Heap, budget: &impl Budget) -> 
 /// charged to `budget` before each bounded step (sorting one chunk, or one
 /// merge pass), so limits are checked in between. On error `v` holds a
 /// permutation of its elements.
-pub fn try_sort_numbers(v: &mut [VmValue], budget: &impl Budget) -> Option<Result<(), Fail>> {
+pub fn try_sort_numbers(v: &mut [VmValue], budget: &impl FuelBudget) -> Option<Result<(), Fail>> {
     match v.first()? {
         VmValue::Int(_) if v.iter().all(|x| matches!(x, VmValue::Int(_))) => {
             Some(sort_keys(v, budget, |x| x.as_int(), VmValue::Int, |a: &i64, b: &i64| a.cmp(b)))
@@ -1054,7 +1054,7 @@ pub fn try_sort_numbers(v: &mut [VmValue], budget: &impl Budget) -> Option<Resul
 
 fn sort_keys<K: Copy>(
     v: &mut [VmValue],
-    budget: &impl Budget,
+    budget: &impl FuelBudget,
     key: impl Fn(VmValue) -> K,
     value: fn(K) -> VmValue,
     cmp: fn(&K, &K) -> Ordering,
@@ -1249,18 +1249,18 @@ mod tests {
         for n in [0, 1, 2, 100, (1 << 15) - 1, 1 << 15, (1 << 15) + 1, 100_000, 300_001] {
             let ints: Vec<VmValue> = (0..n).map(|_| VmValue::Int((next() % 1000) as i64 - 500)).collect();
             let mut got = ints.clone();
-            assert!(matches!(try_sort_numbers(&mut got, &Unmetered), Some(Ok(())) | None));
+            assert!(matches!(try_sort_numbers(&mut got, &UnlimitedMeter), Some(Ok(())) | None));
             let mut want: Vec<i64> = ints.iter().map(|v| v.as_int()).collect();
             want.sort();
             assert_eq!(got.iter().map(|v| v.as_int()).collect::<Vec<_>>(), want, "n = {n}");
         }
         let specials = [f64::NAN, 1.0, -0.0, f64::NEG_INFINITY, 0.0, f64::INFINITY, -2.5];
         let mut floats: Vec<VmValue> = specials.iter().copied().cycle().take(70_001).map(VmValue::Float).collect();
-        try_sort_numbers(&mut floats, &Unmetered).unwrap().unwrap();
+        try_sort_numbers(&mut floats, &UnlimitedMeter).unwrap().unwrap();
         assert!(floats.windows(2).all(|w| total_cmp_f(w[0].as_float(), w[1].as_float()) != Ordering::Greater));
         assert!(floats.last().unwrap().as_float().is_nan());
         // Mixed lists use the generic sort.
-        assert!(try_sort_numbers(&mut [VmValue::Int(1), VmValue::Float(1.0)], &Unmetered).is_none());
+        assert!(try_sort_numbers(&mut [VmValue::Int(1), VmValue::Float(1.0)], &UnlimitedMeter).is_none());
     }
 
     #[derive(Default)]
@@ -1268,7 +1268,7 @@ mod tests {
         units: std::cell::Cell<i64>,
     }
 
-    impl Budget for CountingBudget {
+    impl FuelBudget for CountingBudget {
         fn charge(&self, units: u64) -> Result<(), Fail> {
             self.units.set(self.units.get() + units as i64);
             Ok(())
@@ -1289,7 +1289,7 @@ mod tests {
         let key = heap.new_str("a".repeat(6400));
         let equal = heap.new_str("a".repeat(6400));
         let other = heap.new_str("b".repeat(6400));
-        let hash = hash_key(&heap, &Unmetered, key).unwrap();
+        let hash = hash_key(&heap, &UnlimitedMeter, key).unwrap();
         let mut index = KeyIndex::default();
         index.insert(key, hash, 0);
 
@@ -1308,12 +1308,12 @@ mod tests {
         let tuple = heap.alloc(Obj::Tuple(vec![VmValue::Int(1), list].into()));
         let nested = heap.alloc(Obj::Tuple(vec![VmValue::Int(1), tuple].into()));
         for (v, what) in [(VmValue::Float(1.5), "a float"), (list, "a list"), (tuple, "a list"), (nested, "a list")] {
-            let e = hash_key(&heap, &Unmetered, v).unwrap_err();
+            let e = hash_key(&heap, &UnlimitedMeter, v).unwrap_err();
             let message = format!("{e:?}");
             assert!(matches!(e.into_kind(), FailKind::Internal(m) if m.starts_with(what)), "{message}");
         }
         let ok = heap.alloc(Obj::Tuple(vec![one, VmValue::Bool(true), VmValue::Unit].into()));
-        assert!(hash_key(&heap, &Unmetered, ok).is_ok());
+        assert!(hash_key(&heap, &UnlimitedMeter, ok).is_ok());
     }
 
     #[test]
@@ -1325,12 +1325,12 @@ mod tests {
         let in_tuple = |heap: &mut Heap, v: VmValue| heap.alloc(Obj::Tuple(vec![VmValue::Int(1), v].into()));
         let (t1, t2) = (in_tuple(&mut heap, m1), in_tuple(&mut heap, m2));
         for (a, b, what) in [(m1, m2, "a map is compared"), (t1, t2, "a map is compared"), (m1, s, "values of different types")] {
-            let e = values_cmp_metered(&prog, &heap, &Unmetered, a, b).unwrap_err();
+            let e = values_cmp_metered(&prog, &heap, &UnlimitedMeter, a, b).unwrap_err();
             let message = format!("{e:?}");
             assert!(matches!(e.into_kind(), FailKind::Internal(m) if m.starts_with(what)), "{message}");
         }
         let (x, y) = (in_tuple(&mut heap, s), in_tuple(&mut heap, VmValue::Bool(true)));
-        assert!(values_cmp_metered(&prog, &heap, &Unmetered, x, x).is_ok());
-        assert!(values_cmp_metered(&prog, &heap, &Unmetered, y, y).is_ok());
+        assert!(values_cmp_metered(&prog, &heap, &UnlimitedMeter, x, x).is_ok());
+        assert!(values_cmp_metered(&prog, &heap, &UnlimitedMeter, y, y).is_ok());
     }
 }

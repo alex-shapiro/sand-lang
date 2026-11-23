@@ -3,7 +3,7 @@
 use super::ty::{Never, Num, Param, Reflect, SandType, VmVal};
 use crate::types::traits;
 use crate::value::{NativeValue, Value, qualified_name, qualified_name_module};
-use crate::vm::meter::Scratch;
+use crate::vm::meter::ScratchMemoryTracker;
 use crate::vm::value::{Obj, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -33,7 +33,7 @@ pub trait FromVmValue: SandType {
 /// native call and enforces the VM memory limit.
 pub struct Conversion {
     bytes: usize,
-    scratch: Scratch,
+    scratch: ScratchMemoryTracker,
     depth: usize,
 }
 
@@ -45,7 +45,7 @@ pub(crate) fn enter_struct(depth: usize) -> Result<usize, Fail> {
 
 impl Conversion {
     pub(crate) fn new() -> Conversion {
-        Conversion { bytes: 0, scratch: Scratch::new(), depth: 0 }
+        Conversion { bytes: 0, scratch: ScratchMemoryTracker::new(), depth: 0 }
     }
 
     pub(crate) fn enter_struct<R>(&mut self, f: impl FnOnce(&mut Conversion) -> Result<R, Fail>) -> Result<R, Fail> {
@@ -58,7 +58,7 @@ impl Conversion {
     /// Records `bytes` of temporary Rust allocation and checks the VM memory limit.
     pub fn alloc(&mut self, vm: &Vm, bytes: usize) -> Result<(), Fail> {
         self.bytes = self.bytes.saturating_add(bytes);
-        self.scratch.check(&vm.heap, self.bytes)
+        self.scratch.check_memory(&vm.heap, self.bytes)
     }
 }
 

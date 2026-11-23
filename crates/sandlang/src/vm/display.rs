@@ -4,7 +4,7 @@ use super::Fail;
 use super::bytecode::Program;
 use super::compare::MAX_DEPTH;
 use super::heap::Heap;
-use super::meter::{BYTES_PER_UNIT, Budget, Scratch};
+use super::meter::{BYTES_PER_FUEL_UNIT, FuelBudget, ScratchMemoryTracker};
 use super::value::*;
 use crate::hir::FormatSpec;
 use std::fmt::Write as _;
@@ -107,17 +107,24 @@ const MAX_OUTPUT: usize = 1 << 30;
 /// [`render`], charging `budget` one unit per value plus the bytes written,
 /// and checking the output and work stack against the memory limit as they
 /// grow. Scratch space grows with the nesting depth, not the size of the value.
-pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue, debug: bool, out: &mut String) -> Result<(), Fail> {
+pub fn render_metered(
+    prog: &Program,
+    heap: &Heap,
+    budget: &impl FuelBudget,
+    v: VmValue,
+    debug: bool,
+    out: &mut String,
+) -> Result<(), Fail> {
     let mut work = vec![Work::Val(v, 0, debug)];
-    let mut scratch = Scratch::new();
+    let mut scratch = ScratchMemoryTracker::new();
     let mut charged = out.len();
     let error_def = prog.struct_types.get(&<crate::stdlib::core::Error as crate::native::NamedType>::rust_type()).copied();
     while let Some(w) = work.pop() {
-        if out.len() - charged >= BYTES_PER_UNIT {
+        if out.len() - charged >= BYTES_PER_FUEL_UNIT {
             budget.charge_bytes(out.len() - charged)?;
             charged = out.len();
         }
-        scratch.check(heap, out.len() + work.len() * std::mem::size_of::<Work>())?;
+        scratch.check_memory(heap, out.len() + work.len() * std::mem::size_of::<Work>())?;
         match w {
             Work::Text(t) => out.push_str(t),
             Work::Seq { obj, i, depth, names, close } => {
@@ -201,11 +208,11 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmVa
                         match heap.get(v) {
                             Obj::Str(_) | Obj::StrBuf(_) => {
                                 let s = heap.str(v);
-                                scratch.check(heap, out.len() + s.len())?;
+                                scratch.check_memory(heap, out.len() + s.len())?;
                                 if debug { escape_str_debug(s, out) } else { out.push_str(s) }
                             }
                             Obj::Bytes(b) => {
-                                scratch.check(heap, out.len() + b.len())?;
+                                scratch.check_memory(heap, out.len() + b.len())?;
                                 escape_bytes(b, out)
                             }
                             Obj::List(_) => {
@@ -233,7 +240,7 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmVa
                                 if Some(*def) == error_def && !debug {
                                     let msg = heap.str(fields[0]);
                                     let kind = heap.str(fields[1]);
-                                    scratch.check(heap, out.len() + kind.len() + msg.len())?;
+                                    scratch.check_memory(heap, out.len() + kind.len() + msg.len())?;
                                     let _ = write!(out, "{kind}: {msg}");
                                     continue;
                                 }
@@ -291,7 +298,7 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmVa
 }
 
 /// The display form of `v`, charging `budget` (see [`render_metered`]).
-pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<String, Fail> {
+pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<String, Fail> {
     match v {
         VmValue::Int(i) => return Ok(i.to_string()),
         VmValue::Float(f) => return Ok(fmt_float(f)),
@@ -311,7 +318,7 @@ pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: 
 
 /// Appends the display form of `v` to `out`, charging `budget` (see
 /// [`render_metered`]).
-pub fn write_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue, out: &mut String) -> Result<(), Fail> {
+pub fn write_display_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, v: VmValue, out: &mut String) -> Result<(), Fail> {
     match v {
         VmValue::Int(i) => {
             let _ = write!(out, "{i}");
@@ -338,7 +345,7 @@ pub fn write_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, 
 }
 
 /// The debug form of `v`, charging `budget` (see [`render_metered`]).
-pub fn to_debug_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<String, Fail> {
+pub fn to_debug_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<String, Fail> {
     let mut s = String::new();
     render_metered(prog, heap, budget, v, true, &mut s)?;
     Ok(s)
@@ -346,7 +353,7 @@ pub fn to_debug_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Vm
 
 /// [`format_value`], charging `budget` and checking large precisions and
 /// widths against the memory limit before allocating.
-pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue, spec: &FormatSpec) -> Result<String, Fail> {
+pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, v: VmValue, spec: &FormatSpec) -> Result<String, Fail> {
     let numeric = matches!(v, VmValue::Int(_) | VmValue::Float(_));
     if let (VmValue::Float(_), Some(p)) = (v, spec.precision) {
         // `{x:.1000000000}` would print a billion digits.
@@ -407,7 +414,7 @@ pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v
 }
 
 /// Charges for and checks the memory limit before building `n` bytes of output.
-fn reserve(heap: &Heap, budget: &impl Budget, n: usize) -> Result<(), Fail> {
+fn reserve(heap: &Heap, budget: &impl FuelBudget, n: usize) -> Result<(), Fail> {
     if n > MAX_OUTPUT || heap.would_exceed_memory_limit(n) {
         return Err(Fail::limit(crate::engine::LimitKind::Memory));
     }

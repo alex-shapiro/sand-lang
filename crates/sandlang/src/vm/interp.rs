@@ -22,7 +22,7 @@ use super::compare::{
     values_le_metered, values_lt, values_lt_metered,
 };
 use super::display;
-use super::meter::{Scratch, code_fuel, loop_fuel};
+use super::meter::{ScratchMemoryTracker, back_edge_fuel, code_fuel_surcharge};
 use super::*;
 use crate::engine::LimitKind;
 
@@ -215,7 +215,9 @@ fn quick_eq(heap: &Heap, a: &VmValue, b: &VmValue) -> Option<bool> {
         return Some(true);
     }
     match (heap.obj(x), heap.obj(y)) {
-        (Obj::Str(p), Obj::Str(q)) if p.len().min(q.len()) < super::meter::BYTES_PER_UNIT => Some(short_eq(p.as_bytes(), q.as_bytes())),
+        (Obj::Str(p), Obj::Str(q)) if p.len().min(q.len()) < super::meter::BYTES_PER_FUEL_UNIT => {
+            Some(short_eq(p.as_bytes(), q.as_bytes()))
+        }
         _ => None,
     }
 }
@@ -546,7 +548,7 @@ impl Vm {
         if self.retry_stress {
             self.arm_instruction_retry_stress();
         }
-        self.meter.fuel()
+        self.meter.remaining_slice_fuel()
     }
 
     /// Finishes an instruction started with [`Vm::begin_retryable_op`].
@@ -701,9 +703,9 @@ impl Vm {
         // writing the result to absolute slot `slot`.
         macro_rules! native_call {
             ($n:expr, $start:expr, $argc:expr, $slot:expr) => {{
-                self.meter.sync(fuel.left);
+                self.meter.flush_interpreter_fuel(fuel.left);
                 let r = self.call_native(&natives, fiber, $n, $start, $argc, $slot, ip);
-                fuel.left = self.meter.resync();
+                fuel.left = self.meter.reload_interpreter_fuel();
                 match r {
                     Ok(None) => reload!(),
                     Ok(Some(exit)) => return Ok(exit),
@@ -733,9 +735,9 @@ impl Vm {
                 }
                 fiber.frames.push(Frame { proto: $proto, ip: 0, base: nb as u32, ret: $ret as u32, closure: $closure });
                 code = &p.code;
-                // Long functions cost more (`meter::code_fuel`).
+                // Long functions cost more (`meter::code_fuel_surcharge`).
                 if code.len() >= 64 {
-                    fuel.left -= code_fuel(code.len());
+                    fuel.left -= code_fuel_surcharge(code.len());
                 }
                 ip = 0;
                 base = nb;
@@ -810,7 +812,7 @@ impl Vm {
                     Op::StoreCell { cell, src } => self.heap.set_cell(r!(cell), r!(src)),
                     Op::MakeClosure { dst, proto } => {
                         let p = &protos[proto as usize];
-                        fuel.left -= code_fuel(p.captures.len());
+                        fuel.left -= code_fuel_surcharge(p.captures.len());
                         r!(dst) = self.make_closure(p, proto, regs);
                     }
 
@@ -1213,7 +1215,7 @@ impl Vm {
                         top.proto = proto;
                         top.closure = NO_CLOSURE;
                         code = &p.code;
-                        fuel.left -= code_fuel(code.len());
+                        fuel.left -= code_fuel_surcharge(code.len());
                         ip = 0;
                     }
                     Op::TailCall { callee: c, base: b, argc } => {
@@ -1240,7 +1242,7 @@ impl Vm {
                                 top.proto = proto;
                                 top.closure = h;
                                 code = &pr.code;
-                                fuel.left -= code_fuel(code.len());
+                                fuel.left -= code_fuel_surcharge(code.len());
                                 ip = 0;
                             }
                             Obj::NativeFn(n) => {
@@ -1709,8 +1711,8 @@ impl Vm {
                 continue 'dispatch;
             };
             jump!(back);
-            // Long loops cost more (`meter::loop_fuel`).
-            safe_point!(ip, loop_fuel(back));
+            // Long loops cost more (`meter::back_edge_fuel`).
+            safe_point!(ip, back_edge_fuel(back));
         }
     }
 
@@ -1752,7 +1754,7 @@ impl Vm {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
-        let fuel_at_call = self.meter.fuel();
+        let fuel_at_call = self.meter.remaining_slice_fuel();
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
         if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
@@ -1761,7 +1763,7 @@ impl Vm {
             // fuel, and retry the call once.
             self.collect_all_garbage(Some(fiber));
             self.meter.refund_to(fuel_at_call);
-            r = match self.meter.check() {
+            r = match self.meter.check_limits() {
                 Ok(()) => {
                     self.collected = true;
                     let retried = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
@@ -1778,7 +1780,7 @@ impl Vm {
             Ok(v) => {
                 fiber.stack[slot] = v;
                 self.enforce_limit(Some(fiber)).map_err(Trap::Limit)?;
-                if self.meter.fuel() <= 0 {
+                if self.meter.remaining_slice_fuel() <= 0 {
                     // Natives used up the slice: let the scheduler check
                     // limits and run other tasks.
                     fiber.stopped_in_native_call = true;
@@ -1931,7 +1933,7 @@ impl Vm {
         let t = &prog.templates[tmpl as usize];
         self.meter.charge_bytes(t.text_len)?;
         let mut out = String::with_capacity(t.text_len + 8 * t.pieces.len());
-        let mut scratch = Scratch::new();
+        let mut scratch = ScratchMemoryTracker::new();
         for p in &t.pieces {
             match p {
                 Piece::Text(s) => out.push_str(s),
@@ -1940,7 +1942,7 @@ impl Vm {
                     out.push_str(&display::format_value_metered(prog, &self.heap, &self.meter, regs[*r as usize], spec)?)
                 }
             }
-            scratch.check(&self.heap, out.len())?;
+            scratch.check_memory(&self.heap, out.len())?;
         }
         self.heap.check_memory(out.len())?;
         Ok(out)
@@ -2496,7 +2498,7 @@ impl Vm {
         }
         let (a, b) = (a as usize, b as usize);
         let list = matches!(self.heap.get(o), Obj::List(_));
-        let cost = if list { (b - a) as u64 } else { ((b - a) / super::meter::BYTES_PER_UNIT) as u64 };
+        let cost = if list { (b - a) as u64 } else { ((b - a) / super::meter::BYTES_PER_FUEL_UNIT) as u64 };
         self.heap.check_memory(if list { (b - a) * std::mem::size_of::<VmValue>() } else { b - a })?;
         self.meter.charge(cost)?;
         Ok(match self.heap.get(o) {

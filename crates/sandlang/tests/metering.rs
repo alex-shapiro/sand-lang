@@ -838,7 +838,7 @@ fn the_collection_at_the_memory_limit_releases_the_staging_buffer() {
 /// Builds the `probe` host module for fuel and retry tests.
 fn fuel_probe() -> NativeModule {
     let mut m = NativeModule::new("probe");
-    m.function("fuel", |vm: &mut Vm| vm.meter.used() as i64);
+    m.function("fuel", |vm: &mut Vm| vm.meter.total_fuel_used() as i64);
     m.function("grow", |vm: &mut Vm, n: i64| -> Result<i64, Fail> {
         vm.charge(50)?;
         vm.check_memory(n as usize)?;
