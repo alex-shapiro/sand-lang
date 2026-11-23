@@ -1691,8 +1691,8 @@ impl Vm {
         let mut full = force_major;
         if force_major {
             self.free_spare_fibers();
-        } else if self.heap.cycle_active() {
-            if self.heap.minor_due() {
+        } else if self.heap.is_cycle_active() {
+            if self.heap.is_minor_gc_due() {
                 let roots = self.gc_roots(current.as_deref_mut());
                 self.heap.collect(roots, false);
                 self.heap.stats.record(start.elapsed(), false);
@@ -1706,11 +1706,11 @@ impl Vm {
         } else {
             let roots = self.gc_roots(current.as_deref_mut());
             // Major collection if the old generation is large enough; minor otherwise.
-            let major = self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
+            let major = self.heap.needs_major_gc() || (self.heap.gc_stress && self.heap.stats.collections.is_multiple_of(8));
             if !major {
                 self.heap.collect(roots, false);
                 self.heap.stats.record(start.elapsed(), false);
-            } else if self.heap.major_is_incremental() {
+            } else if self.heap.uses_incremental_major() {
                 self.heap.start_cycle(roots);
                 self.heap.stats.record_step(start.elapsed());
             } else {

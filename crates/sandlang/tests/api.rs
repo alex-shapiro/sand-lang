@@ -3422,7 +3422,7 @@ print(few[5000])
     rt().block_on(engine.run_source("main.sand", &src)).unwrap();
     assert_eq!(out.contents(), format!("{}\nfront\nfew5\n", xs + 6 * 4 + tail));
     let stats = engine.gc_stats();
-    assert!(stats.collections - stats.majors >= 3, "{stats:?}");
+    assert!(stats.collections - stats.major_collections >= 3, "{stats:?}");
 }
 
 #[test]
@@ -3434,8 +3434,8 @@ fn gc_stats_report_minor_and_major_collections() {
     rt().block_on(engine.run_source("main.sand", src)).unwrap();
     assert_eq!(out.contents(), "4300000\n");
     let stats = engine.gc_stats();
-    assert!(stats.collections > stats.majors, "{stats:?}");
-    assert!(stats.majors >= 1, "{stats:?}");
+    assert!(stats.collections > stats.major_collections, "{stats:?}");
+    assert!(stats.major_collections >= 1, "{stats:?}");
 }
 
 #[test]

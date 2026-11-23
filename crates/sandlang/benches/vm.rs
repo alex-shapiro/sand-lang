@@ -205,7 +205,7 @@ fn main() {
             gc.collections += s.collections;
             gc.total_pause += s.total_pause;
             gc.max_pause = gc.max_pause.max(s.max_pause);
-            gc.majors += s.majors;
+            gc.major_collections += s.major_collections;
             gc.max_minor_pause = gc.max_minor_pause.max(s.max_minor_pause);
         }
         times.sort();
@@ -220,7 +220,7 @@ fn main() {
             ms(times[times.len() / 2]),
             ns_op,
             gc.collections / runs as u64,
-            gc.majors / runs as u64,
+            gc.major_collections / runs as u64,
             ms(gc.max_pause),
             ms(gc.max_minor_pause),
             ms(avg)

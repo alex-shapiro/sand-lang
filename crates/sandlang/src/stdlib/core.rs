@@ -649,7 +649,7 @@ fn lists(m: &mut NativeModule) {
         Ok(VmVal::from_raw(vm.iter_fn(IterSrc::List { list: xs.raw().handle().unwrap_or(0), i: 0, n })))
     });
     m.function("List.pop", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Fail> {
-        Ok(vm.heap.list_shrink(xs.raw()).and_then(Vec::pop).map(Param::from_raw))
+        Ok(vm.heap.list_mut_truncating(xs.raw()).and_then(Vec::pop).map(Param::from_raw))
     });
     m.function("List.insert", |vm: &mut Vm, xs: List, i: i64, x: Param<0>| -> Result<_, Fail> {
         let n = list_len(vm, xs);
@@ -673,7 +673,7 @@ fn lists(m: &mut NativeModule) {
         Ok(())
     });
     m.function("List.clear", |vm: &mut Vm, xs: List| -> Result<_, Fail> {
-        if let Some(l) = vm.heap.list_shrink(xs.raw()) {
+        if let Some(l) = vm.heap.list_mut_truncating(xs.raw()) {
             l.clear();
         }
         Ok(())
@@ -1005,7 +1005,7 @@ fn clear_container(vm: &mut Vm, v: VmValue) -> Result<(), Fail> {
         _ => return internal("not a map or set"),
     }
     let after = vm.heap.get(v).size();
-    vm.heap.account(before, after);
+    vm.heap.adjust_bytes(before, after);
     Ok(())
 }
 

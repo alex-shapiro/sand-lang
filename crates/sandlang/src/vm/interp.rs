@@ -438,14 +438,14 @@ impl Vm {
     /// Appends `suffix` to string `builder`.
     #[inline(never)]
     fn op_append_str(&mut self, builder: VmValue, suffix: VmValue) -> Result<VmValue, Fail> {
-        self.meter.charge_bytes(self.heap.append_copies(builder, suffix))?;
+        self.meter.charge_bytes(self.heap.append_str_copy_bytes(builder, suffix))?;
         self.heap.append_str(builder, suffix).map_err(Fail::limit)
     }
 
     /// `Op::NewTuple` of anything but an inline pair.
     #[inline(never)]
     fn new_tuple(&mut self, items: &[VmValue]) -> VmValue {
-        let items = self.heap.boxed(items);
+        let items = self.heap.box_values(items);
         self.heap.alloc(Obj::Tuple(items))
     }
 
@@ -455,8 +455,8 @@ impl Vm {
     fn make_closure(&mut self, p: &Proto, proto: u32, regs: &[VmValue]) -> VmValue {
         let capture = |&r: &Reg| if r == NO_REG { VmValue::Unit } else { regs[r as usize] };
         let caps: Box<[VmValue]> = match *p.captures {
-            [a] => self.heap.boxed(&[capture(&a)]),
-            [a, b] => self.heap.boxed(&[capture(&a), capture(&b)]),
+            [a] => self.heap.box_values(&[capture(&a)]),
+            [a, b] => self.heap.box_values(&[capture(&a), capture(&b)]),
             _ => p.captures.iter().map(capture).collect(),
         };
         self.heap.alloc(Obj::Closure(proto, caps))
@@ -672,7 +672,7 @@ impl Vm {
         macro_rules! safe_point {
             ($resume:expr, $cost:expr) => {
                 fuel.left -= $cost;
-                if fuel.left <= 0 || self.heap.wants_gc() {
+                if fuel.left <= 0 || self.heap.needs_gc() {
                     if let Some(exit) = self.safe_point(fiber, fuel.left, $resume) {
                         return exit;
                     }
@@ -1038,11 +1038,11 @@ impl Vm {
                             jump!(off)
                         }
                     }
-                    Op::JNotSome { src, dst, off } => match self.heap.payload_if(&r!(src), prog.ids.some) {
+                    Op::JNotSome { src, dst, off } => match self.heap.variant_payload_if(&r!(src), prog.ids.some) {
                         VmValue::Uninit => jump!(off),
                         p => r!(dst) = p,
                     },
-                    Op::JNotOk { src, dst, off } => match self.heap.payload_if(&r!(src), prog.ids.ok) {
+                    Op::JNotOk { src, dst, off } => match self.heap.variant_payload_if(&r!(src), prog.ids.ok) {
                         VmValue::Uninit => jump!(off),
                         p => r!(dst) = p,
                     },
@@ -1107,7 +1107,7 @@ impl Vm {
                         }
                     }
                     Op::JSomeBack { src, dst, off } => {
-                        let p = self.heap.payload_if(&r!(src), prog.ids.some);
+                        let p = self.heap.variant_payload_if(&r!(src), prog.ids.some);
                         if !matches!(p, VmValue::Uninit) {
                             r!(dst) = p;
                             break 'back off as i32;
@@ -1294,7 +1294,7 @@ impl Vm {
                     Op::NewStruct { dst, start, def } => {
                         let n = prog.types[def as usize].fields.len();
                         let s = start as usize;
-                        let items = self.heap.boxed(&regs[s..s + n]);
+                        let items = self.heap.box_values(&regs[s..s + n]);
                         r!(dst) = self.heap.alloc(Obj::Struct(def as u32, items));
                     }
                     Op::NewVariant { dst, start, variant } => {
@@ -1434,7 +1434,7 @@ impl Vm {
                         }
                     }
                     Op::ListPop { dst, list } => {
-                        let v = self.heap.list_shrink(r!(list)).and_then(Vec::pop);
+                        let v = self.heap.list_mut_truncating(r!(list)).and_then(Vec::pop);
                         r!(dst) = self.option(v);
                     }
                     // `if let Some(x) = map.get(key)` tests the result right away.
@@ -1721,7 +1721,7 @@ impl Vm {
     #[inline(never)]
     fn safe_point(&mut self, fiber: &mut Fiber, fuel_left: i64, resume_ip: usize) -> Option<Result<FiberStop, RunEnding>> {
         fiber.frames.last_mut().unwrap().ip = resume_ip as u32;
-        if self.heap.wants_gc() {
+        if self.heap.needs_gc() {
             self.collect_garbage(Some(fiber));
             if let Err(limit) = self.enforce_limit(Some(fiber)) {
                 return Some(Err(Trap::Limit(limit).into()));
@@ -2083,7 +2083,7 @@ impl Vm {
                 let before = c.receivers.capacity();
                 c.receivers.push_back((caller, wait_gen));
                 let grown = c.receivers.capacity().saturating_sub(before);
-                self.heap.bytes += grown * std::mem::size_of::<(u32, u64)>();
+                self.heap.object_bytes += grown * std::mem::size_of::<(u32, u64)>();
                 Err(self.signal(CtlKind::Blocked { wait_gen }))
             }
             BlockOn::Send(ch, v) => {
@@ -2106,7 +2106,7 @@ impl Vm {
                 let before = c.senders.capacity();
                 c.senders.push_back((caller, wait_gen, v));
                 let grown = c.senders.capacity().saturating_sub(before);
-                self.heap.bytes += grown * std::mem::size_of::<(u32, u64, VmValue)>();
+                self.heap.object_bytes += grown * std::mem::size_of::<(u32, u64, VmValue)>();
                 Err(self.signal(CtlKind::Blocked { wait_gen }))
             }
         }
@@ -2347,7 +2347,7 @@ impl Vm {
         mo.set_dense(k, v);
         if mo.entries.capacity() != cap || mo.index_bytes() != index {
             let grown = (mo.entries.capacity() - cap) * MAP_ENTRY_SIZE + mo.index_bytes();
-            self.heap.bytes = (self.heap.bytes + grown).saturating_sub(index);
+            self.heap.object_bytes = (self.heap.object_bytes + grown).saturating_sub(index);
         }
         Ok(())
     }
@@ -2393,7 +2393,7 @@ impl Vm {
         mo.set_dense(k, VmValue::Uninit);
         compact_entries(&mut mo.entries, mo.live, &mut mo.index);
         let after = mo.entries.capacity() * MAP_ENTRY_SIZE + mo.index_bytes();
-        self.heap.account(before, after);
+        self.heap.adjust_bytes(before, after);
         Ok(old)
     }
 
@@ -2420,7 +2420,7 @@ impl Vm {
         so.index.insert(k, hash, end);
         if so.entries.capacity() != cap || so.index.bytes() != index {
             let grown = (so.entries.capacity() - cap) * SET_ENTRY_SIZE + so.index.bytes();
-            self.heap.bytes = (self.heap.bytes + grown).saturating_sub(index);
+            self.heap.object_bytes = (self.heap.object_bytes + grown).saturating_sub(index);
         }
         Ok(true)
     }
@@ -2461,7 +2461,7 @@ impl Vm {
         so.live -= 1;
         compact_entries(&mut so.entries, so.live, &mut so.index);
         let after = so.entries.capacity();
-        self.heap.account(before * SET_ENTRY_SIZE, after * SET_ENTRY_SIZE);
+        self.heap.adjust_bytes(before * SET_ENTRY_SIZE, after * SET_ENTRY_SIZE);
         Ok(true)
     }
 

@@ -18,7 +18,7 @@ const MIN_PRUNE: usize = 8;
 
 /// Whether `it` is an iterator reading map or set `h` in place.
 fn reads_in_place(heap: &Heap, it: u32, h: u32) -> bool {
-    matches!(heap.weak(it), Some(Obj::IterFn(IterSrc::Map { map: o, .. } | IterSrc::Set { set: o, .. })) if *o == h)
+    matches!(heap.try_obj(it), Some(Obj::IterFn(IterSrc::Map { map: o, .. } | IterSrc::Set { set: o, .. })) if *o == h)
 }
 
 /// The first live entry of map `map` at or after `slot`, and its slot.
@@ -78,7 +78,7 @@ impl Vm {
         pins.its.push(ih);
         pins.open += 1;
         let after = pins.bytes();
-        self.heap.account(before, after);
+        self.heap.adjust_bytes(before, after);
         Ok(it)
     }
 
@@ -129,7 +129,7 @@ impl Vm {
         if let Some(pins) = self.heap.pins_mut(c) {
             let before = pins.bytes();
             *pins = Pins::default();
-            self.heap.account(before, 0);
+            self.heap.adjust_bytes(before, 0);
         }
         Ok(())
     }
