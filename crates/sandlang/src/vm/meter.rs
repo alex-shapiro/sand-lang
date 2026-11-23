@@ -381,7 +381,7 @@ pub const INSTRUCTIONS_PER_FUEL_SHIFT: u32 = 6;
 /// to a worker thread.
 ///
 /// [`Meter`] is bound to the VM thread, so offloaded jobs charge this instead.
-/// A charge returns [`OffloadStopped`] if the engine is interrupted, the clock
+/// A charge returns [`WorkerStopped`] if the engine is interrupted, the clock
 /// passes the wall-clock deadline, the worker exceeds the starting instruction
 /// budget, or the VM stops waiting. After the job finishes, the VM charges its
 /// [`Meter`] for [`WorkerMeter::fuel_used`].
@@ -402,7 +402,7 @@ pub(crate) struct WorkerStopped;
 
 impl WorkerMeter {
     /// Charges fuel for work.
-    /// Returns [`OffloadStopped`] if the worker must abort.
+    /// Returns [`WorkerStopped`] if the worker must abort.
     pub fn charge(&mut self, units: u64) -> Result<(), WorkerStopped> {
         self.fuel_used = self.fuel_used.saturating_add(units);
         self.stopped |=
