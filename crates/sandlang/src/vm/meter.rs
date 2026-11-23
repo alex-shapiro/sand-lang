@@ -48,9 +48,28 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+/// Trait for metering fuel.
+pub trait Meter {
+    /// Charges fuel for runtime work.
+    fn charge(&self, units: u64) -> Result<(), Fail>;
+
+    /// Charges fuel for bulk memory work.
+    #[inline]
+    fn charge_bytes(&self, byte_count: usize) -> Result<(), Fail> {
+        self.charge((byte_count / BYTES_PER_FUEL_UNIT) as u64)
+    }
+
+    /// Returns the current fuel position.
+    fn fuel_mark(&self) -> i64;
+
+    /// Restores fuel to `mark` so the VM does not charge for aborted retries or
+    /// discarded probes.
+    fn refund_to(&self, mark: i64);
+}
+
 /// Tracks execution fuel and enforces instruction, time, and cancellation
 /// limits for a VM.
-pub struct Meter {
+pub struct VmMeter {
     /// Remaining fuel in the current slice. Negative if the slice is overspent.
     remaining_slice_fuel: Cell<i64>,
     /// Interpreter fuel counter recorded at the last sync boundary.
@@ -68,10 +87,10 @@ pub struct Meter {
     clock: Arc<dyn Clock>,
 }
 
-impl Meter {
+impl VmMeter {
     /// Creates a meter.
-    pub fn new(max_instructions: Option<u64>, interrupt_flag: Arc<AtomicBool>, clock: Arc<dyn Clock>) -> Meter {
-        Meter {
+    pub fn new(max_instructions: Option<u64>, interrupt_flag: Arc<AtomicBool>, clock: Arc<dyn Clock>) -> VmMeter {
+        VmMeter {
             remaining_slice_fuel: Cell::new(0),
             interpreter_fuel_baseline: Cell::new(0),
             next_limit_check_fuel: Cell::new(0),
@@ -240,32 +259,10 @@ impl Meter {
     }
 }
 
-/// Fuel charging trait for helpers inside and outside a metered VM.
-///
-/// Engine code passes [`Meter`] to enforce execution limits. Standalone callers
-/// and tests pass [`UnmeteredFuel`] to reuse helpers with unlimited fuel.
-pub trait FuelBudget {
-    /// Charges fuel for runtime work.
-    fn charge(&self, units: u64) -> Result<(), Fail>;
-
-    /// Charges fuel for bulk memory work.
-    #[inline]
-    fn charge_bytes(&self, byte_count: usize) -> Result<(), Fail> {
-        self.charge((byte_count / BYTES_PER_FUEL_UNIT) as u64)
-    }
-
-    /// Returns the current fuel position.
-    fn fuel_mark(&self) -> i64;
-
-    /// Restores fuel to `mark` so the VM does not charge for aborted retries or
-    /// discarded probes.
-    fn refund_to(&self, mark: i64);
-}
-
-impl FuelBudget for Meter {
+impl Meter for VmMeter {
     #[inline]
     fn charge(&self, units: u64) -> Result<(), Fail> {
-        Meter::charge(self, units)
+        VmMeter::charge(self, units)
     }
 
     #[inline]
@@ -275,14 +272,14 @@ impl FuelBudget for Meter {
 
     #[inline]
     fn refund_to(&self, mark: i64) {
-        Meter::refund_to(self, mark);
+        VmMeter::refund_to(self, mark);
     }
 }
 
 /// A [`FuelBudget`] that ignores all charges.
 pub struct UnlimitedMeter;
 
-impl FuelBudget for UnlimitedMeter {
+impl Meter for UnlimitedMeter {
     #[inline(always)]
     fn charge(&self, _: u64) -> Result<(), Fail> {
         Ok(())
@@ -449,7 +446,7 @@ mod tests {
 
     #[test]
     fn charges_are_free_until_the_slice_is_spent() {
-        let meter = Meter::new(Some(100_000), Arc::new(AtomicBool::new(false)), system_clock());
+        let meter = VmMeter::new(Some(100_000), Arc::new(AtomicBool::new(false)), system_clock());
         assert_eq!(meter.start_slice(None, None), SLICE_FUEL);
         assert!(meter.charge(50).is_ok());
         assert_eq!((meter.remaining_slice_fuel(), meter.total_fuel_used()), (SLICE_FUEL - 50, 50));
@@ -460,20 +457,20 @@ mod tests {
 
     #[test]
     fn the_instruction_limit_is_checked_exactly() {
-        let meter = Meter::new(Some(1000), Arc::new(AtomicBool::new(false)), system_clock());
+        let meter = VmMeter::new(Some(1000), Arc::new(AtomicBool::new(false)), system_clock());
         assert_eq!(meter.start_slice(None, None), 1000);
         meter.flush_interpreter_fuel(700);
         assert_eq!(meter.total_fuel_used(), 300);
         assert!(meter.charge(700).is_ok(), "1000 units used");
         assert!(matches!(meter.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
         assert_eq!(meter.reload_interpreter_fuel(), -1);
-        let meter = Meter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)), system_clock());
+        let meter = VmMeter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)), system_clock());
         meter.start_slice(None, None);
         assert!(meter.charge(SLICE_FUEL as u64 + 1).is_ok());
         assert_eq!(meter.next_limit_check_fuel.get(), -1 - LIMIT_CHECK_FUEL_INTERVAL);
         assert!(meter.charge(1_000_000 - SLICE_FUEL as u64 - 1).is_ok(), "1,000,000 units used");
         assert!(matches!(meter.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
-        let mut meter = Meter::new(Some(100), Arc::new(AtomicBool::new(false)), system_clock());
+        let mut meter = VmMeter::new(Some(100), Arc::new(AtomicBool::new(false)), system_clock());
         assert!(meter.charge(60).is_ok());
         assert_eq!(meter.start_slice(None, None), 40);
         meter.reset_for_run(Arc::new(AtomicBool::new(false)));
@@ -483,7 +480,7 @@ mod tests {
     #[test]
     fn refund_to_restores_checkpoint_interval() {
         let interrupt_flag = Arc::new(AtomicBool::new(false));
-        let meter = Meter::new(None, interrupt_flag.clone(), system_clock());
+        let meter = VmMeter::new(None, interrupt_flag.clone(), system_clock());
         meter.start_slice(None, None);
         let mark = meter.remaining_slice_fuel();
         assert!(meter.charge(SLICE_FUEL as u64 + 1).is_ok(), "checkpoint advances next_limit_check_fuel");
@@ -495,7 +492,7 @@ mod tests {
     #[test]
     fn interrupt_is_seen_at_checkpoints() {
         let interrupt_flag = Arc::new(AtomicBool::new(false));
-        let meter = Meter::new(None, interrupt_flag.clone(), system_clock());
+        let meter = VmMeter::new(None, interrupt_flag.clone(), system_clock());
         meter.start_slice(None, None);
         interrupt_flag.store(true, Ordering::SeqCst);
         assert!(meter.charge(5).is_ok(), "limit check is skipped while slice fuel remains");
@@ -504,7 +501,7 @@ mod tests {
 
     #[test]
     fn deadlines() {
-        let meter = Meter::new(None, Arc::new(AtomicBool::new(false)), system_clock());
+        let meter = VmMeter::new(None, Arc::new(AtomicBool::new(false)), system_clock());
         meter.start_slice(Some(system_clock().cpu_time()), None);
         assert!(matches!(meter.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::CpuTime))));
         meter.start_slice(None, Some(Instant::now()));

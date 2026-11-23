@@ -4,7 +4,7 @@
 use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::ty::VmVal;
-use crate::vm::meter::{FuelBudget, SLOW_BYTES_PER_FUEL_UNIT};
+use crate::vm::meter::{Meter, SLOW_BYTES_PER_FUEL_UNIT};
 use crate::vm::{Fail, Vm};
 use hmac::{KeyInit, Mac};
 use sha2::Digest;
@@ -33,12 +33,12 @@ pub(crate) fn module() -> NativeModule {
 /// Bytes hashed between charges to the budget (4 KiB).
 const CHUNK: usize = 4096;
 
-/// Feeds the concatenation of `parts` to `update`, charging `budget` as it
+/// Feeds the concatenation of `parts` to `update`, charging the meter as it
 /// goes so that hashing huge inputs can be stopped.
-fn feed(parts: &[&[u8]], budget: &impl FuelBudget, mut update: impl FnMut(&[u8])) -> Result<(), Fail> {
+fn feed(parts: &[&[u8]], meter: &impl Meter, mut update: impl FnMut(&[u8])) -> Result<(), Fail> {
     for part in parts {
         for chunk in part.chunks(CHUNK) {
-            budget.charge((chunk.len() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
+            meter.charge((chunk.len() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
             update(chunk);
         }
     }
@@ -46,23 +46,23 @@ fn feed(parts: &[&[u8]], budget: &impl FuelBudget, mut update: impl FnMut(&[u8])
 }
 
 /// The digest of the concatenation of `parts`.
-fn digest<D: Digest>(parts: &[&[u8]], budget: &impl FuelBudget) -> Result<sha2::digest::Output<D>, Fail> {
+fn digest<D: Digest>(parts: &[&[u8]], meter: &impl Meter) -> Result<sha2::digest::Output<D>, Fail> {
     let mut h = D::new();
-    feed(parts, budget, |chunk| h.update(chunk))?;
+    feed(parts, meter, |chunk| h.update(chunk))?;
     Ok(h.finalize())
 }
 
 /// SHA-256 (FIPS 180-4) of the concatenation of `parts`.
-pub(crate) fn sha256_parts(parts: &[&[u8]], budget: &impl FuelBudget) -> Result<[u8; 32], Fail> {
-    Ok(digest::<sha2::Sha256>(parts, budget)?.into())
+pub(crate) fn sha256_parts(parts: &[&[u8]], meter: &impl Meter) -> Result<[u8; 32], Fail> {
+    Ok(digest::<sha2::Sha256>(parts, meter)?.into())
 }
 
 /// HMAC-SHA256 (RFC 2104).
-pub(crate) fn hmac_sha256(key: &[u8], data: &[u8], budget: &impl FuelBudget) -> Result<[u8; 32], Fail> {
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8], meter: &impl Meter) -> Result<[u8; 32], Fail> {
     // A key longer than a block is hashed first.
-    budget.charge((key.len() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
+    meter.charge((key.len() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| Fail::internal("HMAC key"))?;
-    feed(&[data], budget, |chunk| mac.update(chunk))?;
+    feed(&[data], meter, |chunk| mac.update(chunk))?;
     Ok(mac.finalize().into_bytes().into())
 }
 

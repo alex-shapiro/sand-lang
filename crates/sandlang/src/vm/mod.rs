@@ -18,7 +18,7 @@ use crate::native::convert::HostError;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use bytecode::*;
 use heap::{Heap, Staging};
-use meter::Meter;
+use meter::VmMeter;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -597,7 +597,7 @@ pub struct Vm {
     fiber_wakers: Vec<Arc<sched::FiberWaker>>,
     pub gen_counter: u64,
     /// Fuel accounting (see `meter`).
-    pub meter: Meter,
+    pub meter: VmMeter,
     /// When the run exceeds the wall-time limit (moved on by the time
     /// spent waiting for prompt answers).
     pub(crate) deadline: Option<crate::platform::Instant>,
@@ -691,7 +691,7 @@ impl Vm {
         let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());
         let globals = vec![VmValue::Uninit; prog.nglobals];
-        let meter = Meter::new(host.limits.max_instructions, host.interrupt.flag.clone(), host.clock.clone());
+        let meter = VmMeter::new(host.limits.max_instructions, host.interrupt.flag.clone(), host.clock.clone());
         let mut vm = Vm {
             prog,
             natives,

@@ -12,7 +12,7 @@ use crate::vm::bytecode::{Program, VariantRt};
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
 use crate::vm::heap::{Heap, Staging};
-use crate::vm::meter::{Meter, SLOW_BYTES_PER_FUEL_UNIT, ScratchMemoryTracker};
+use crate::vm::meter::{SLOW_BYTES_PER_FUEL_UNIT, ScratchMemoryTracker, VmMeter};
 use crate::vm::value::{
     FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, ReflectVariantDesc, TypeDesc, ValueRef, VmValue,
     slot_fits,
@@ -216,7 +216,7 @@ const SCANNED_KEYS: usize = 16;
 struct Builder<'a, 's, 'h> {
     heap: &'a Heap,
     st: &'s mut Staging<'h>,
-    meter: &'a Meter,
+    meter: &'a VmMeter,
     pending: usize,
     keys: HashTable<(u64, Cow<'a, str>, VmValue)>,
     entries: Vec<Entry<'a>>,
@@ -236,7 +236,7 @@ struct MapBuilder {
 }
 
 impl<'a, 's, 'h> Builder<'a, 's, 'h> {
-    fn new(heap: &'a Heap, st: &'s mut Staging<'h>, meter: &'a Meter) -> Self {
+    fn new(heap: &'a Heap, st: &'s mut Staging<'h>, meter: &'a VmMeter) -> Self {
         Builder { heap, st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new() }
     }
 
@@ -577,7 +577,7 @@ impl<'a> Parser<'a> {
         Parser { src, b: src.as_bytes(), pos: 0, depth: 0, charged: 0 }
     }
 
-    fn charge(&mut self, meter: &Meter) -> Result<(), Fail> {
+    fn charge(&mut self, meter: &VmMeter) -> Result<(), Fail> {
         let consumed = self.pos.saturating_sub(self.charged);
         self.charged = self.pos;
         meter.charge(1 + (consumed / SLOW_BYTES_PER_FUEL_UNIT) as u64)
@@ -912,7 +912,7 @@ impl<'a> Source<'a> for Decoder<'a, '_, '_, '_> {
 
 const LOOKUPS_PER_UNIT: usize = 16;
 
-fn lookup<T>(meter: &Meter, items: &[T], pred: impl Fn(&T) -> bool) -> Result<Option<usize>, Fail> {
+fn lookup<T>(meter: &VmMeter, items: &[T], pred: impl Fn(&T) -> bool) -> Result<Option<usize>, Fail> {
     meter.charge(1 + (items.len() / LOOKUPS_PER_UNIT) as u64)?;
     Ok(items.iter().position(pred))
 }
@@ -1430,7 +1430,7 @@ fn map_key_text<'v>(prog: &'v Program, heap: &'v Heap, key: VmValue) -> Result<C
 struct JsonTextEncoder<'v> {
     prog: &'v Program,
     heap: &'v Heap,
-    meter: &'v Meter,
+    meter: &'v VmMeter,
     ids: JsonIds,
     indent: usize,
     out: String,

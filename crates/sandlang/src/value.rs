@@ -4,7 +4,7 @@ use crate::native::ty::Never;
 use crate::vm::bytecode::Program;
 use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
 use crate::vm::heap::Heap;
-use crate::vm::meter::{Meter, ScratchMemoryTracker};
+use crate::vm::meter::{VmMeter, ScratchMemoryTracker};
 use crate::vm::value::{FxHashMap, Obj, ValueRef, ValueType, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
 use smallvec::SmallVec;
@@ -472,7 +472,7 @@ pub(crate) fn qualified_name_module(rust_module: &str) -> Option<&str> {
 struct ValueCopier<'h> {
     prog: &'h Program,
     heap: &'h Heap,
-    meter: &'h Meter,
+    meter: &'h VmMeter,
     /// Bytes of Rust memory allocated by the copy.
     allocated: usize,
     scratch: ScratchMemoryTracker,

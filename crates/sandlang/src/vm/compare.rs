@@ -5,7 +5,7 @@
 
 use super::bytecode::Program;
 use super::heap::Heap;
-use super::meter::{FuelBudget, UnlimitedMeter};
+use super::meter::{Meter, UnlimitedMeter};
 use super::value::*;
 use super::{Fail, without_trait};
 use std::cmp::Ordering;
@@ -112,9 +112,9 @@ impl Small {
         (self.nodes <= SMALL_NODES).then_some(())
     }
 
-    fn charge(&self, budget: &impl FuelBudget) -> Result<(), Fail> {
-        budget.charge(self.nodes as u64)?;
-        budget.charge_bytes(self.bytes)
+    fn charge(&self, meter: &impl Meter) -> Result<(), Fail> {
+        meter.charge(self.nodes as u64)?;
+        meter.charge_bytes(self.bytes)
     }
 }
 
@@ -248,14 +248,14 @@ enum EqWork {
     Map(VmValue, VmValue, usize),
 }
 
-/// [`values_eq`], charging `budget` for the work.
-pub fn values_eq_metered(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
+/// [`values_eq`], charging the meter for the work.
+pub fn values_eq_metered(heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => return Ok(x == y),
         (VmValue::Obj(x), VmValue::Obj(y)) if x == y => return Ok(true),
         (VmValue::Obj(_), VmValue::Obj(_)) => {
             if let (Obj::Str(p), Obj::Str(q)) = (heap.get(a), heap.get(b)) {
-                budget.charge_bytes(p.len().min(q.len()))?;
+                meter.charge_bytes(p.len().min(q.len()))?;
                 return Ok(p == q);
             }
         }
@@ -266,7 +266,7 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: V
     }
     let mut w = Small::default();
     if let Some(eq) = eq_small(heap, a, b, SMALL_DEPTH, &mut w) {
-        w.charge(budget)?;
+        w.charge(meter)?;
         return Ok(eq);
     }
     let mut stack: Vec<EqWork> = vec![EqWork::Pair(a, b)];
@@ -287,13 +287,13 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: V
                 let Some(j) = (i..p.entries.len()).find(|&j| p.entries[j].is_some()) else { continue };
                 stack.push(EqWork::Map(x, y, j + 1));
                 let (k, v) = p.entries[j].unwrap();
-                match map_lookup_value(heap, budget, q, k)? {
+                match map_lookup_value(heap, meter, q, k)? {
                     Some(qv) => (v, qv),
                     None => return Ok(false),
                 }
             }
         };
-        budget.charge(1)?;
+        meter.charge(1)?;
         // Variants are canonical: a variant is inline in both values or in neither.
         if let (Some((ia, pa)), Some((ib, pb))) = (a.as_inline_variant(), b.as_inline_variant()) {
             if ia != ib {
@@ -318,13 +318,13 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: V
         }
         match (ox, oy) {
             (Obj::Str(p), Obj::Str(q)) => {
-                budget.charge_bytes(p.len().min(q.len()))?;
+                meter.charge_bytes(p.len().min(q.len()))?;
                 if p != q {
                     return Ok(false);
                 }
             }
             (Obj::Bytes(p), Obj::Bytes(q)) => {
-                budget.charge_bytes(p.len().min(q.len()))?;
+                meter.charge_bytes(p.len().min(q.len()))?;
                 if p != q {
                     return Ok(false);
                 }
@@ -369,8 +369,8 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: V
                     return Ok(false);
                 }
                 for k in p.entries.iter().flatten() {
-                    budget.charge(1)?;
-                    if set_lookup(heap, budget, q, *k)?.is_none() {
+                    meter.charge(1)?;
+                    if set_lookup(heap, meter, q, *k)?.is_none() {
                         return Ok(false);
                     }
                 }
@@ -382,13 +382,13 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: V
     Ok(true)
 }
 
-fn map_lookup_value(heap: &Heap, budget: &impl FuelBudget, m: &MapObj, k: VmValue) -> Result<Option<VmValue>, Fail> {
-    Ok(map_slot(heap, budget, m, k)?.and_then(|s| m.entries[s].map(|(_, v)| v)))
+fn map_lookup_value(heap: &Heap, meter: &impl Meter, m: &MapObj, k: VmValue) -> Result<Option<VmValue>, Fail> {
+    Ok(map_slot(heap, meter, m, k)?.and_then(|s| m.entries[s].map(|(_, v)| v)))
 }
 
 /// The slot of key `k` in map `m`.
 #[inline]
-pub fn map_slot(heap: &Heap, budget: &impl FuelBudget, m: &MapObj, k: VmValue) -> Result<Option<usize>, Fail> {
+pub fn map_slot(heap: &Heap, meter: &impl Meter, m: &MapObj, k: VmValue) -> Result<Option<usize>, Fail> {
     if m.live == 0 {
         return Ok(None);
     }
@@ -398,8 +398,8 @@ pub fn map_slot(heap: &Heap, budget: &impl FuelBudget, m: &MapObj, k: VmValue) -
         VmValue::Pair(a, b) => return Ok(m.index.find(k, pair_hash(a as i64, b), |s| matches!(m.entries[s], Some((x, _)) if x == k))),
         _ => {}
     }
-    let hash = hash_key(heap, budget, k)?;
-    find_key(heap, budget, &m.index, hash, k, |i| m.entries[i].map(|(k, _)| k))
+    let hash = hash_key(heap, meter, k)?;
+    find_key(heap, meter, &m.index, hash, k, |i| m.entries[i].map(|(k, _)| k))
 }
 
 /// The value of the int key `i` in map `m`: the fast path of lookups.
@@ -428,7 +428,7 @@ pub fn set_has_int(s: &SetObj, i: i64) -> bool {
 #[inline]
 pub fn find_entry<T>(
     heap: &Heap,
-    budget: &impl FuelBudget,
+    meter: &impl Meter,
     table: &KeyIndex,
     hash: u64,
     k: VmValue,
@@ -437,16 +437,16 @@ pub fn find_entry<T>(
 ) -> Result<Option<usize>, Fail> {
     match k {
         VmValue::Int(i) => Ok(table.find_int(i, |s| matches!(entries[s].as_ref().map(&key), Some(VmValue::Int(x)) if x == i))),
-        _ => find_key(heap, budget, table, hash, k, |s| entries[s].as_ref().map(&key)),
+        _ => find_key(heap, meter, table, hash, k, |s| entries[s].as_ref().map(&key)),
     }
 }
 
 /// The slot of the tuple key whose elements are `items` in map `m`.
-pub fn map_slot_tuple(heap: &Heap, budget: &impl FuelBudget, m: &MapObj, items: &[VmValue]) -> Result<Option<usize>, Fail> {
+pub fn map_slot_tuple(heap: &Heap, meter: &impl Meter, m: &MapObj, items: &[VmValue]) -> Result<Option<usize>, Fail> {
     if let [a, b] = *items
         && let Some(k) = VmValue::tuple2(a, b)
     {
-        return map_slot(heap, budget, m, k);
+        return map_slot(heap, meter, m, k);
     }
     if m.live == 0 {
         return Ok(None);
@@ -456,17 +456,17 @@ pub fn map_slot_tuple(heap: &Heap, budget: &impl FuelBudget, m: &MapObj, items: 
     h.write_u8(8);
     h.write_usize(items.len());
     for &x in items {
-        h.write_u64(hash_key(heap, budget, x)?);
+        h.write_u64(hash_key(heap, meter, x)?);
     }
-    budget.charge(1)?;
-    find_metered(budget, &m.index, VmValue::Unit, h.finish(), |slot| {
+    meter.charge(1)?;
+    find_metered(meter, &m.index, VmValue::Unit, h.finish(), |slot| {
         let Some((VmValue::Obj(tuple_handle), _)) = m.entries[slot] else { return Ok(false) };
         let Obj::Tuple(tuple) = heap.obj(tuple_handle) else { return Ok(false) };
         if tuple.len() != items.len() {
             return Ok(false);
         }
         for (&a, &b) in tuple.iter().zip(items) {
-            if !keys_eq(heap, budget, a, b)? {
+            if !keys_eq(heap, meter, a, b)? {
                 return Ok(false);
             }
         }
@@ -476,7 +476,7 @@ pub fn map_slot_tuple(heap: &Heap, budget: &impl FuelBudget, m: &MapObj, items: 
 
 /// The slot of element `k` in set `s`.
 #[inline]
-pub fn set_slot(heap: &Heap, budget: &impl FuelBudget, s: &SetObj, k: VmValue) -> Result<Option<usize>, Fail> {
+pub fn set_slot(heap: &Heap, meter: &impl Meter, s: &SetObj, k: VmValue) -> Result<Option<usize>, Fail> {
     if s.live == 0 {
         return Ok(None);
     }
@@ -485,12 +485,12 @@ pub fn set_slot(heap: &Heap, budget: &impl FuelBudget, s: &SetObj, k: VmValue) -
         VmValue::Pair(a, b) => return Ok(s.index.find(k, pair_hash(a as i64, b), |e| s.entries[e] == Some(k))),
         _ => {}
     }
-    let hash = hash_key(heap, budget, k)?;
-    find_key(heap, budget, &s.index, hash, k, |i| s.entries[i])
+    let hash = hash_key(heap, meter, k)?;
+    find_key(heap, meter, &s.index, hash, k, |i| s.entries[i])
 }
 
-fn set_lookup(heap: &Heap, budget: &impl FuelBudget, s: &SetObj, k: VmValue) -> Result<Option<usize>, Fail> {
-    set_slot(heap, budget, s, k)
+fn set_lookup(heap: &Heap, meter: &impl Meter, s: &SetObj, k: VmValue) -> Result<Option<usize>, Fail> {
+    set_slot(heap, meter, s, k)
 }
 
 /// The slot of `table` holding key `k` (whose hash is `hash`); `key_at`
@@ -498,14 +498,14 @@ fn set_lookup(heap: &Heap, budget: &impl FuelBudget, s: &SetObj, k: VmValue) -> 
 #[inline]
 pub fn find_key(
     heap: &Heap,
-    budget: &impl FuelBudget,
+    meter: &impl Meter,
     table: &KeyIndex,
     hash: u64,
     k: VmValue,
     key_at: impl Fn(usize) -> Option<VmValue>,
 ) -> Result<Option<usize>, Fail> {
-    find_metered(budget, table, k, hash, |slot| match key_at(slot) {
-        Some(stored_key) => keys_eq(heap, budget, stored_key, k),
+    find_metered(meter, table, k, hash, |slot| match key_at(slot) {
+        Some(stored_key) => keys_eq(heap, meter, stored_key, k),
         None => Ok(false),
     })
 }
@@ -513,21 +513,21 @@ pub fn find_key(
 /// Finds the slot in `table` for `key` with `hash` that satisfies `is_match`.
 ///
 /// Refunds the fuel of each failed comparison. Only the matching comparison
-/// charges `budget`.
+/// charges the meter.
 #[inline]
 fn find_metered(
-    budget: &impl FuelBudget,
+    meter: &impl Meter,
     table: &KeyIndex,
     key: VmValue,
     hash: u64,
     is_match: impl Fn(usize) -> Result<bool, Fail>,
 ) -> Result<Option<usize>, Fail> {
-    let mark = budget.fuel_mark();
+    let mark = meter.fuel_mark();
     let mut failure = None;
     let slot = table.find(key, hash, |slot| match is_match(slot) {
         Ok(true) => true,
         Ok(false) => {
-            budget.refund_to(mark);
+            meter.refund_to(mark);
             false
         }
         Err(fail) => {
@@ -543,19 +543,19 @@ fn find_metered(
 
 /// Equality of two keys (of a `Hash` type).
 #[inline]
-pub fn keys_eq(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
+pub fn keys_eq(heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     match (a, b) {
         (VmValue::Int(x), VmValue::Int(y)) => Ok(x == y),
         (VmValue::Obj(x), VmValue::Obj(y)) if x == y => Ok(true),
         (VmValue::Obj(x), VmValue::Obj(y)) => match (heap.obj(x), heap.obj(y)) {
             (Obj::Str(p), Obj::Str(q)) => {
-                budget.charge_bytes(p.len().min(q.len()))?;
+                meter.charge_bytes(p.len().min(q.len()))?;
                 Ok(p.as_bytes() == q.as_bytes())
             }
-            _ => values_eq_metered(heap, budget, a, b),
+            _ => values_eq_metered(heap, meter, a, b),
         },
         _ if a == b => Ok(true),
-        _ => values_eq_metered(heap, budget, a, b),
+        _ => values_eq_metered(heap, meter, a, b),
     }
 }
 
@@ -567,37 +567,37 @@ pub fn keys_eq(heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) ->
 /// substructure are hashed in time linear in their heap size. Returns an
 /// internal error if `v` has a type that does not implement `Hash`.
 #[inline]
-pub fn hash_key(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<u64, Fail> {
+pub fn hash_key(heap: &Heap, meter: &impl Meter, v: VmValue) -> Result<u64, Fail> {
     // Fast paths, inlined: the common scalar and string keys.
     match v {
         VmValue::Int(i) => Ok(int_hash(i)),
         VmValue::Pair(a, b) => Ok(pair_hash(a as i64, b)),
         VmValue::Obj(_) => match heap.get(v) {
             Obj::Str(s) => {
-                budget.charge_bytes(s.len())?;
+                meter.charge_bytes(s.len())?;
                 Ok(bytes_hash(s.as_bytes()))
             }
-            _ => hash_composite(heap, budget, v),
+            _ => hash_composite(heap, meter, v),
         },
-        _ => hash_composite(heap, budget, v),
+        _ => hash_composite(heap, meter, v),
     }
 }
 
 /// [`hash_key`] for keys that are not ints or strings.
 #[inline(never)]
-fn hash_composite(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<u64, Fail> {
+fn hash_composite(heap: &Heap, meter: &impl Meter, v: VmValue) -> Result<u64, Fail> {
     let mut w = Small::default();
     match hash_small(heap, v, SMALL_DEPTH, &mut w) {
         Some(h) => {
-            w.charge(budget)?;
+            w.charge(meter)?;
             Ok(h)
         }
-        None => hash_tree(heap, budget, v),
+        None => hash_tree(heap, meter, v),
     }
 }
 
 /// [`hash_key`] of any key, memoizing the hashes of large ones.
-fn hash_tree(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<u64, Fail> {
+fn hash_tree(heap: &Heap, meter: &impl Meter, v: VmValue) -> Result<u64, Fail> {
     let mut stack = HashStack::default();
     let mut memo: Option<FxHashMap<u32, u64>> = None;
     let mut nodes = 0usize;
@@ -606,12 +606,12 @@ fn hash_tree(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<u64, F
         // The hash of the next finished node, if any.
         let done = match next.take() {
             Some(v) => {
-                budget.charge(1)?;
+                meter.charge(1)?;
                 nodes += 1;
                 if nodes == MEMO_AFTER {
                     memo = Some(FxHashMap::default());
                 }
-                match leaf_hash(heap, budget, v)? {
+                match leaf_hash(heap, meter, v)? {
                     Some(h) => Some(h),
                     None => {
                         if let (Some(memo), VmValue::Obj(h)) = (&memo, v)
@@ -684,7 +684,7 @@ fn bytes_hash(b: &[u8]) -> u64 {
 /// Computes the hash of `v` if `v` is a scalar or leaf object, or returns
 /// `Ok(None)` if `v` is a composite container (tuple, struct, or payload variant).
 #[inline]
-fn leaf_hash(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<Option<u64>, Fail> {
+fn leaf_hash(heap: &Heap, meter: &impl Meter, v: VmValue) -> Result<Option<u64>, Fail> {
     let mut h = FxHasher::default();
     match v {
         VmValue::Unit | VmValue::Uninit => h.write_u8(0),
@@ -704,11 +704,11 @@ fn leaf_hash(heap: &Heap, budget: &impl FuelBudget, v: VmValue) -> Result<Option
         }
         VmValue::Obj(_) => match heap.get(v) {
             Obj::Str(s) => {
-                budget.charge_bytes(s.len())?;
+                meter.charge_bytes(s.len())?;
                 return Ok(Some(bytes_hash(s.as_bytes())));
             }
             Obj::Bytes(b) => {
-                budget.charge_bytes(b.len())?;
+                meter.charge_bytes(b.len())?;
                 return Ok(Some(bytes_hash(b)));
             }
             Obj::Variant(..) | Obj::Tuple(_) | Obj::Struct(..) => return Ok(None),
@@ -848,33 +848,33 @@ enum CmpWork {
     },
 }
 
-/// [`values_cmp`], charging `budget` for the work. Comparisons are
+/// [`values_cmp`], charging the meter for the work. Comparisons are
 /// lexicographic and stop at the first difference.
-pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<Ordering, Fail> {
+pub fn values_cmp_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<Ordering, Fail> {
     // Fast paths for the common element types of sorted lists.
     match (a, b) {
         (VmValue::Int(x), VmValue::Int(y)) | (VmValue::Dur(x), VmValue::Dur(y)) => {
-            budget.charge(1)?;
+            meter.charge(1)?;
             return Ok(x.cmp(&y));
         }
         (VmValue::Float(x), VmValue::Float(y)) => {
-            budget.charge(1)?;
+            meter.charge(1)?;
             return Ok(total_cmp_f(x, y));
         }
         (VmValue::Bool(x), VmValue::Bool(y)) => {
-            budget.charge(1)?;
+            meter.charge(1)?;
             return Ok(x.cmp(&y));
         }
         (VmValue::Obj(_), VmValue::Obj(_)) => match (heap.get(a), heap.get(b)) {
             (Obj::Str(p), Obj::Str(q)) => {
-                budget.charge(1 + (p.len().min(q.len()) / super::meter::BYTES_PER_FUEL_UNIT) as u64)?;
+                meter.charge(1 + (p.len().min(q.len()) / super::meter::BYTES_PER_FUEL_UNIT) as u64)?;
                 return Ok(p.as_bytes().cmp(q.as_bytes()));
             }
             (x, y)
                 if let (Some(p), Some(q)) = (x.value(), y.value())
                     && let Some(o) = p.value_cmp(q) =>
             {
-                budget.charge(1)?;
+                meter.charge(1)?;
                 return Ok(o);
             }
             _ => {}
@@ -883,7 +883,7 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget,
     }
     let mut w = Small::default();
     if let Some(o) = cmp_small(prog, heap, a, b, SMALL_DEPTH, &mut w) {
-        w.charge(budget)?;
+        w.charge(meter)?;
         return Ok(o);
     }
     let mut stack: Vec<CmpWork> = vec![CmpWork::Pair(a, b)];
@@ -904,7 +904,7 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget,
                 }
             }
         };
-        budget.charge(1)?;
+        meter.charge(1)?;
         let ord = match (a, b) {
             (VmValue::Unit, VmValue::Unit) => Ordering::Equal,
             (VmValue::Pair(..), _) | (_, VmValue::Pair(..)) => int_pair(heap, a).cmp(&int_pair(heap, b)),
@@ -943,11 +943,11 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget,
                         } else {
                             match (ox, oy) {
                                 (Obj::Str(p), Obj::Str(q)) => {
-                                    budget.charge_bytes(p.len().min(q.len()))?;
+                                    meter.charge_bytes(p.len().min(q.len()))?;
                                     p.as_bytes().cmp(q.as_bytes())
                                 }
                                 (Obj::Bytes(p), Obj::Bytes(q)) => {
-                                    budget.charge_bytes(p.len().min(q.len()))?;
+                                    meter.charge_bytes(p.len().min(q.len()))?;
                                     p.cmp(q)
                                 }
                                 (Obj::List(_), Obj::List(_)) => {
@@ -998,25 +998,25 @@ pub fn values_le(prog: &Program, heap: &Heap, a: VmValue, b: VmValue) -> bool {
     }
 }
 
-/// [`values_lt`], charging `budget`.
-pub fn values_lt_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
+/// [`values_lt`], charging the meter.
+pub fn values_lt_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => x < y,
-        _ => values_cmp_metered(prog, heap, budget, a, b)? == Ordering::Less,
+        _ => values_cmp_metered(prog, heap, meter, a, b)? == Ordering::Less,
     })
 }
 
-/// [`values_le`], charging `budget`.
-pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl FuelBudget, a: VmValue, b: VmValue) -> Result<bool, Fail> {
+/// [`values_le`], charging the meter.
+pub fn values_le_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => x <= y,
-        _ => values_cmp_metered(prog, heap, budget, a, b)? != Ordering::Greater,
+        _ => values_cmp_metered(prog, heap, meter, a, b)? != Ordering::Greater,
     })
 }
 
 /// If all elements in `v` have the same packed value type with `ordered_bits`,
 /// sorts `v` by its packed bits. Returns `None` otherwise.
-pub fn try_sort_packed(v: &mut [VmValue], heap: &Heap, budget: &impl FuelBudget) -> Option<Result<(), Fail>> {
+pub fn try_sort_packed(v: &mut [VmValue], heap: &Heap, meter: &impl Meter) -> Option<Result<(), Fail>> {
     let packed = |x: &VmValue| match x {
         VmValue::Obj(h) => match heap.obj(*h) {
             Obj::Packed(t, bits) => Some((*t, *bits)),
@@ -1029,24 +1029,24 @@ pub fn try_sort_packed(v: &mut [VmValue], heap: &Heap, budget: &impl FuelBudget)
         return None;
     }
     let key = |x: VmValue| (packed(&x).map_or([0; 2], |(_, bits)| bits), x);
-    Some(sort_keys(v, budget, key, |(_, x)| x, |a: &([u64; 2], VmValue), b| a.0.cmp(&b.0)))
+    Some(sort_keys(v, meter, key, |(_, x)| x, |a: &([u64; 2], VmValue), b| a.0.cmp(&b.0)))
 }
 
 /// Sorts a list whose elements are all ints, all floats or all durations
 /// without the generic comparator; `None` for other lists. The work is
-/// charged to `budget` before each bounded step (sorting one chunk, or one
+/// charged to the meter before each bounded step (sorting one chunk, or one
 /// merge pass), so limits are checked in between. On error `v` holds a
 /// permutation of its elements.
-pub fn try_sort_numbers(v: &mut [VmValue], budget: &impl FuelBudget) -> Option<Result<(), Fail>> {
+pub fn try_sort_numbers(v: &mut [VmValue], meter: &impl Meter) -> Option<Result<(), Fail>> {
     match v.first()? {
         VmValue::Int(_) if v.iter().all(|x| matches!(x, VmValue::Int(_))) => {
-            Some(sort_keys(v, budget, |x| x.as_int(), VmValue::Int, |a: &i64, b: &i64| a.cmp(b)))
+            Some(sort_keys(v, meter, |x| x.as_int(), VmValue::Int, |a: &i64, b: &i64| a.cmp(b)))
         }
         VmValue::Dur(_) if v.iter().all(|x| matches!(x, VmValue::Dur(_))) => {
-            Some(sort_keys(v, budget, |x| x.as_int(), VmValue::Dur, |a: &i64, b: &i64| a.cmp(b)))
+            Some(sort_keys(v, meter, |x| x.as_int(), VmValue::Dur, |a: &i64, b: &i64| a.cmp(b)))
         }
         VmValue::Float(_) if v.iter().all(|x| matches!(x, VmValue::Float(_))) => {
-            Some(sort_keys(v, budget, |x| x.as_float(), VmValue::Float, |a: &f64, b: &f64| total_cmp_f(*a, *b)))
+            Some(sort_keys(v, meter, |x| x.as_float(), VmValue::Float, |a: &f64, b: &f64| total_cmp_f(*a, *b)))
         }
         _ => None,
     }
@@ -1054,7 +1054,7 @@ pub fn try_sort_numbers(v: &mut [VmValue], budget: &impl FuelBudget) -> Option<R
 
 fn sort_keys<K: Copy>(
     v: &mut [VmValue],
-    budget: &impl FuelBudget,
+    meter: &impl Meter,
     key: impl Fn(VmValue) -> K,
     value: fn(K) -> VmValue,
     cmp: fn(&K, &K) -> Ordering,
@@ -1066,7 +1066,7 @@ fn sort_keys<K: Copy>(
     for c in keys.chunks_mut(CHUNK) {
         // About log2(len) comparisons per element.
         let cost = c.len() as u64 * (usize::BITS - c.len().leading_zeros()) as u64;
-        if let Err(e) = budget.charge(cost) {
+        if let Err(e) = meter.charge(cost) {
             result = Err(e);
             break;
         }
@@ -1077,7 +1077,7 @@ fn sort_keys<K: Copy>(
         let mut in_keys = true;
         let mut width = CHUNK;
         while width < n {
-            if let Err(e) = budget.charge(n as u64) {
+            if let Err(e) = meter.charge(n as u64) {
                 result = Err(e);
                 break;
             }
@@ -1264,11 +1264,11 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct CountingBudget {
+    struct CountingMeter {
         units: std::cell::Cell<i64>,
     }
 
-    impl FuelBudget for CountingBudget {
+    impl Meter for CountingMeter {
         fn charge(&self, units: u64) -> Result<(), Fail> {
             self.units.set(self.units.get() + units as i64);
             Ok(())
@@ -1293,7 +1293,7 @@ mod tests {
         let mut index = KeyIndex::default();
         index.insert(key, hash, 0);
 
-        let budget = CountingBudget::default();
+        let budget = CountingMeter::default();
         assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(other)).unwrap(), None);
         assert_eq!(budget.units.get(), 0, "hash-tag collision refunded");
         assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(equal)).unwrap(), Some(0));
