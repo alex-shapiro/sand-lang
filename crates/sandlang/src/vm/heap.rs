@@ -6,10 +6,10 @@
 //!
 //! ## Safety Rules for Callers
 //!
-//! The VM runs garbage collection only at safe points. It never collects
-//! during a native call. Native functions may hold [`VmValue`] values in local
-//! variables during a call. Callers must not hold a `&mut Obj` across a safe
-//! point.
+//! The VM runs garbage collection at safe points. It never collects during
+//! a native call, and so native functions may hold [`VmValue`] values in local
+//! variables without rooting them. Callers must not hold a `&mut Obj` across
+//! a safe point.
 //!
 //! To mutate an object that holds [`VmValue`] values, call [`Heap::get_mut`],
 //! [`Heap::get_mut_storing`], or a container method built on them. Those
@@ -22,9 +22,9 @@
 //! Reachable objects keep their mark bits set after a collection and become
 //! old.
 //!
-//! - A **minor collection** traces from roots and `remembered`. It traces only
+//! - A minor collection traces from roots and `remembered`. It traces only
 //!   unmarked young objects and sweeps only `young`.
-//! - A **major collection** sweeps the full arena to reclaim unreachable old
+//! - A major collection sweeps the full heap to reclaim all unreachable
 //!   objects. It runs if `object_bytes` exceeds `next_major_gc_bytes`, or if a
 //!   minor collection leaves memory usage above `limit`.
 //!
@@ -33,16 +33,15 @@
 //! For large heaps, the collector runs major collections in allocation-paced
 //! marking and sweeping steps. Minor collections still run between steps.
 //!
-//! - **Marking** traces reachable objects into `cycle_mark_bits` using a
-//!   bounded worklist in `gray_worklist`. Write barriers during marking shade
-//!   newly stored values or requeue mutated objects.
-//! - **Completion** rescans the roots and drains `gray_worklist`. It then
-//!   copies `cycle_mark_bits` into `mark_bits` and clears `remembered` and
-//!   `young`.
-//! - **Sweeping** frees unmarked slots in bounded steps. The allocator sets
-//!   bits in `cycle_mark_bits` for objects created during sweeping. If a
-//!   memory limit requires immediate reclamation, the collector aborts the
-//!   incremental cycle and runs a full major collection.
+//! - Marking traces reachable objects into `cycle_mark_bits` using a bounded
+//!   worklist in `gray_worklist`. Write barriers during marking shade newly
+//!   stored values or requeue mutated objects.
+//! - Completion rescans the roots and drains `gray_worklist`. It then copies
+//!   `cycle_mark_bits` into `mark_bits` and clears `remembered` and `young`.
+//! - Sweeping frees unmarked slots in bounded steps. The allocator sets bits in
+//!   `cycle_mark_bits` for objects created during sweeping. If a memory limit
+//!   requires immediate reclamation, the collector aborts the incremental cycle
+//!   and runs a full major collection.
 
 use super::iomem::IoMemory;
 use super::value::*;
@@ -56,13 +55,13 @@ use std::time::Duration;
 pub struct GcStats {
     /// Total number of completed collections.
     pub collections: u64,
-    /// Total time spent in collections, including root scanning.
+    /// Total time spent in collections, incremental steps, and root scans.
     pub total_pause: Duration,
-    /// Duration of the longest single collection.
+    /// Longest single collection or incremental step.
     pub max_pause: Duration,
     /// Number of full-heap major collections.
     pub major_collections: u64,
-    /// Duration of the longest major collection.
+    /// Duration of the longest non-incremental major collection.
     pub max_major_pause: Duration,
     /// Duration of the longest minor collection.
     pub max_minor_pause: Duration,
@@ -73,7 +72,7 @@ pub struct GcStats {
 }
 
 impl GcStats {
-    /// Records a completed minor or major collection.
+    /// Records a completed minor or non-incremental major collection.
     pub fn record(&mut self, pause: Duration, major: bool) {
         self.collections += 1;
         self.total_pause += pause;
@@ -97,7 +96,7 @@ impl GcStats {
 
 /// Current phase of an incremental major collection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IncrementalPhase {
+enum IncrementalGcPhase {
     Idle,
     Marking,
     Sweeping,
@@ -108,19 +107,19 @@ pub struct Heap {
     slots: Vec<Obj>,
     /// Sticky mark bits set for old objects retained by a prior collection.
     mark_bits: Vec<u64>,
-    /// Bitmask of slots currently listed in `remembered`.
+    /// Bitmask deduplicating entries in `remembered`.
     remembered_bits: Vec<u64>,
     /// Old object slots mutated since the last collection.
     remembered: Vec<u32>,
     /// Bitmask of remembered containers tracked with partial write barriers.
-    partial_bits: Vec<u64>,
+    partial_barrier_bits: Vec<u64>,
     /// Bitmask of partially remembered containers whose pushed tail is already tracked.
-    tail_bits: Vec<u64>,
+    pushed_tail_bits: Vec<u64>,
     /// Modified indices and pushed tails for partially remembered containers.
     dirty_containers: FxHashMap<u32, DirtyContainer>,
     /// Slots allocated since the last collection.
     young: Vec<u32>,
-    free_head: u32,
+    free_list_head: u32,
     /// Estimated bytes held by heap objects.
     ///
     /// This value is exact after a major collection. Between collections, it
@@ -128,7 +127,7 @@ pub struct Heap {
     pub object_bytes: usize,
     /// Triggers a collection if `object_bytes` exceeds this threshold.
     pub next_gc_bytes: usize,
-    /// Makes the next collection a major collection if `object_bytes` exceeds this threshold.
+    /// Triggers a major collection while idle if `object_bytes` exceeds this threshold.
     pub next_major_gc_bytes: usize,
     pub limit: Option<usize>,
     /// Byte capacity of collector bitmaps, worklists, and `dirty_containers`.
@@ -141,24 +140,24 @@ pub struct Heap {
     /// during each collection.
     pub fiber_bytes: usize,
     pub live_objects: usize,
-    /// Open resources allocated since the last collection; triggers a collection at [`RESOURCE_BURST`].
+    /// Open resources allocated since the last collection; triggers a collection at [`RESOURCE_GC_BURST`].
     young_resources: usize,
     /// Triggers garbage collection at every safe point for stress testing.
     pub gc_stress: bool,
     /// Forces the next memory-limit check to fail for retry stress testing.
     pub(crate) fail_next_check: std::cell::Cell<bool>,
     /// Disables memory-limit checks during post-effect result conversion.
-    pub(crate) unchecked: bool,
+    pub(crate) ignore_memory_limit: bool,
     /// Memory reserved for pending I/O buffers, counted against `limit`.
     pub io_memory: Arc<IoMemory>,
     worklist: Vec<u32>,
     /// Large containers being traced, paired with the next child index to scan.
     scan_chunks: Vec<(u32, usize)>,
     pub stats: GcStats,
-    cycle_phase: IncrementalPhase,
+    cycle_phase: IncrementalGcPhase,
     /// Mark bits for the active incremental major collection.
     cycle_mark_bits: Vec<u64>,
-    /// Bitmask of slots queued for a full scan on `gray_worklist`.
+    /// Bitmask deduplicating full-scan entries in `gray_worklist`.
     gray_bits: Vec<u64>,
     /// Slots queued for incremental marking, paired with the next child index to scan.
     gray_worklist: Vec<(u32, usize)>,
@@ -187,7 +186,7 @@ pub struct Heap {
 
 /// Maximum slice length cached in `spare_boxes`.
 const MAX_SPARE_BOX_LEN: usize = 4;
-const OBJ_SIZE: usize = std::mem::size_of::<Obj>();
+const OBJ_SLOT_BYTES: usize = std::mem::size_of::<Obj>();
 /// Maximum number of staged entries per chunk in [`Staging`].
 const STAGE_CHUNK_LEN: usize = 4096;
 const STAGE_CHUNK_BYTES: usize = STAGE_CHUNK_LEN * std::mem::size_of::<(u32, Obj)>();
@@ -201,17 +200,17 @@ const MAX_SPARE_BOXES_PER_LEN: usize = 1 << 14;
 /// slots past the end of the arena. This order matches [`Heap::alloc`].
 pub struct Staging<'h> {
     heap: &'h Heap,
-    /// Next free slot index, or [`INVALID_SLOT`] if the free list is exhausted.
-    next_free: u32,
+    /// Next free slot index, or [`FREE_LIST_END`] if the free list is exhausted.
+    next_free_slot: u32,
     /// Next slot index past the end of the arena.
-    next_slot: usize,
+    next_arena_slot: usize,
     /// Staged handles and objects grouped in chunks up to [`STAGE_CHUNK_LEN`].
     ///
     /// Chunked storage avoids large vector reallocations that leave freed
     /// buffers in the allocator.
     chunks: Vec<Vec<(u32, Obj)>>,
     /// Total entry capacity across `chunks`.
-    capacity: usize,
+    total_capacity: usize,
     /// Reusable empty chunks of [`STAGE_CHUNK_LEN`] entries.
     spare_chunks: Vec<Vec<(u32, Obj)>>,
     /// Accounted object bytes for staged entries.
@@ -222,18 +221,18 @@ impl Staging<'_> {
     /// Stages `obj` and returns the handle value it will receive on commit.
     pub fn alloc(&mut self, obj: Obj) -> VmValue {
         self.staged_bytes += obj.size();
-        let handle = if self.next_free != INVALID_SLOT {
-            let handle = self.next_free;
-            self.next_free = match self.heap.slots[handle as usize] {
+        let handle = if self.next_free_slot != FREE_LIST_END {
+            let handle = self.next_free_slot;
+            self.next_free_slot = match self.heap.slots[handle as usize] {
                 Obj::Free(next) => next,
                 _ => unreachable!("corrupt free list"),
             };
-            // `obj.size()` includes `OBJ_SIZE`, which `Heap::overhead_bytes` already counts for free slots.
-            self.staged_bytes -= OBJ_SIZE;
+            // `obj.size()` includes `OBJ_SLOT_BYTES`, which `Heap::overhead_bytes` already counts for free slots.
+            self.staged_bytes -= OBJ_SLOT_BYTES;
             handle
         } else {
-            self.next_slot += 1;
-            (self.next_slot - 1) as u32
+            self.next_arena_slot += 1;
+            (self.next_arena_slot - 1) as u32
         };
         match self.chunks.last_mut() {
             Some(chunk) if chunk.len() < chunk.capacity() => chunk.push((handle, obj)),
@@ -241,7 +240,7 @@ impl Staging<'_> {
                 let len = self.next_chunk_capacity();
                 let mut chunk =
                     if len == STAGE_CHUNK_LEN { self.spare_chunks.pop() } else { None }.unwrap_or_else(|| Vec::with_capacity(len));
-                self.capacity += chunk.capacity();
+                self.total_capacity += chunk.capacity();
                 chunk.push((handle, obj));
                 self.chunks.push(chunk);
             }
@@ -284,22 +283,22 @@ impl Staging<'_> {
         }
     }
 
-    /// Returns `true` if `extra` additional bytes plus staged bytes exceed the heap limit.
-    pub fn would_exceed(&self, extra: usize) -> bool {
-        self.heap.would_exceed(self.staged_bytes.saturating_add(self.buffer_bytes()).saturating_add(extra))
+    /// Checks if adding `extra` bytes would exceed the heap limit.
+    pub fn would_exceed_memory_limit(&self, extra: usize) -> bool {
+        self.heap.would_exceed_memory_limit(self.staged_bytes.saturating_add(self.buffer_bytes()).saturating_add(extra))
     }
 
     fn buffer_bytes(&self) -> usize {
         let full = self.chunks.last().is_none_or(|chunk| chunk.len() == chunk.capacity());
         let next = if full { self.next_chunk_capacity() } else { 0 };
-        let entries = self.capacity + next + self.spare_chunks.len() * STAGE_CHUNK_LEN;
+        let entries = self.total_capacity + next + self.spare_chunks.len() * STAGE_CHUNK_LEN;
         let chunks = self.chunks.capacity().max(self.chunks.len() + 1);
         entries * std::mem::size_of::<(u32, Obj)>() + chunks * std::mem::size_of::<Vec<(u32, Obj)>>()
     }
 
-    /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
+    /// Returns a memory-limit error if adding `extra` bytes would exceed the heap limit.
     pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Fail> {
-        if self.would_exceed(extra) { Err(crate::vm::Fail::limit(LimitKind::Memory)) } else { Ok(()) }
+        if self.would_exceed_memory_limit(extra) { Err(crate::vm::Fail::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 }
 
@@ -309,7 +308,7 @@ impl Staging<'_> {
 /// set.
 #[derive(Default)]
 struct DirtyContainer {
-    /// First index of the appended tail, or [`INVALID_SLOT`] if the tail is empty.
+    /// First index of the appended tail, or [`UNSET_TAIL_START`] if the tail is empty.
     tail_start: u32,
     /// Individually modified element indices.
     indices: Vec<u32>,
@@ -327,14 +326,15 @@ const ELEMS_PER_DIRTY_INDEX: usize = 8;
 /// [`DirtyContainer`] entry costs more memory than scanning the elements.
 const MIN_PARTIAL_BARRIER_LEN: usize = 128;
 
-const INVALID_SLOT: u32 = u32::MAX;
+const FREE_LIST_END: u32 = u32::MAX;
+const UNSET_TAIL_START: u32 = u32::MAX;
 const MIN_GC_BYTES: usize = 4 << 20;
 /// Minimum truncated trailing slots required before shrinking arena and bitmap capacity.
 const MIN_SHRINK_SLOTS: usize = 4096;
 /// Maximum bytes allocated between minor collections.
 const MAX_NURSERY_BYTES: usize = 8 << 20;
 /// Maximum resources allocated before triggering a collection.
-const RESOURCE_BURST: usize = 64;
+const MAX_YOUNG_RESOURCES: usize = 64;
 const MIN_NURSERY_BYTES: usize = 1 << 20;
 /// Minimum `object_bytes` required to run a major collection incrementally.
 const MIN_INCREMENTAL_BYTES: usize = 8 << 20;
@@ -342,8 +342,8 @@ const MIN_INCREMENTAL_BYTES: usize = 8 << 20;
 const INCREMENTAL_STEP_BYTES: usize = 256 << 10;
 /// Marking work units per 16 allocated bytes during an incremental cycle.
 const MARK_PACE: usize = 4;
-const MIN_MARK_WORK: usize = 16 << 10;
-const MIN_SWEEP_SLOTS: usize = 32 << 10;
+const MIN_MARK_STEP_WORK: usize = 16 << 10;
+const MIN_SWEEP_STEP_SLOTS: usize = 32 << 10;
 /// Maximum container elements scanned per tracing chunk.
 const SCAN_CHUNK_LEN: usize = 4096;
 
@@ -362,11 +362,11 @@ impl Heap {
             mark_bits: Vec::new(),
             remembered_bits: Vec::new(),
             remembered: Vec::new(),
-            partial_bits: Vec::new(),
-            tail_bits: Vec::new(),
+            partial_barrier_bits: Vec::new(),
+            pushed_tail_bits: Vec::new(),
             dirty_containers: FxHashMap::default(),
             young: Vec::new(),
-            free_head: INVALID_SLOT,
+            free_list_head: FREE_LIST_END,
             object_bytes: 0,
             next_gc_bytes: MIN_GC_BYTES,
             next_major_gc_bytes: MIN_GC_BYTES,
@@ -378,12 +378,12 @@ impl Heap {
             young_resources: 0,
             gc_stress: false,
             fail_next_check: std::cell::Cell::new(false),
-            unchecked: false,
+            ignore_memory_limit: false,
             io_memory: IoMemory::new(limit, max_resources),
             worklist: Vec::new(),
             scan_chunks: Vec::new(),
             stats: GcStats::default(),
-            cycle_phase: IncrementalPhase::Idle,
+            cycle_phase: IncrementalGcPhase::Idle,
             cycle_mark_bits: Vec::new(),
             gray_bits: Vec::new(),
             gray_worklist: Vec::new(),
@@ -412,6 +412,7 @@ impl Heap {
         }
     }
 
+    /// Stores `obj` in the arena as a young object and returns its handle.
     #[inline]
     pub fn alloc(&mut self, obj: Obj) -> VmValue {
         self.object_bytes += obj.size();
@@ -419,13 +420,13 @@ impl Heap {
         if let Obj::Native(native) = &obj
             && native.is_resource()
         {
-            self.resource_allocated();
+            self.record_resource_allocation();
         }
         // Free and newly appended slots have clear mark bits, so the object starts young.
-        let handle = if self.free_head != INVALID_SLOT {
-            let handle = self.free_head;
+        let handle = if self.free_list_head != FREE_LIST_END {
+            let handle = self.free_list_head;
             match self.slots[handle as usize] {
-                Obj::Free(next) => self.free_head = next,
+                Obj::Free(next) => self.free_list_head = next,
                 _ => unreachable!("corrupt free list"),
             }
             self.slots[handle as usize] = obj;
@@ -435,15 +436,15 @@ impl Heap {
             if self.mark_bits.len() * 64 < self.slots.len() {
                 self.mark_bits.push(0);
                 self.remembered_bits.push(0);
-                self.partial_bits.push(0);
-                self.tail_bits.push(0);
+                self.partial_barrier_bits.push(0);
+                self.pushed_tail_bits.push(0);
                 self.cycle_mark_bits.push(0);
                 self.gray_bits.push(0);
                 self.update_table_bytes();
             }
             (self.slots.len() - 1) as u32
         };
-        if self.cycle_phase == IncrementalPhase::Sweeping {
+        if self.cycle_phase == IncrementalGcPhase::Sweeping {
             // Mark the new object so the active sweep retains it.
             set_bit(&mut self.cycle_mark_bits, handle);
         }
@@ -463,15 +464,15 @@ impl Heap {
         self.spare_bytes -= spare_chunks.len() * STAGE_CHUNK_BYTES;
         let mut staging = Staging {
             heap: self,
-            next_free: self.free_head,
-            next_slot: self.slots.len(),
+            next_free_slot: self.free_list_head,
+            next_arena_slot: self.slots.len(),
             chunks: Vec::new(),
-            capacity: 0,
+            total_capacity: 0,
             spare_chunks,
             staged_bytes: 0,
         };
         let result = f(self, &mut staging);
-        let (next_free, chunks, mut spare_chunks) = (staging.next_free, staging.chunks, staging.spare_chunks);
+        let (next_free_slot, chunks, mut spare_chunks) = (staging.next_free_slot, staging.chunks, staging.spare_chunks);
         for mut chunk in chunks {
             for (handle, obj) in chunk.drain(..) {
                 let value = self.alloc(obj);
@@ -481,21 +482,10 @@ impl Heap {
                 spare_chunks.push(chunk);
             }
         }
-        debug_assert_eq!(self.free_head, next_free);
+        debug_assert_eq!(self.free_list_head, next_free_slot);
         self.spare_bytes += spare_chunks.len() * STAGE_CHUNK_BYTES;
         self.spare_chunks = spare_chunks;
         result
-    }
-
-    /// Returns `true` if a collection should run at the next safe point.
-    #[inline]
-    pub fn needs_gc(&self) -> bool {
-        self.object_bytes > self.next_gc_bytes
-    }
-
-    /// Checks whether the heap needs a major collection now.
-    pub fn needs_major_gc(&self) -> bool {
-        self.cycle_phase == IncrementalPhase::Idle && self.object_bytes > self.next_major_gc_bytes
     }
 
     /// Records a full write barrier for `handle` if it refers to an old object.
@@ -503,7 +493,7 @@ impl Heap {
     fn record_write_barrier(&mut self, handle: u32) {
         // Keep the fast path inline so only unremembered old objects call the cold helper.
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        if self.mark_bits[word] & bit != 0 && (self.remembered_bits[word] & bit == 0 || self.partial_bits[word] & bit != 0) {
+        if self.mark_bits[word] & bit != 0 && (self.remembered_bits[word] & bit == 0 || self.partial_barrier_bits[word] & bit != 0) {
             self.remember_old_object(handle);
         }
     }
@@ -517,16 +507,16 @@ impl Heap {
             self.remembered_bits[word] |= bit;
             self.remembered.push(handle);
         } else {
-            self.remember_fully(handle);
+            self.remember_object_fully(handle);
         }
     }
 
     /// Upgrades a partially remembered container to a full scan.
     #[cold]
-    fn remember_fully(&mut self, handle: u32) {
+    fn remember_object_fully(&mut self, handle: u32) {
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        self.partial_bits[word] &= !bit;
-        self.tail_bits[word] &= !bit;
+        self.partial_barrier_bits[word] &= !bit;
+        self.pushed_tail_bits[word] &= !bit;
         self.dirty_containers.remove(&handle);
     }
 
@@ -553,9 +543,9 @@ impl Heap {
             if self.entries_len(handle) < MIN_PARTIAL_BARRIER_LEN {
                 return;
             }
-            self.partial_bits[word] |= bit;
-            self.dirty_containers.insert(handle, DirtyContainer { tail_start: INVALID_SLOT, indices: Vec::new() });
-        } else if self.partial_bits[word] & bit == 0 || (is_push && self.tail_bits[word] & bit != 0) {
+            self.partial_barrier_bits[word] |= bit;
+            self.dirty_containers.insert(handle, DirtyContainer { tail_start: UNSET_TAIL_START, indices: Vec::new() });
+        } else if self.partial_barrier_bits[word] & bit == 0 || (is_push && self.pushed_tail_bits[word] & bit != 0) {
             // Fully remembered, or the pushed tail is already covered.
             return;
         }
@@ -574,31 +564,31 @@ impl Heap {
     #[cold]
     fn record_dirty_index(&mut self, handle: u32, index: usize, is_push: bool) {
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-        let index = index.min(INVALID_SLOT as usize - 1) as u32;
+        let index = index.min(UNSET_TAIL_START as usize - 1) as u32;
         let len = self.entries_len(handle);
         let Some(dirty) = self.dirty_containers.get_mut(&handle) else { return };
         if is_push {
             dirty.tail_start = dirty.tail_start.min(index);
-            self.tail_bits[word] |= bit;
+            self.pushed_tail_bits[word] |= bit;
         } else if dirty.indices.len() < len / ELEMS_PER_DIRTY_INDEX {
             dirty.indices.push(index);
         } else {
-            self.remember_fully(handle);
+            self.remember_object_fully(handle);
         }
     }
 
-    /// Returns `true` if `extra` additional bytes exceed `limit`, including pending I/O buffers.
-    pub fn would_exceed(&self, extra: usize) -> bool {
-        if self.fail_next_check.get() && !self.unchecked {
+    /// Returns `true` if `extra` additional bytes exceed the memory limit, including pending I/O buffers.
+    pub fn would_exceed_memory_limit(&self, extra: usize) -> bool {
+        if self.fail_next_check.get() && !self.ignore_memory_limit {
             self.fail_next_check.set(false);
             return true;
         }
         match self.limit {
             Some(limit) => {
-                let used = self.used();
+                let used = self.used_bytes();
                 // Publish current heap usage before growth so pending I/O checks see an up-to-date total.
                 self.io_memory.publish_heap(used);
-                !self.unchecked && used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > limit
+                !self.ignore_memory_limit && used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > limit
             }
             None => extra > super::iomem::UNLIMITED,
         }
@@ -607,24 +597,23 @@ impl Heap {
     /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
     /// Allocate the bytes immediately after this check, or use [`Scratch`](super::meter::Scratch) to track a growing buffer.
     pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Fail> {
-        if self.would_exceed(extra) { Err(crate::vm::Fail::limit(LimitKind::Memory)) } else { Ok(()) }
+        if self.would_exceed_memory_limit(extra) { Err(crate::vm::Fail::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 
     /// Returns `true` if current memory usage exceeds `limit`.
-    pub fn over_limit(&self) -> bool {
-        matches!(self.limit, Some(limit) if self.used().saturating_add(self.io_memory.reserved()) > limit)
+    pub fn is_over_memory_limit(&self) -> bool {
+        matches!(self.limit, Some(limit) if self.used_bytes().saturating_add(self.io_memory.reserved()) > limit)
     }
 
-    /// Returns total bytes used by objects, fibers, spare buffers, arena slots,
-    /// and collector tables, excluding pending I/O.
-    pub fn used(&self) -> usize {
+    /// Returns total bytes used by the heap and fibers, excluding pending I/O.
+    pub fn used_bytes(&self) -> usize {
         self.object_bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes).saturating_add(self.overhead_bytes())
     }
 
     /// Returns byte capacity of unused arena slots and collector tables.
     #[inline]
     fn overhead_bytes(&self) -> usize {
-        self.arena_peak_slots.max(self.slots.len()).saturating_sub(self.live_objects) * OBJ_SIZE
+        self.arena_peak_slots.max(self.slots.len()).saturating_sub(self.live_objects) * OBJ_SLOT_BYTES
             + self.young.capacity() * std::mem::size_of::<u32>()
             + self.table_bytes
     }
@@ -632,7 +621,14 @@ impl Heap {
     #[cold]
     #[inline(never)]
     fn update_table_bytes(&mut self) {
-        let bitmaps = [&self.mark_bits, &self.remembered_bits, &self.partial_bits, &self.tail_bits, &self.cycle_mark_bits, &self.gray_bits];
+        let bitmaps = [
+            &self.mark_bits,
+            &self.remembered_bits,
+            &self.partial_barrier_bits,
+            &self.pushed_tail_bits,
+            &self.cycle_mark_bits,
+            &self.gray_bits,
+        ];
         let words: usize = bitmaps.iter().map(|bits| bits.capacity()).sum();
         // `HashMap` allocates 8 buckets and 8 control bytes for every 7 entries of capacity.
         let dirty = self.dirty_containers.capacity() * (std::mem::size_of::<(u32, DirtyContainer)>() + 1) * 8 / 7;
@@ -644,6 +640,7 @@ impl Heap {
             + self.scan_chunks.capacity() * std::mem::size_of::<(u32, usize)>();
     }
 
+    /// Returns the object for `value`, or `Obj::Free(0)` if `value` is not a handle.
     #[inline]
     pub fn get(&self, value: VmValue) -> &Obj {
         match value {
@@ -658,8 +655,8 @@ impl Heap {
         &self.slots[handle as usize]
     }
 
-    /// Returns the object at `handle`, or `None` if `handle` is past the end of the arena.
-    pub fn try_obj(&self, handle: u32) -> Option<&Obj> {
+    /// Returns the object at untraced `handle`, or `None` if `handle` is past the end of the arena.
+    pub fn get_obj(&self, handle: u32) -> Option<&Obj> {
         self.slots.get(handle as usize)
     }
 
@@ -673,7 +670,7 @@ impl Heap {
         match value {
             VmValue::Obj(handle) => {
                 self.record_write_barrier(handle);
-                if matches!(self.cycle_phase, IncrementalPhase::Marking) {
+                if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
                     self.requeue_gray(handle);
                 }
                 &mut self.slots[handle as usize]
@@ -694,8 +691,8 @@ impl Heap {
                 if stored.iter().any(|item| item.handle().is_some_and(|child| !self.is_marked(child))) {
                     self.record_write_barrier(handle);
                 }
-                if matches!(self.cycle_phase, IncrementalPhase::Marking) {
-                    stored.iter().for_each(|&item| self.shade(item));
+                if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
+                    stored.iter().for_each(|&item| self.mark_incremental(item));
                 }
                 &mut self.slots[handle as usize]
             }
@@ -737,14 +734,13 @@ impl Heap {
         }
     }
 
-    /// Returns the byte count copied by [`Heap::append_str`], used for metering
-    /// `Op::AppendStr`.
+    /// Returns the byte count for metering [`Heap::append_str`].
     ///
-    /// Appending to a mutable string buffer copies only `suffix` because buffer
-    /// growth is amortized. Appending to a frozen string copies both `base` and
-    /// `suffix` into a new buffer.
+    /// If `base` is a mutable string buffer separate from `suffix`,
+    /// returns the length of `suffix`. Otherwise, returns the combined
+    /// length of `base` and `suffix`.
     #[inline(never)]
-    pub fn append_str_copy_bytes(&self, base: VmValue, suffix: VmValue) -> usize {
+    pub fn append_str_byte_cost(&self, base: VmValue, suffix: VmValue) -> usize {
         let extra = self.str(suffix).len();
         match base {
             VmValue::Obj(handle) if suffix.handle() != Some(handle) && matches!(self.slots[handle as usize], Obj::StrBuf(_)) => extra,
@@ -785,7 +781,7 @@ impl Heap {
                 return Ok(base);
             }
             let grow = if len + extra > cap { (len + extra).max(2 * cap) - cap } else { 0 };
-            if grow > 0 && self.would_exceed(grow) {
+            if grow > 0 && self.would_exceed_memory_limit(grow) {
                 return Err(LimitKind::Memory);
             }
             let Obj::StrBuf(buf) = &mut self.slots[handle as usize] else { unreachable!() };
@@ -798,7 +794,7 @@ impl Heap {
         }
         let len = self.str(base).len();
         let cap = (2 * (len + extra)).max(16);
-        if self.would_exceed(cap) {
+        if self.would_exceed_memory_limit(cap) {
             return Err(LimitKind::Memory);
         }
         let mut text = String::with_capacity(cap);
@@ -818,7 +814,7 @@ impl Heap {
                 return Ok(base);
             }
             let grow = (len + text.len()).max(2 * cap) - cap;
-            if self.would_exceed(grow) {
+            if self.would_exceed_memory_limit(grow) {
                 return Err(LimitKind::Memory);
             }
             let Obj::StrBuf(buf) = &mut self.slots[handle as usize] else { unreachable!() };
@@ -829,7 +825,7 @@ impl Heap {
         }
         let len = self.str(base).len();
         let cap = (2 * (len + text.len())).max(16);
-        if self.would_exceed(cap) {
+        if self.would_exceed_memory_limit(cap) {
             return Err(LimitKind::Memory);
         }
         let mut buf = String::with_capacity(cap);
@@ -838,7 +834,7 @@ impl Heap {
         Ok(self.alloc(Obj::StrBuf(buf)))
     }
 
-    /// Converts string buffer `value` into an immutable string for `Op::FreezeStr`.
+    /// Converts a string buffer into an immutable string for `Op::FreezeStr`.
     #[inline]
     pub fn freeze_str(&mut self, value: VmValue) {
         if let VmValue::Obj(handle) = value
@@ -861,7 +857,7 @@ impl Heap {
         }
     }
 
-    pub fn bytes_of(&self, value: VmValue) -> &[u8] {
+    pub fn bytes(&self, value: VmValue) -> &[u8] {
         match self.get(value) {
             Obj::Bytes(bytes) => bytes,
             _ => &[],
@@ -875,6 +871,8 @@ impl Heap {
         }
     }
 
+    /// Returns a mutable reference to `value` and records a full write barrier.
+    /// Panics if `value` is not a list.
     pub fn list_mut(&mut self, value: VmValue) -> &mut Vec<VmValue> {
         match self.get_mut(value) {
             Obj::List(list) => list,
@@ -903,7 +901,7 @@ impl Heap {
         self.alloc(Obj::List(items))
     }
 
-    /// Builds a tuple from `items`, using [`VmValue::Pair`] if `items` is an
+    /// Builds a tuple from `items`. Uses [`VmValue::Pair`] if `items` is an
     /// inline pair of integers.
     pub fn new_tuple(&mut self, items: &[VmValue]) -> VmValue {
         match *items {
@@ -927,8 +925,8 @@ impl Heap {
         if stored.handle().is_some_and(|child| !self.is_marked(child)) {
             self.record_container_barrier(handle, index, false);
         }
-        if matches!(self.cycle_phase, IncrementalPhase::Marking) {
-            self.shade(stored);
+        if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
+            self.mark_incremental(stored);
         }
         match &mut self.slots[handle as usize] {
             Obj::List(items) => Some(items),
@@ -939,8 +937,8 @@ impl Heap {
     /// Returns a mutable reference to the state of iterator `value`, or `None`
     /// if `value` is not an `Obj::IterFn`.
     ///
-    /// Iterator state updates store only cursor offsets, so callers do not
-    /// need a write barrier.
+    /// Callers must not store a new object handle through this reference, so
+    /// this method skips the write barrier.
     #[inline]
     pub fn iter_src_mut(&mut self, value: VmValue) -> Option<&mut IterSrc> {
         match value {
@@ -955,7 +953,7 @@ impl Heap {
     /// Returns a mutable reference to the active iterator pins of map or set
     /// `value`, or `None` for other objects.
     ///
-    /// Pins contain only integer handles, so callers do not need a write
+    /// Pins do not hold traced VM values, so this method skips the write
     /// barrier.
     pub fn pins_mut(&mut self, value: VmValue) -> Option<&mut Pins> {
         match value {
@@ -968,33 +966,32 @@ impl Heap {
         }
     }
 
-    /// Returns a mutable reference to `list` for removing elements from its
-    /// end, or `None` if `list` is not a list.
+    /// Returns a mutable reference to `list` for `pop` or `clear` without
+    /// recording a full write barrier, or `None` if `list` is not a list.
     ///
-    /// Callers must only pop or clear elements and must not store or shift
-    /// values. This method clears the pushed-tail shortcut so the next append
-    /// records the new tail index.
+    /// Callers must not store or shift values.
     pub fn list_mut_truncating(&mut self, list: VmValue) -> Option<&mut Vec<VmValue>> {
         let VmValue::Obj(handle) = list else { return None };
-        clear_bit(&mut self.tail_bits, handle);
+        // Clear the pushed-tail shortcut because truncation can move the list end below `tail_start`.
+        clear_bit(&mut self.pushed_tail_bits, handle);
         match &mut self.slots[handle as usize] {
             Obj::List(items) => Some(items),
             _ => None,
         }
     }
 
-    /// Returns a mutable reference to map or set `obj` for storing `stored` at
-    /// entry `slot`.
+    /// Returns a mutable reference to map or set `container` for storing
+    /// `stored` at `entry_index`.
     ///
     /// Set `is_push` to `true` if appending at the end of the entry table.
-    /// Callers must store only values from `stored` at `slot`.
-    pub fn entries_mut_storing(&mut self, obj: VmValue, slot: usize, is_push: bool, stored: &[VmValue]) -> &mut Obj {
-        let VmValue::Obj(handle) = obj else { panic!("internal error: not an object") };
+    /// Callers must store only values from `stored` at `entry_index`.
+    pub fn entries_mut_storing(&mut self, container: VmValue, entry_index: usize, is_push: bool, stored: &[VmValue]) -> &mut Obj {
+        let VmValue::Obj(handle) = container else { panic!("internal error: not an object") };
         if stored.iter().any(|item| item.handle().is_some_and(|child| !self.is_marked(child))) {
-            self.record_container_barrier(handle, slot, is_push);
+            self.record_container_barrier(handle, entry_index, is_push);
         }
-        if matches!(self.cycle_phase, IncrementalPhase::Marking) {
-            stored.iter().for_each(|&item| self.shade(item));
+        if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
+            stored.iter().for_each(|&item| self.mark_incremental(item));
         }
         &mut self.slots[handle as usize]
     }
@@ -1014,8 +1011,8 @@ impl Heap {
         if value.handle().is_some_and(|child| !self.is_marked(child)) {
             self.record_container_barrier(handle, len, true);
         }
-        if matches!(self.cycle_phase, IncrementalPhase::Marking) {
-            self.shade(value);
+        if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
+            self.mark_incremental(value);
         }
         if let Obj::List(items) = &mut self.slots[handle as usize] {
             items.push(value);
@@ -1037,7 +1034,7 @@ impl Heap {
         if needed <= cap {
             return Ok(());
         }
-        let new_cap = self.grown_capacity(cap, needed, VALUE_SIZE, 0)?;
+        let new_cap = self.checked_grow_capacity(cap, needed, VALUE_SIZE, 0)?;
         let Obj::List(items) = &mut self.slots[handle as usize] else { unreachable!() };
         items.reserve_exact(new_cap - len);
         self.object_bytes += (items.capacity() - cap) * VALUE_SIZE;
@@ -1064,8 +1061,9 @@ impl Heap {
     /// Otherwise, it increases `cap` by 1/8 to preserve amortized constant-time
     /// appends near the limit. Returns [`LimitKind::Memory`] if neither size
     /// fits.
-    pub fn grown_capacity(&self, cap: usize, needed: usize, elem_size: usize, extra_bytes: usize) -> Result<usize, LimitKind> {
-        let fits = |candidate: usize| !self.would_exceed((candidate - cap).saturating_mul(elem_size).saturating_add(extra_bytes));
+    pub fn checked_grow_capacity(&self, cap: usize, needed: usize, elem_size: usize, extra_bytes: usize) -> Result<usize, LimitKind> {
+        let fits =
+            |candidate: usize| !self.would_exceed_memory_limit((candidate - cap).saturating_mul(elem_size).saturating_add(extra_bytes));
         let doubled = needed.max(cap.saturating_mul(2)).max(4);
         if fits(doubled) {
             return Ok(doubled);
@@ -1077,17 +1075,16 @@ impl Heap {
     /// Returns a mutable reference to `channel`, or `None` if it is not a
     /// channel.
     ///
-    /// If `stored` contains a young handle, this method records a partial write
-    /// barrier. Minor collections scan only the last `ChannelObj::pushed`
-    /// queued elements and blocked senders.
+    /// Pass `Some(value)` if adding `value` to the queue or blocked-sender list
+    /// so the collector records a partial write barrier. Pass `None` otherwise.
     pub fn channel_mut(&mut self, channel: VmValue, stored: Option<VmValue>) -> Option<&mut ChannelObj> {
         let VmValue::Obj(handle) = channel else { return None };
         if let Some(value) = stored {
             if value.handle().is_some_and(|child| !self.is_marked(child)) && self.is_marked(handle) {
-                self.channel_barrier_old(handle);
+                self.record_old_channel_barrier(handle);
             }
-            if matches!(self.cycle_phase, IncrementalPhase::Marking) {
-                self.shade(value);
+            if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
+                self.mark_incremental(value);
             }
         }
         match &mut self.slots[handle as usize] {
@@ -1098,12 +1095,12 @@ impl Heap {
 
     #[cold]
     #[inline(never)]
-    fn channel_barrier_old(&mut self, handle: u32) {
+    fn record_old_channel_barrier(&mut self, handle: u32) {
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
         if self.remembered_bits[word] & bit == 0 {
             self.remembered_bits[word] |= bit;
             self.remembered.push(handle);
-            self.partial_bits[word] |= bit;
+            self.partial_barrier_bits[word] |= bit;
             if let Obj::Channel(chan) = &mut self.slots[handle as usize] {
                 chan.pushed = 0;
             }
@@ -1119,7 +1116,7 @@ impl Heap {
         let Obj::Channel(chan) = &self.slots[handle as usize] else { return Ok(()) };
         let (len, cap) = (chan.len(), chan.queue().capacity());
         if len == cap {
-            let new_cap = self.grown_capacity(cap, len + 1, VALUE_SIZE, 0)?;
+            let new_cap = self.checked_grow_capacity(cap, len + 1, VALUE_SIZE, 0)?;
             let Obj::Channel(chan) = &mut self.slots[handle as usize] else { unreachable!() };
             chan.reserve_exact(new_cap - len);
             self.object_bytes += (chan.queue().capacity() - cap) * VALUE_SIZE;
@@ -1130,8 +1127,8 @@ impl Heap {
         Ok(())
     }
 
-    /// Returns the payload of `value` if it is the single-payload variant `id`,
-    /// or `VmValue::Uninit` otherwise.
+    /// Returns the first payload of `value` if it matches variant `id`, or
+    /// `VmValue::Uninit` otherwise.
     // Return `VmValue` instead of `Option<VmValue>` to avoid an unaligned
     // piecewise copy that stalls store-to-load forwarding.
     #[inline]
@@ -1236,15 +1233,15 @@ impl Heap {
         }
     }
 
-    /// Schedules a collection after [`RESOURCE_BURST`] resource allocations so
-    /// unclosed files and sockets are reclaimed promptly.
+    /// Schedules a collection after [`RESOURCE_GC_BURST`] resource allocations
+    /// so unclosed files and sockets are reclaimed promptly.
     ///
     /// Schedules a major collection if open resources reach half of the
     /// configured resource limit.
     #[cold]
-    fn resource_allocated(&mut self) {
+    fn record_resource_allocation(&mut self) {
         self.young_resources += 1;
-        if self.young_resources >= RESOURCE_BURST {
+        if self.young_resources >= MAX_YOUNG_RESOURCES {
             self.next_gc_bytes = 0;
             if self.io_memory.open_resources() >= self.io_memory.max_resources() / 2 {
                 self.next_major_gc_bytes = 0;
@@ -1273,8 +1270,8 @@ impl Heap {
     }
 
     fn release_slot(&mut self, handle: u32) {
-        let obj = std::mem::replace(&mut self.slots[handle as usize], Obj::Free(self.free_head));
-        self.free_head = handle;
+        let obj = std::mem::replace(&mut self.slots[handle as usize], Obj::Free(self.free_list_head));
+        self.free_list_head = handle;
         self.recycle_box(obj);
     }
 
@@ -1308,26 +1305,35 @@ impl Heap {
     /// Reclaims objects unreachable from `roots` and drops unreachable native
     /// resources.
     ///
-    /// Runs a full-heap major collection if `major` is `true`, or a minor
-    /// collection over `young` otherwise.
+    /// Runs a full-heap major collection if `major` is `true`, aborting any
+    /// active incremental cycle. Otherwise runs a minor collection over `young`.
     pub fn collect(&mut self, roots: impl IntoIterator<Item = VmValue>, major: bool) {
         if major {
             self.clear_spares();
-            self.abandon_cycle();
+            self.abort_incremental_gc();
             self.mark_bits.iter_mut().for_each(|bits| *bits = 0);
         }
         for root in roots {
             mark(&mut self.mark_bits, &mut self.worklist, root);
         }
         let Heap {
-            slots, mark_bits, worklist, scan_chunks, remembered, remembered_bits, partial_bits, tail_bits, dirty_containers, ..
+            slots,
+            mark_bits,
+            worklist,
+            scan_chunks,
+            remembered,
+            remembered_bits,
+            partial_barrier_bits,
+            pushed_tail_bits,
+            dirty_containers,
+            ..
         } = self;
         for &handle in remembered.iter() {
             let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
-            let partial = partial_bits[word] & bit != 0;
+            let partial = partial_barrier_bits[word] & bit != 0;
             remembered_bits[word] &= !bit;
-            partial_bits[word] &= !bit;
-            tail_bits[word] &= !bit;
+            partial_barrier_bits[word] &= !bit;
+            pushed_tail_bits[word] &= !bit;
             if major {
                 continue;
             }
@@ -1351,7 +1357,7 @@ impl Heap {
                             _ => {}
                         }
                     }
-                    if dirty.tail_start != INVALID_SLOT {
+                    if dirty.tail_start != UNSET_TAIL_START {
                         scan_chunks.push((handle, dirty.tail_start as usize));
                     }
                 }
@@ -1382,13 +1388,13 @@ impl Heap {
             }
             self.young = young;
             self.object_bytes = self.object_bytes.saturating_sub(freed);
-            if matches!(self.cycle_phase, IncrementalPhase::Marking) {
+            if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
                 let slots = &self.slots;
                 self.gray_worklist.retain(|&(handle, _)| !matches!(slots[handle as usize], Obj::Free(_)));
             }
         }
         self.young.clear();
-        self.set_thresholds(major);
+        self.update_gc_thresholds(major);
         self.update_table_bytes();
     }
 
@@ -1398,18 +1404,18 @@ impl Heap {
         let mut live_bytes = 0;
         let mut live = 0;
         let mut end = self.slots.len();
-        self.free_head = INVALID_SLOT;
+        self.free_list_head = FREE_LIST_END;
         for index in (0..self.slots.len()).rev() {
             if self.is_marked(index as u32) {
                 live_bytes += self.slots[index].size();
                 live += 1;
                 continue;
             }
-            let obj = std::mem::replace(&mut self.slots[index], Obj::Free(self.free_head));
+            let obj = std::mem::replace(&mut self.slots[index], Obj::Free(self.free_list_head));
             if end == index + 1 {
                 end = index;
             } else {
-                self.free_head = index as u32;
+                self.free_list_head = index as u32;
             }
             self.recycle_box(obj);
         }
@@ -1436,8 +1442,8 @@ impl Heap {
         for bits in [
             &mut self.mark_bits,
             &mut self.remembered_bits,
-            &mut self.partial_bits,
-            &mut self.tail_bits,
+            &mut self.partial_barrier_bits,
+            &mut self.pushed_tail_bits,
             &mut self.cycle_mark_bits,
             &mut self.gray_bits,
         ] {
@@ -1456,7 +1462,7 @@ impl Heap {
         }
     }
 
-    fn set_thresholds(&mut self, major: bool) {
+    fn update_gc_thresholds(&mut self, major: bool) {
         self.young_resources = 0;
         if major {
             let live_bytes = self.object_bytes;
@@ -1471,22 +1477,31 @@ impl Heap {
         // Scale the nursery to a quarter of `next_major_gc_bytes` so small heaps still run minor collections.
         let nursery = (self.next_major_gc_bytes / 4).clamp(MIN_NURSERY_BYTES, MAX_NURSERY_BYTES);
         self.next_minor_gc_bytes = self.object_bytes.saturating_add(nursery);
-        self.update_next_gc();
+        self.update_next_gc_bytes();
     }
 
-    fn update_next_gc(&mut self) {
+    fn update_next_gc_bytes(&mut self) {
         self.next_gc_bytes = if self.gc_stress {
             0
-        } else if self.cycle_phase == IncrementalPhase::Idle {
+        } else if self.cycle_phase == IncrementalGcPhase::Idle {
             self.next_minor_gc_bytes.min(self.next_major_gc_bytes)
         } else {
             self.next_minor_gc_bytes.min(self.object_bytes.saturating_add(INCREMENTAL_STEP_BYTES))
         };
     }
 
-    /// Returns `true` if an incremental major collection is active.
-    pub fn is_cycle_active(&self) -> bool {
-        self.cycle_phase != IncrementalPhase::Idle
+    // ------------------------------------------------------------------
+    // Collection scheduling and incremental major collection
+
+    /// Checks whether the heap needs a collection at the next safe point.
+    #[inline]
+    pub fn needs_gc(&self) -> bool {
+        self.object_bytes > self.next_gc_bytes
+    }
+
+    /// Checks whether the heap needs a major collection now.
+    pub fn needs_major_gc(&self) -> bool {
+        self.cycle_phase == IncrementalGcPhase::Idle && self.object_bytes > self.next_major_gc_bytes
     }
 
     /// Checks whether the heap needs a minor collection now.
@@ -1498,94 +1513,97 @@ impl Heap {
         self.object_bytes > self.next_minor_gc_bytes
     }
 
+    /// Returns `true` if an incremental major collection is active.
+    pub fn is_incremental_gc_active(&self) -> bool {
+        self.cycle_phase != IncrementalGcPhase::Idle
+    }
+
     /// Returns `true` if the next major collection should run incrementally.
-    pub fn uses_incremental_major(&self) -> bool {
+    pub fn should_start_incremental_gc(&self) -> bool {
         self.incremental
             && if self.gc_stress { self.stats.collections.is_multiple_of(16) } else { self.object_bytes >= MIN_INCREMENTAL_BYTES }
     }
 
     /// Starts an incremental major collection and shades `roots`.
-    pub fn start_cycle(&mut self, roots: impl IntoIterator<Item = VmValue>) {
+    pub fn start_incremental_gc(&mut self, roots: impl IntoIterator<Item = VmValue>) {
         self.clear_spares();
         self.cycle_mark_bits.iter_mut().for_each(|bits| *bits = 0);
         self.gray_bits.iter_mut().for_each(|bits| *bits = 0);
         self.gray_worklist.clear();
-        self.cycle_phase = IncrementalPhase::Marking;
+        self.cycle_phase = IncrementalGcPhase::Marking;
         for root in roots {
-            self.shade(root);
+            self.mark_incremental(root);
         }
         self.cycle_start_bytes = self.object_bytes;
         self.bytes_at_last_step = self.object_bytes;
-        self.update_next_gc();
+        self.update_next_gc_bytes();
         self.update_table_bytes();
     }
 
     /// Runs a single step of the active incremental collection.
     ///
     /// Returns `true` if marking is complete and the caller must invoke
-    /// [`Heap::finish_marking`].
-    pub fn cycle_step(&mut self) -> bool {
+    /// [`Heap::finish_incremental_marking`].
+    pub fn step_incremental_gc(&mut self) -> bool {
         let allocated = self.object_bytes.saturating_sub(self.bytes_at_last_step).max(INCREMENTAL_STEP_BYTES);
         self.bytes_at_last_step = self.object_bytes;
         let done = match self.cycle_phase {
-            IncrementalPhase::Marking => {
-                let budget = if self.gc_stress { (self.live_objects / 8).max(64) } else { (allocated / 16 * MARK_PACE).max(MIN_MARK_WORK) };
-                self.mark_step(budget);
+            IncrementalGcPhase::Marking => {
+                let budget =
+                    if self.gc_stress { (self.live_objects / 8).max(64) } else { (allocated / 16 * MARK_PACE).max(MIN_MARK_STEP_WORK) };
+                self.step_marking(budget);
                 self.gray_worklist.is_empty()
             }
-            IncrementalPhase::Sweeping => {
+            IncrementalGcPhase::Sweeping => {
                 let slots = self.slots.len();
                 let budget = if self.gc_stress {
                     (slots / 8).max(64)
                 } else {
                     let share = allocated as u128 * MARK_PACE as u128 * slots as u128 / self.cycle_start_bytes.max(1) as u128;
                     let share = usize::try_from(share).unwrap_or(usize::MAX);
-                    share.max(MIN_SWEEP_SLOTS)
+                    share.max(MIN_SWEEP_STEP_SLOTS)
                 };
-                self.sweep_step(budget);
+                self.step_sweeping(budget);
                 false
             }
-            IncrementalPhase::Idle => false,
+            IncrementalGcPhase::Idle => false,
         };
         self.update_table_bytes();
         done
     }
 
     /// Finishes incremental marking by rescanning `roots` and draining
-    /// `gray_worklist`.
-    ///
-    /// Copies the new mark bits into `mark_bits`, clears generational tracking
-    /// state, and enters the sweeping phase.
-    pub fn finish_marking(&mut self, roots: impl IntoIterator<Item = VmValue>) {
+    /// `gray_worklist`, then enters the sweeping phase.
+    pub fn finish_incremental_marking(&mut self, roots: impl IntoIterator<Item = VmValue>) {
         for root in roots {
-            self.shade(root);
+            self.mark_incremental(root);
         }
-        self.mark_step(usize::MAX);
+        self.step_marking(usize::MAX);
         self.mark_bits.copy_from_slice(&self.cycle_mark_bits);
         for &handle in &self.remembered {
             let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
             self.remembered_bits[word] &= !bit;
-            self.partial_bits[word] &= !bit;
-            self.tail_bits[word] &= !bit;
+            self.partial_barrier_bits[word] &= !bit;
+            self.pushed_tail_bits[word] &= !bit;
         }
         self.remembered.clear();
         self.dirty_containers.clear();
         self.young.clear();
-        self.cycle_phase = IncrementalPhase::Sweeping;
+        self.cycle_phase = IncrementalGcPhase::Sweeping;
         self.sweep_cursor = 0;
-        self.update_next_gc();
+        self.update_next_gc_bytes();
         self.update_table_bytes();
     }
 
     /// Aborts any active incremental major collection.
-    fn abandon_cycle(&mut self) {
-        self.cycle_phase = IncrementalPhase::Idle;
+    fn abort_incremental_gc(&mut self) {
+        self.cycle_phase = IncrementalGcPhase::Idle;
         self.gray_worklist.clear();
     }
 
     /// Marks `value` in `cycle_mark_bits` and queues it on `gray_worklist` if unmarked.
     #[inline]
-    fn shade(&mut self, value: VmValue) {
+    fn mark_incremental(&mut self, value: VmValue) {
         if let Some(handle) = value.handle()
             && !test_bit(&self.cycle_mark_bits, handle)
         {
@@ -1607,7 +1625,7 @@ impl Heap {
     }
 
     /// Scans queued gray objects until consuming `budget` child-value units.
-    fn mark_step(&mut self, mut budget: usize) {
+    fn step_marking(&mut self, mut budget: usize) {
         let mut children = Vec::new();
         while budget > 0 {
             let Some((handle, start)) = self.gray_worklist.pop() else { break };
@@ -1621,14 +1639,14 @@ impl Heap {
                 self.gray_worklist.push((handle, next_index));
             }
             for &child in &children {
-                self.shade(child);
+                self.mark_incremental(child);
             }
         }
     }
 
     /// Sweeps up to `budget` slots and finishes the cycle upon reaching the end
     /// of the arena.
-    fn sweep_step(&mut self, budget: usize) {
+    fn step_sweeping(&mut self, budget: usize) {
         let end = self.sweep_cursor.saturating_add(budget).min(self.slots.len());
         let mut freed = 0;
         for index in self.sweep_cursor..end {
@@ -1639,10 +1657,10 @@ impl Heap {
         self.object_bytes = self.object_bytes.saturating_sub(freed);
         self.sweep_cursor = end;
         if end == self.slots.len() {
-            self.cycle_phase = IncrementalPhase::Idle;
+            self.cycle_phase = IncrementalGcPhase::Idle;
             self.stats.collections += 1;
             self.stats.major_collections += 1;
-            self.set_thresholds(true);
+            self.update_gc_thresholds(true);
         }
     }
 }
@@ -1770,7 +1788,7 @@ mod tests {
         let n = (STAGE_CHUNK_LEN - 4) + 3 * STAGE_CHUNK_LEN;
         let size = std::mem::size_of::<(u32, Obj)>();
         let mut heap = Heap::new(None, usize::MAX);
-        let used = |heap: &Heap| heap.used() - heap.overhead_bytes();
+        let used = |heap: &Heap| heap.used_bytes() - heap.overhead_bytes();
         let before = used(&heap);
         let buffer = heap.staged(|_, st| {
             for i in 0..n {
@@ -1920,8 +1938,8 @@ mod tests {
             heap.channel_push(ch, v).unwrap();
         }
         heap.collect([ch], true);
-        heap.start_cycle([ch]);
-        heap.mark_step(SCAN_CHUNK_LEN + 2);
+        heap.start_incremental_gc([ch]);
+        heap.step_marking(SCAN_CHUNK_LEN + 2);
         // Take values from the front while the queue is partly scanned.
         for _ in 0..SCAN_CHUNK_LEN {
             heap.channel_mut(ch, None).unwrap().take();
@@ -1930,9 +1948,9 @@ mod tests {
             let v = heap.new_str(format!("pushed during marking {i}"));
             heap.channel_push(ch, v).unwrap();
         }
-        heap.finish_marking([ch]);
-        while heap.is_cycle_active() {
-            heap.cycle_step();
+        heap.finish_incremental_marking([ch]);
+        while heap.is_incremental_gc_active() {
+            heap.step_incremental_gc();
         }
         let q = queued(&heap, ch);
         assert_eq!(q.len(), n - SCAN_CHUNK_LEN + 10);
@@ -1972,7 +1990,7 @@ mod tests {
             n += 1;
         }
         let cap = heap.list(list).len();
-        assert!(heap.used() <= limit, "{} bytes used", heap.used());
+        assert!(heap.used_bytes() <= limit, "{} bytes used", heap.used_bytes());
         // Near the limit, the allocator grows the list by less than double.
         assert!(cap * VALUE_SIZE > limit * 3 / 4, "only {cap} elements fit");
         let Obj::List(l) = heap.get(list) else { unreachable!() };
@@ -1980,15 +1998,15 @@ mod tests {
         assert_eq!(heap.list_reserve(list, 1), Err(LimitKind::Memory));
         let ch = new_channel(&mut heap);
         while heap.channel_push(ch, VmValue::Int(0)).is_ok() {}
-        assert!(heap.used() <= limit, "{} bytes used", heap.used());
+        assert!(heap.used_bytes() <= limit, "{} bytes used", heap.used_bytes());
         heap.collect([ch], true);
         heap.channel_push(ch, VmValue::Int(0)).unwrap();
     }
 
     fn free_list(heap: &Heap) -> Vec<u32> {
         let mut out = Vec::new();
-        let mut h = heap.free_head;
-        while h != INVALID_SLOT {
+        let mut h = heap.free_list_head;
+        while h != FREE_LIST_END {
             out.push(h);
             let Obj::Free(next) = heap.slots[h as usize] else { panic!("slot {h} on the free list is in use") };
             h = next;
@@ -2004,15 +2022,15 @@ mod tests {
         let top = heap.new_str("top");
         heap.collect([keep, top], true);
         assert_eq!(free_list(&heap), (1..=1000).collect::<Vec<u32>>());
-        let used = heap.used();
-        assert!(used >= heap.object_bytes + 1000 * OBJ_SIZE, "{used} bytes used");
+        let used = heap.used_bytes();
+        assert!(used >= heap.object_bytes + 1000 * OBJ_SLOT_BYTES, "{used} bytes used");
         let young = |heap: &Heap| heap.young.capacity() * std::mem::size_of::<u32>();
         let ranges: Vec<VmValue> = (0..10).map(|i| heap.alloc(Obj::Range(i, i, false))).collect();
         assert_eq!(ranges, garbage[..10]);
-        assert_eq!(heap.used() - young(&heap), used);
+        assert_eq!(heap.used_bytes() - young(&heap), used);
         let staged = heap.staged(|_, st| st.alloc(Obj::Range(0, 0, false)));
         assert_eq!(staged, garbage[10]);
-        assert_eq!(heap.used() - young(&heap), used);
+        assert_eq!(heap.used_bytes() - young(&heap), used);
     }
 
     #[test]
@@ -2026,11 +2044,11 @@ mod tests {
             heap.list_mut(list)[i] = item;
         }
         heap.collect([keep, list], true);
-        let full = heap.used();
+        let full = heap.used_bytes();
         heap.collect([keep], true);
         assert_eq!(heap.slots.len(), 1);
         assert!(heap.slots.capacity() < MIN_SHRINK_SLOTS, "{} slots kept", heap.slots.capacity());
-        assert!(full - heap.used() >= (n + 1) * OBJ_SIZE, "{full} bytes, then {}", heap.used());
+        assert!(full - heap.used_bytes() >= (n + 1) * OBJ_SLOT_BYTES, "{full} bytes, then {}", heap.used_bytes());
         assert_eq!(heap.str(keep), "keep");
         assert_eq!(free_list(&heap), Vec::<u32>::new());
         let young = heap.new_str("young");
@@ -2050,7 +2068,11 @@ mod tests {
             live.truncate(live.len() - (MIN_SHRINK_SLOTS - 1));
             heap.collect(live.iter().copied(), true);
             let resident = heap.slots.capacity().min(n) - heap.live_objects;
-            assert!(heap.overhead_bytes() >= resident * OBJ_SIZE, "{} bytes counted, {resident} slots resident", heap.overhead_bytes());
+            assert!(
+                heap.overhead_bytes() >= resident * OBJ_SLOT_BYTES,
+                "{} bytes counted, {resident} slots resident",
+                heap.overhead_bytes()
+            );
         }
         assert!(heap.slots.capacity() < 2 * MIN_SHRINK_SLOTS, "{} slots kept", heap.slots.capacity());
     }
@@ -2128,7 +2150,7 @@ mod tests {
                 let in_use = heap.slots.iter().filter(|o| !matches!(o, Obj::Free(_))).count();
                 proptest::prop_assert_eq!(free.len() + in_use, heap.slots.len(), "every free slot is on the free list once");
                 proptest::prop_assert_eq!(heap.live_objects, in_use);
-                proptest::prop_assert!(heap.overhead_bytes() >= free.len() * OBJ_SIZE);
+                proptest::prop_assert!(heap.overhead_bytes() >= free.len() * OBJ_SLOT_BYTES);
                 for (v, c) in &roots {
                     match c {
                         Ok(text) => proptest::prop_assert_eq!(heap.str(*v), text.as_str()),
@@ -2281,10 +2303,10 @@ mod tests {
                     }
                     BarrierOp::Collect(major) => heap.collect(roots.iter().copied(), major),
                     BarrierOp::Cycle => {
-                        if !heap.is_cycle_active() {
-                            heap.start_cycle(roots.iter().copied());
-                        } else if heap.cycle_step() {
-                            heap.finish_marking(roots.iter().copied());
+                        if !heap.is_incremental_gc_active() {
+                            heap.start_incremental_gc(roots.iter().copied());
+                        } else if heap.step_incremental_gc() {
+                            heap.finish_incremental_marking(roots.iter().copied());
                         }
                     }
                 }

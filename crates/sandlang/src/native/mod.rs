@@ -619,7 +619,7 @@ impl VmVal<String> {
 
 impl VmVal<Vec<u8>> {
     pub fn bytes(self, heap: &Heap) -> &[u8] {
-        heap.bytes_of(self.raw())
+        heap.bytes(self.raw())
     }
 }
 

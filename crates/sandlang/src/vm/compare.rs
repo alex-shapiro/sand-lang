@@ -31,7 +31,8 @@ impl Seen {
 
     /// Records `pair`; false if it was recorded already.
     fn insert(&mut self, heap: &Heap, pair: (u32, u32)) -> Result<bool, Fail> {
-        if self.pairs.len() == self.pairs.capacity() && heap.would_exceed(self.pairs.capacity().max(4).saturating_mul(3 * 12)) {
+        if self.pairs.len() == self.pairs.capacity() && heap.would_exceed_memory_limit(self.pairs.capacity().max(4).saturating_mul(3 * 12))
+        {
             return Err(Fail::limit(crate::engine::LimitKind::Memory));
         }
         Ok(self.pairs.insert(pair))
@@ -637,7 +638,7 @@ fn hash_tree(heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<u64, Fail>
                         stack.pop();
                         // Inline variants have no handle of their own, so only heap containers are memoized.
                         if let (Some(memo), VmValue::Obj(handle)) = (&mut memo, c) {
-                            if memo.len() == memo.capacity() && heap.would_exceed(memo.len().max(4) * 2 * 24) {
+                            if memo.len() == memo.capacity() && heap.would_exceed_memory_limit(memo.len().max(4) * 2 * 24) {
                                 return Err(Fail::limit(crate::engine::LimitKind::Memory));
                             }
                             memo.insert(handle, h);
@@ -804,7 +805,8 @@ fn push_container(heap: &Heap, stack: &mut HashStack, v: VmValue) -> Result<(), 
     if stack.len() >= MAX_DEPTH {
         return Err(Fail::runtime_error("limit", "value too deeply nested to hash"));
     }
-    if stack.big.len() == stack.big.capacity() && heap.would_exceed(stack.len().max(4) * 2 * std::mem::size_of::<HashFrame>()) {
+    if stack.big.len() == stack.big.capacity() && heap.would_exceed_memory_limit(stack.len().max(4) * 2 * std::mem::size_of::<HashFrame>())
+    {
         return Err(Fail::limit(crate::engine::LimitKind::Memory));
     }
     if stack.big.is_empty() {

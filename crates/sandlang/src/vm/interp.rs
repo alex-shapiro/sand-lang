@@ -438,7 +438,7 @@ impl Vm {
     /// Appends `suffix` to string `builder`.
     #[inline(never)]
     fn op_append_str(&mut self, builder: VmValue, suffix: VmValue) -> Result<VmValue, Fail> {
-        self.meter.charge_bytes(self.heap.append_str_copy_bytes(builder, suffix))?;
+        self.meter.charge_bytes(self.heap.append_str_byte_cost(builder, suffix))?;
         self.heap.append_str(builder, suffix).map_err(Fail::limit)
     }
 
@@ -1407,7 +1407,7 @@ impl Vm {
                         if n < 0 {
                             fail!(format!("invalid: negative repeat count: {n}"));
                         }
-                        if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(std::mem::size_of::<VmValue>())) {
+                        if self.heap.would_exceed_memory_limit(to_usize_saturating(n).saturating_mul(std::mem::size_of::<VmValue>())) {
                             save!();
                             return self.limit_stop(fiber, ip, LimitKind::Memory);
                         }
@@ -2371,7 +2371,7 @@ impl Vm {
             self.check_memory(index)?;
             return Ok(cap);
         }
-        self.heap.grown_capacity(cap, len + 1, elem, index).map_err(Fail::limit)
+        self.heap.checked_grow_capacity(cap, len + 1, elem, index).map_err(Fail::limit)
     }
 
     /// Removes `k` from map `m`; returns its value.

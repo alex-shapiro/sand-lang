@@ -604,7 +604,7 @@ fn unbuffer(f: &mut OpenedFile, unread: u64) -> io::Result<()> {
 /// Whether `bytes` more fit in the memory limit, asking for a collection
 /// first if they do not.
 fn fits(vm: &Vm, bytes: usize) -> Result<bool, Ctl> {
-    if !vm.heap.would_exceed(bytes) {
+    if !vm.heap.would_exceed_memory_limit(bytes) {
         return Ok(true);
     }
     if !vm.collected {
@@ -907,7 +907,7 @@ fn read_rest<R: IntoVmValue>(
         };
         // What was read is consumed: from here on, a failure is not a retry.
         drop(res);
-        if vm.heap.would_exceed(data.len()) {
+        if vm.heap.would_exceed_memory_limit(data.len()) {
             return Ok(Err(too_large()));
         }
         finish(vm, data)
