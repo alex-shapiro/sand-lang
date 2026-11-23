@@ -214,7 +214,7 @@ struct ConstFoldState {
     depth_exceeded: bool,
 }
 
-enum BoundMembers {
+enum RustTypeMembers {
     Struct(&'static [StructField], Arc<[Option<Value>]>),
     Enum(&'static [EnumVariant]),
 }
@@ -1181,11 +1181,12 @@ impl Checker {
     // ------------------------------------------------------------------
     // Modules
 
+    /// Adds a top-level name to the current module's scope table.
+    /// A duplicate definition in a `let` assignment or in a REPL
+    /// session is allowed as a shadow.
     fn define(&mut self, name: Symbol, def: Def, is_pub: bool, span: Span) {
         let m = self.cur_mod as usize;
         if let Some(existing) = self.mods[m].scope.get(&name) {
-            // Re-binding a global with `let` shadows, as does any definition of
-            // a later session input; anything else is a duplicate.
             let shadowable =
                 matches!((existing.def, def), (Def::Global(_), Def::Global(_))) || self.defined_by_earlier_input(existing.span);
             if !shadowable {
@@ -1232,7 +1233,7 @@ impl Checker {
                 trait_ids.push(id);
             }
         }
-        let bound_members = if self.current_module_is_native() { self.declare_bound_types() } else { Vec::new() };
+        let bound_members = if self.current_module_is_native() { self.declare_rust_types() } else { Vec::new() };
         let mut struct_ids = Vec::new();
 
         // The traits of type parameters may take types declared later as arguments.
@@ -1677,7 +1678,7 @@ impl Checker {
         self.types[id as usize].kind = TypeDefKind::Enum { variants };
     }
 
-    fn declare_bound_types(&mut self) -> Vec<(TypeDefId, BoundMembers)> {
+    fn declare_rust_types(&mut self) -> Vec<(TypeDefId, RustTypeMembers)> {
         let natives = self.natives.clone();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let span = Span::new(self.mods[self.cur_mod as usize].file, 0, 0);
@@ -1715,11 +1716,11 @@ impl Checker {
                         self.enum_bindings.push((*rust, first.rt_id));
                     }
                     self.types[id as usize].kind = TypeDefKind::Enum { variants: defs };
-                    members.push((id, BoundMembers::Enum(variants)));
+                    members.push((id, RustTypeMembers::Enum(variants)));
                 }
                 BoundKind::Struct { rust, fields, defaults, .. } => {
                     self.struct_bindings.push((*rust, id));
-                    members.push((id, BoundMembers::Struct(fields, defaults.clone())));
+                    members.push((id, RustTypeMembers::Struct(fields, defaults.clone())));
                 }
                 _ => {}
             }
@@ -1729,13 +1730,13 @@ impl Checker {
 
     /// Resolves field or payload types for a Rust-bound type after the checker
     /// declares all types in the module. Returns any struct field defaults.
-    fn resolve_bound_members(&mut self, id: TypeDefId, members: BoundMembers) -> Option<RustFieldDefaults> {
+    fn resolve_bound_members(&mut self, id: TypeDefId, members: RustTypeMembers) -> Option<RustFieldDefaults> {
         let span = self.types[id as usize].span;
         let qual = format!("{}.{}", self.name(self.types[id as usize].module_name), self.name(self.types[id as usize].name));
         let generics = self.types[id as usize].generics.clone();
         let public = self.types[id as usize].is_pub;
         match members {
-            BoundMembers::Struct(rust, defaults) => {
+            RustTypeMembers::Struct(rust, defaults) => {
                 let mut fields = Vec::new();
                 for f in rust {
                     let owner = format!("the Rust field `{}` of `{qual}`", f.name);
@@ -1750,7 +1751,7 @@ impl Checker {
                 self.types[id as usize].kind = TypeDefKind::Struct { fields };
                 Some(RustFieldDefaults { def: id, values: defaults })
             }
-            BoundMembers::Enum(rust) => {
+            RustTypeMembers::Enum(rust) => {
                 for (i, v) in rust.iter().enumerate() {
                     let owner = format!("the Rust payload of variant `{}` of `{qual}`", v.name);
                     let tys: Vec<TypeId> =
