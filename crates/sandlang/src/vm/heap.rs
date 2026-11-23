@@ -33,12 +33,12 @@
 //! For large heaps, the collector runs major collections in allocation-paced
 //! marking and sweeping steps. Minor collections still run between steps.
 //!
-//! - Marking traces reachable objects into `cycle_mark_bits` using a bounded
-//!   worklist in `gray_worklist`. Write barriers during marking shade newly
+//! - **Mark** traces reachable objects into `cycle_mark_bits` using a bounded
+//!   worklist in `gray_worklist`. During marking, write barriers mark newly
 //!   stored values or requeue mutated objects.
-//! - Completion rescans the roots and drains `gray_worklist`. It then copies
+//! - **Complete** rescans the roots and drains `gray_worklist`. It then copies
 //!   `cycle_mark_bits` into `mark_bits` and clears `remembered` and `young`.
-//! - Sweeping frees unmarked slots in bounded steps. The allocator sets bits in
+//! - **Sweep** frees unmarked slots in bounded steps. The allocator sets bits in
 //!   `cycle_mark_bits` for objects created during sweeping. If a memory limit
 //!   requires immediate reclamation, the collector aborts the incremental cycle
 //!   and runs a full major collection.
@@ -490,52 +490,52 @@ impl Heap {
 
     /// Records a full write barrier for `handle` if it refers to an old object.
     #[inline]
-    fn record_write_barrier(&mut self, handle: u32) {
+    fn record_full_barrier(&mut self, handle: u32) {
         // Keep the fast path inline so only unremembered old objects call the cold helper.
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
         if self.mark_bits[word] & bit != 0 && (self.remembered_bits[word] & bit == 0 || self.partial_barrier_bits[word] & bit != 0) {
-            self.remember_old_object(handle);
+            self.remember_for_full_scan(handle);
         }
     }
 
     /// Marks old object `handle` for a full scan during the next minor collection.
     #[cold]
     #[inline(never)]
-    fn remember_old_object(&mut self, handle: u32) {
+    fn remember_for_full_scan(&mut self, handle: u32) {
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
         if self.remembered_bits[word] & bit == 0 {
             self.remembered_bits[word] |= bit;
             self.remembered.push(handle);
         } else {
-            self.remember_object_fully(handle);
+            self.switch_to_full_scan(handle);
         }
     }
 
-    /// Upgrades a partially remembered container to a full scan.
+    /// Switches a partially remembered container to a full scan.
     #[cold]
-    fn remember_object_fully(&mut self, handle: u32) {
+    fn switch_to_full_scan(&mut self, handle: u32) {
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
         self.partial_barrier_bits[word] &= !bit;
         self.pushed_tail_bits[word] &= !bit;
         self.dirty_containers.remove(&handle);
     }
 
-    /// Records a write barrier for storing a young value in container `handle`
-    /// at `index`.
+    /// Records a partial write barrier for storing a young value in container
+    /// `handle` at `index`.
     ///
     /// Set `is_push` to `true` if the write appends at the current container
     /// length.
     #[inline]
-    fn record_container_barrier(&mut self, handle: u32, index: usize, is_push: bool) {
+    fn record_partial_container_barrier(&mut self, handle: u32, index: usize, is_push: bool) {
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
         if self.mark_bits[word] & bit != 0 {
-            self.record_old_container_barrier(handle, index, is_push);
+            self.remember_for_partial_scan(handle, index, is_push);
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn record_old_container_barrier(&mut self, handle: u32, index: usize, is_push: bool) {
+    fn remember_for_partial_scan(&mut self, handle: u32, index: usize, is_push: bool) {
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
         if self.remembered_bits[word] & bit == 0 {
             self.remembered_bits[word] |= bit;
@@ -573,7 +573,7 @@ impl Heap {
         } else if dirty.indices.len() < len / ELEMS_PER_DIRTY_INDEX {
             dirty.indices.push(index);
         } else {
-            self.remember_object_fully(handle);
+            self.switch_to_full_scan(handle);
         }
     }
 
@@ -669,9 +669,9 @@ impl Heap {
     pub fn get_mut(&mut self, value: VmValue) -> &mut Obj {
         match value {
             VmValue::Obj(handle) => {
-                self.record_write_barrier(handle);
+                self.record_full_barrier(handle);
                 if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
-                    self.requeue_gray(handle);
+                    self.requeue_for_incremental_scan(handle);
                 }
                 &mut self.slots[handle as usize]
             }
@@ -689,7 +689,7 @@ impl Heap {
         match value {
             VmValue::Obj(handle) => {
                 if stored.iter().any(|item| item.handle().is_some_and(|child| !self.is_marked(child))) {
-                    self.record_write_barrier(handle);
+                    self.record_full_barrier(handle);
                 }
                 if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
                     stored.iter().for_each(|&item| self.mark_incremental(item));
@@ -923,7 +923,7 @@ impl Heap {
     pub fn list_mut_storing(&mut self, list: VmValue, index: usize, stored: VmValue) -> Option<&mut Vec<VmValue>> {
         let VmValue::Obj(handle) = list else { return None };
         if stored.handle().is_some_and(|child| !self.is_marked(child)) {
-            self.record_container_barrier(handle, index, false);
+            self.record_partial_container_barrier(handle, index, false);
         }
         if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
             self.mark_incremental(stored);
@@ -988,7 +988,7 @@ impl Heap {
     pub fn entries_mut_storing(&mut self, container: VmValue, entry_index: usize, is_push: bool, stored: &[VmValue]) -> &mut Obj {
         let VmValue::Obj(handle) = container else { panic!("internal error: not an object") };
         if stored.iter().any(|item| item.handle().is_some_and(|child| !self.is_marked(child))) {
-            self.record_container_barrier(handle, entry_index, is_push);
+            self.record_partial_container_barrier(handle, entry_index, is_push);
         }
         if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
             stored.iter().for_each(|&item| self.mark_incremental(item));
@@ -1009,7 +1009,7 @@ impl Heap {
             self.list_reserve(list, 1)?;
         }
         if value.handle().is_some_and(|child| !self.is_marked(child)) {
-            self.record_container_barrier(handle, len, true);
+            self.record_partial_container_barrier(handle, len, true);
         }
         if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
             self.mark_incremental(value);
@@ -1081,7 +1081,7 @@ impl Heap {
         let VmValue::Obj(handle) = channel else { return None };
         if let Some(value) = stored {
             if value.handle().is_some_and(|child| !self.is_marked(child)) && self.is_marked(handle) {
-                self.record_old_channel_barrier(handle);
+                self.remember_channel_for_partial_scan(handle);
             }
             if matches!(self.cycle_phase, IncrementalGcPhase::Marking) {
                 self.mark_incremental(value);
@@ -1095,7 +1095,7 @@ impl Heap {
 
     #[cold]
     #[inline(never)]
-    fn record_old_channel_barrier(&mut self, handle: u32) {
+    fn remember_channel_for_partial_scan(&mut self, handle: u32) {
         let (word, bit) = ((handle / 64) as usize, 1u64 << (handle % 64));
         if self.remembered_bits[word] & bit == 0 {
             self.remembered_bits[word] |= bit;
@@ -1524,7 +1524,7 @@ impl Heap {
             && if self.gc_stress { self.stats.collections.is_multiple_of(16) } else { self.object_bytes >= MIN_INCREMENTAL_BYTES }
     }
 
-    /// Starts an incremental major collection and shades `roots`.
+    /// Starts an incremental major collection and marks `roots`.
     pub fn start_incremental_gc(&mut self, roots: impl IntoIterator<Item = VmValue>) {
         self.clear_spares();
         self.cycle_mark_bits.iter_mut().for_each(|bits| *bits = 0);
@@ -1617,7 +1617,7 @@ impl Heap {
     /// incremental marking.
     #[cold]
     #[inline(never)]
-    fn requeue_gray(&mut self, handle: u32) {
+    fn requeue_for_incremental_scan(&mut self, handle: u32) {
         if test_bit(&self.cycle_mark_bits, handle) && !test_bit(&self.gray_bits, handle) {
             set_bit(&mut self.gray_bits, handle);
             self.gray_worklist.push((handle, 0));
