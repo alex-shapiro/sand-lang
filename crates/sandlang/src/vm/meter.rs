@@ -1,7 +1,7 @@
-//! Enforces execution limits and cancellation for the SandLang VM.
+//! Enforces execution limits and cancellation.
 //!
 //! Checking system clocks and atomic flags on every bytecode instruction is
-//! expensive. [`Meter`] amortizes checks through a single fuel counter that
+//! expensive. [`VmMeter`] amortizes checks through a single fuel counter that
 //! enforces instruction, CPU-time, and wall-clock limits.
 //!
 //! ## How Fuel Works
@@ -13,8 +13,8 @@
 //!   counter.
 //! - Native functions and runtime helpers charge fuel through a shared meter.
 //! - Once a slice is exhausted, the meter checks the interrupt flag, instruction
-//!   budget, and CPU and wall-clock deadlines every of often. It returns an
-//!   interrupt or limit failure if a limit is exceeded.
+//!   budget, and CPU and wall-clock deadlines at regular intervals. It returns
+//!   an interrupt or limit failure if a limit is exceeded.
 //!
 //! ## Cost Model
 //!
@@ -22,11 +22,11 @@
 //! functions and runtime helpers must charge fuel in proportion to their work
 //! so they cannot bypass execution limits.
 //!
-//! - [`Meter::charge`] charges a unit for each logical item processed, such as
+//! - [`VmMeter::charge`] charges a unit for each logical item processed, such as
 //!   a container element, traversal node, or match.
-//! - [`Meter::charge_bytes`] charges a unit per [`BYTES_PER_FUEL_UNIT`] bytes
+//! - [`VmMeter::charge_bytes`] charges a unit per [`BYTES_PER_FUEL_UNIT`] bytes
 //!   for bulk memory work such as copying, comparing, or scanning.
-//! - [`Meter::charge_slow_bytes`] charges a unit per
+//! - [`VmMeter::charge_slow_bytes`] charges a unit per
 //!   [`SLOW_BYTES_PER_FUEL_UNIT`] bytes for per-byte algorithms such as
 //!   hashing, regex search, and encoding.
 //!
@@ -275,7 +275,7 @@ impl Meter for VmMeter {
     }
 }
 
-/// A [`FuelBudget`] that ignores all charges.
+/// A [`Meter`] that ignores all charges.
 pub struct UnlimitedMeter;
 
 impl Meter for UnlimitedMeter {
@@ -374,11 +374,11 @@ pub const INSTRUCTIONS_PER_FUEL_SHIFT: u32 = 6;
 /// Enforces fuel, deadline, and cancellation limits for blocking work offloaded
 /// to a worker thread.
 ///
-/// [`Meter`] is bound to the VM thread, so offloaded jobs use this instead.
+/// [`VmMeter`] is bound to the VM thread, so offloaded jobs use this instead.
 /// A charge returns [`WorkerStopped`] if the engine is interrupted, the clock
 /// passes the wall-clock deadline, the worker exceeds the starting instruction
 /// budget, or the VM stops waiting. After the job finishes, the VM charges its
-/// [`Meter`] for [`WorkerMeter::fuel_used`].
+/// [`VmMeter`] for [`WorkerMeter::fuel_used`].
 pub(crate) struct WorkerMeter {
     interrupt_flag: Arc<AtomicBool>,
     abandoned_flag: Arc<AtomicBool>,

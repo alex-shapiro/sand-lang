@@ -126,7 +126,7 @@ pub(crate) enum FailKind {
     /// Broken engine invariant that ends the session.
     Internal(String),
     Limit(LimitKind),
-    /// Host interrupt (see `Meter::check_limits`).
+    /// Host interrupt (see `VmMeter::check_limits`).
     Interrupted,
     Exit(i32),
 }

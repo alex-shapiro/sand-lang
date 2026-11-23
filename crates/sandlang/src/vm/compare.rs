@@ -1,6 +1,6 @@
 //! Structural equality, ordering and hashing of values. All algorithms are
 //! iterative (deep values cannot overflow the host stack), use scratch space
-//! proportional to nesting depth, and charge a [`FuelBudget`] one unit per node
+//! proportional to nesting depth, and charge a [`Meter`] one unit per node
 //! plus the bytes compared, so comparing huge values can be interrupted.
 
 use super::bytecode::Program;
