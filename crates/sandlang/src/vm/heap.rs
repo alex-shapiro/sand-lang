@@ -493,7 +493,7 @@ impl Heap {
         self.object_bytes > self.next_gc_bytes
     }
 
-    /// Returns `true` if the next collection should be a major collection.
+    /// Checks whether the heap needs a major collection now.
     pub fn needs_major_gc(&self) -> bool {
         self.cycle_phase == IncrementalPhase::Idle && self.object_bytes > self.next_major_gc_bytes
     }
@@ -1489,8 +1489,8 @@ impl Heap {
         self.cycle_phase != IncrementalPhase::Idle
     }
 
-    /// Returns `true` if a minor collection is due during an active incremental cycle.
-    pub fn is_minor_gc_due(&mut self) -> bool {
+    /// Checks whether the heap needs a minor collection now.
+    pub fn needs_minor_gc(&mut self) -> bool {
         if self.gc_stress {
             self.stress_tick += 1;
             return self.stress_tick.is_multiple_of(3);

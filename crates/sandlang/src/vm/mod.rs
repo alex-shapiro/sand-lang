@@ -1692,7 +1692,7 @@ impl Vm {
         if force_major {
             self.free_spare_fibers();
         } else if self.heap.is_cycle_active() {
-            if self.heap.is_minor_gc_due() {
+            if self.heap.needs_minor_gc() {
                 let roots = self.gc_roots(current.as_deref_mut());
                 self.heap.collect(roots, false);
                 self.heap.stats.record(start.elapsed(), false);
