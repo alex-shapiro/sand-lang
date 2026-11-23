@@ -305,14 +305,12 @@ pub struct ScratchMemoryTracker {
 }
 
 impl ScratchMemoryTracker {
-    /// Creates a tracker that runs its first memory check at
-    /// [`SCRATCH_CHECK_BYTES`] bytes.
+    /// Creates a tracker.
     pub fn new() -> ScratchMemoryTracker {
         ScratchMemoryTracker { next_check_bytes: SCRATCH_CHECK_BYTES }
     }
 
-    /// Verifies that `bytes` of temporary Rust buffer space fits within the VM
-    /// memory limit.
+    /// Verifies that temporary Rust buffer space fits within the VM memory limit.
     ///
     /// Skips the heap check until `bytes` reaches the next threshold, unless
     /// retry stress testing forces a check.
