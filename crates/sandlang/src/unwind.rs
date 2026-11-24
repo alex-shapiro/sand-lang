@@ -4,10 +4,10 @@
 //! futures. It reports each caught panic as an error prefixed with
 //! `internal error:`. [`Engine`](crate::engine::Engine) and
 //! [`Session`](crate::session::Session) entry-point methods wrap their futures
-//! in [`CatchUnwind`]. The scheduler wraps each interpreter slice and each
-//! native-future poll in [`catch`]. Per-slice guards keep synchronous native
-//! calls fast. Under `panic = "abort"`, the Rust runtime aborts the process on
-//! any panic.
+//! in [`CatchUnwind`]. The scheduler wraps each fiber turn and each
+//! native-future poll in [`catch`]. The VM runs synchronous native calls and
+//! Sand callbacks inside that turn guard. Under `panic = "abort"`, the Rust
+//! runtime aborts the process on any panic.
 
 use std::any::Any;
 use std::future::Future;

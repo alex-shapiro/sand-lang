@@ -124,6 +124,12 @@ const BENCHES: &[Bench] = &[
         ops: 10_000_000,
     },
     Bench {
+        name: "list sum of 3 ints 5M",
+        source: "let xs = [1, 2, 3]\nvar t = 0\nfor i in 0..5000000 { t += xs.sum() }\nprint(t)",
+        expected: "30000000\n",
+        ops: 5_000_000,
+    },
+    Bench {
         name: "native method calls 10M",
         source: "let x = -1.5\nvar t = 0.0\nfor i in 0..10000000 { t += x.abs() }\nprint(t)",
         expected: "15000000.0\n",

@@ -106,6 +106,12 @@ impl Fiber {
     }
 }
 
+/// The program and native functions that [`Vm::interp`] runs.
+pub(crate) struct ProgramCode {
+    pub program: Arc<Program>,
+    pub natives: Arc<Vec<NativeEntry>>,
+}
+
 /// Maximum interpreter slices between clock readings.
 const CLOCK_SLICES: u32 = 32;
 
@@ -304,23 +310,21 @@ impl Vm {
         Ok(fid)
     }
 
-    /// Runs `fiber` until it stops or spends `fuel`.
+    /// Clones the shared program and native-function handles for [`Vm::interp`].
+    pub(crate) fn program_code(&self) -> ProgramCode {
+        ProgramCode { program: self.prog.clone(), natives: self.natives.clone() }
+    }
+
+    /// Runs a bytecode slice on `fiber` with `fuel`.
     ///
-    /// On a memory-limit error, `run_slice` collects all garbage and restores
+    /// On a memory-limit error, `run_slice` collects all garbage. It restores
     /// the instruction's fuel. It then retries the instruction in the same
     /// slice.
-    fn run_slice(&mut self, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
+    fn run_slice(&mut self, code: &ProgramCode, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
         let mut last_retry_site = None;
         loop {
             let entry_fuel = *fuel;
-            // Catch panics once per slice. Report each panic as an internal error.
-            let stop = match crate::unwind::catch(|| self.interp(fiber, fuel)) {
-                Ok(stop) => stop,
-                Err(msg) => {
-                    self.broken = true;
-                    return Err(Trap::Internal { message: msg, trace: self.trace_of(fiber, None) }.into());
-                }
-            };
+            let stop = self.interp(&code.program, &code.natives, fiber, fuel);
             let Ok(FiberStop::CollectAndRetry(frame)) = stop else { return stop };
             let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
             // Reaching this instruction again crosses a back edge or call that spends fuel.
@@ -450,10 +454,16 @@ impl Vm {
     }
 }
 
-/// Advances `fiber` until it stops or exhausts `fuel`.
+/// Runs a scheduler turn on `fiber` with `fuel`.
 ///
 /// Alternates between bytecode slices and polls of the top native call.
-fn run_fiber_turn(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
+fn run_fiber_turn(
+    vm: &mut MutexGuard<'_, Vm>,
+    shared_vm: &SharedVm,
+    code: &ProgramCode,
+    fiber: &mut Fiber,
+    fuel: &mut i64,
+) -> Result<FiberStop, RunEnding> {
     loop {
         if fiber.top_native_call().is_some() {
             vm.meter.flush_interpreter_fuel(*fuel);
@@ -467,7 +477,7 @@ fn run_fiber_turn(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &mut
             }
             continue;
         }
-        match vm.run_slice(fiber, fuel)? {
+        match vm.run_slice(code, fiber, fuel)? {
             FiberStop::AsyncNative(call) => vm.push_native_call(fiber, call),
             FiberStop::CallbackReturn(result) => vm.end_callback(fiber, result),
             stop => return Ok(stop),
@@ -530,7 +540,7 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
                 collected = true;
                 vm.collect_all_garbage(Some(fiber));
             }
-            Some(VmRequest::Prompt(capability)) => return Ok(Some(FiberStop::Prompt(capability))),
+            Some(VmRequest::Prompt(capability)) => return Ok(Some(FiberStop::Prompt(Box::new(capability)))),
         }
     }
 }
@@ -551,6 +561,7 @@ fn run_ready<U: DriveUntil>(
     stop_policy: &U,
     timer: &mut RunTimer,
 ) -> Result<Pause<U::Stop>, RunEnding> {
+    let code = vm.program_code();
     while let Some(fiber_id) = vm.ready.pop_front() {
         let Some(mut fiber) = vm.fibers.get_mut(fiber_id as usize).and_then(|slot| slot.take()) else { continue };
         if fiber.state != FiberState::Ready {
@@ -560,7 +571,11 @@ fn run_ready<U: DriveUntil>(
         vm.current = fiber_id;
         // Set meter deadlines for time-limit checks inside long native calls.
         let mut fuel = vm.meter.start_slice(timer.cpu_deadline(vm.host.limits.max_cpu_time), vm.deadline);
-        let turn_result = run_fiber_turn(vm, shared_vm, &mut fiber, &mut fuel);
+        // Catch panics once per turn. Report each panic as an internal error.
+        let turn_result = crate::unwind::catch(|| run_fiber_turn(vm, shared_vm, &code, &mut fiber, &mut fuel)).unwrap_or_else(|message| {
+            vm.broken = true;
+            Err(Trap::Internal { message, trace: vm.trace_of(&fiber, None) }.into())
+        });
         vm.meter.flush_interpreter_fuel(fuel);
         timer.ran(vm.meter.slice_fuel_spent());
         // Share current heap usage with background I/O readers for `max_memory` checks.
@@ -594,13 +609,13 @@ fn run_ready<U: DriveUntil>(
                 fiber.state = FiberState::Waiting;
                 vm.fibers[fiber_id as usize] = Some(fiber);
             }
-            FiberStop::Prompt(cap) => {
+            FiberStop::Prompt(capability) => {
                 fiber.state = FiberState::Ready;
                 vm.fibers[fiber_id as usize] = Some(fiber);
                 vm.ready.push_front(fiber_id);
-                return Ok(match stop_policy.stop_on_prompt(&cap) {
+                return Ok(match stop_policy.stop_on_prompt(&capability) {
                     Some(stop) => Pause::Stop(stop),
-                    None => Pause::Prompt(cap),
+                    None => Pause::Prompt(*capability),
                 });
             }
             FiberStop::Cancelled => {
