@@ -65,7 +65,6 @@ pub enum FiberStop {
     /// Finished a Sand callback for the innermost async native call.
     CallbackReturn(VmValue),
     /// A native call requested a permission prompt.
-    // `Box<Capability>` keeps `FiberStop` at 40 bytes.
     Prompt(Box<Capability>),
     /// `task.yield_now()`.
     YieldNow,
@@ -77,6 +76,8 @@ pub enum FiberStop {
     /// and run the instruction again.
     CollectAndRetry(Frame),
 }
+
+const _: () = assert!(std::mem::size_of::<FiberStop>() <= 32);
 
 #[inline(always)]
 fn floor_div(a: i64, b: i64) -> Option<i64> {
