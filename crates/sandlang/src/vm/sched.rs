@@ -277,7 +277,7 @@ impl Vm {
         }
         let l = &self.host.limits;
         if let Some(max) = l.max_instructions
-            && self.meter.used() > max
+            && self.meter.total_fuel_used() > max
         {
             return Err(Trap::Limit(LimitKind::Instructions));
         }
@@ -333,7 +333,7 @@ impl Vm {
             *fuel += tick;
             self.collect_all_garbage(Some(fiber));
             self.instruction_retried = self.retry_stress;
-            if let Err(fail) = self.meter.check() {
+            if let Err(fail) = self.meter.check_limits() {
                 return Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
             }
         }
@@ -456,9 +456,9 @@ impl Vm {
 fn run_fiber_turn(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
     loop {
         if fiber.top_native_call().is_some() {
-            vm.meter.sync(*fuel);
+            vm.meter.flush_interpreter_fuel(*fuel);
             let polled = poll_native_call(vm, shared_vm, fiber);
-            *fuel = vm.meter.resync();
+            *fuel = vm.meter.reload_interpreter_fuel();
             if let Some(stop) = polled? {
                 return Ok(stop);
             }
@@ -561,8 +561,8 @@ fn run_ready<U: DriveUntil>(
         // Set meter deadlines for time-limit checks inside long native calls.
         let mut fuel = vm.meter.start_slice(timer.cpu_deadline(vm.host.limits.max_cpu_time), vm.deadline);
         let turn_result = run_fiber_turn(vm, shared_vm, &mut fiber, &mut fuel);
-        vm.meter.sync(fuel);
-        timer.ran(vm.meter.spent());
+        vm.meter.flush_interpreter_fuel(fuel);
+        timer.ran(vm.meter.slice_fuel_spent());
         // Share current heap usage with background I/O readers for `max_memory` checks.
         let used = vm.heap.used_bytes();
         vm.heap.io_memory.publish_heap(used);

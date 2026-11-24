@@ -4,7 +4,7 @@
 use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::ty::VmVal;
-use crate::vm::meter::{Budget, SLOW_BYTES_PER_UNIT};
+use crate::vm::meter::{Meter, SLOW_BYTES_PER_FUEL_UNIT};
 use crate::vm::{Fail, Vm};
 use hmac::{KeyInit, Mac};
 use sha2::Digest;
@@ -33,12 +33,12 @@ pub(crate) fn module() -> NativeModule {
 /// Bytes hashed between charges to the budget (4 KiB).
 const CHUNK: usize = 4096;
 
-/// Feeds the concatenation of `parts` to `update`, charging `budget` as it
+/// Feeds the concatenation of `parts` to `update`, charging the meter as it
 /// goes so that hashing huge inputs can be stopped.
-fn feed(parts: &[&[u8]], budget: &impl Budget, mut update: impl FnMut(&[u8])) -> Result<(), Fail> {
+fn feed(parts: &[&[u8]], meter: &impl Meter, mut update: impl FnMut(&[u8])) -> Result<(), Fail> {
     for part in parts {
         for chunk in part.chunks(CHUNK) {
-            budget.charge((chunk.len() / SLOW_BYTES_PER_UNIT) as u64)?;
+            meter.charge((chunk.len() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
             update(chunk);
         }
     }
@@ -46,23 +46,23 @@ fn feed(parts: &[&[u8]], budget: &impl Budget, mut update: impl FnMut(&[u8])) ->
 }
 
 /// The digest of the concatenation of `parts`.
-fn digest<D: Digest>(parts: &[&[u8]], budget: &impl Budget) -> Result<sha2::digest::Output<D>, Fail> {
+fn digest<D: Digest>(parts: &[&[u8]], meter: &impl Meter) -> Result<sha2::digest::Output<D>, Fail> {
     let mut h = D::new();
-    feed(parts, budget, |chunk| h.update(chunk))?;
+    feed(parts, meter, |chunk| h.update(chunk))?;
     Ok(h.finalize())
 }
 
 /// SHA-256 (FIPS 180-4) of the concatenation of `parts`.
-pub(crate) fn sha256_parts(parts: &[&[u8]], budget: &impl Budget) -> Result<[u8; 32], Fail> {
-    Ok(digest::<sha2::Sha256>(parts, budget)?.into())
+pub(crate) fn sha256_parts(parts: &[&[u8]], meter: &impl Meter) -> Result<[u8; 32], Fail> {
+    Ok(digest::<sha2::Sha256>(parts, meter)?.into())
 }
 
 /// HMAC-SHA256 (RFC 2104).
-pub(crate) fn hmac_sha256(key: &[u8], data: &[u8], budget: &impl Budget) -> Result<[u8; 32], Fail> {
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8], meter: &impl Meter) -> Result<[u8; 32], Fail> {
     // A key longer than a block is hashed first.
-    budget.charge((key.len() / SLOW_BYTES_PER_UNIT) as u64)?;
+    meter.charge((key.len() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| Fail::internal("HMAC key"))?;
-    feed(&[data], budget, |chunk| mac.update(chunk))?;
+    feed(&[data], meter, |chunk| mac.update(chunk))?;
     Ok(mac.finalize().into_bytes().into())
 }
 
@@ -78,10 +78,10 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::meter::Unmetered;
+    use crate::vm::meter::UnlimitedMeter;
 
     fn sha256(data: &[u8]) -> [u8; 32] {
-        sha256_parts(&[data], &Unmetered).unwrap()
+        sha256_parts(&[data], &UnlimitedMeter).unwrap()
     }
 
     fn hex(b: &[u8]) -> String {
@@ -93,16 +93,19 @@ mod tests {
         // NIST two-block message.
         let m = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
         assert_eq!(hex(&sha256(m)), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
-        assert_eq!(hex(&digest::<sha1::Sha1>(&[m], &Unmetered).unwrap()), "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+        assert_eq!(hex(&digest::<sha1::Sha1>(&[m], &UnlimitedMeter).unwrap()), "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
         assert_eq!(
-            hex(&digest::<md5::Md5>(&[b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"], &Unmetered)
-                .unwrap()),
+            hex(&digest::<md5::Md5>(
+                &[b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"],
+                &UnlimitedMeter
+            )
+            .unwrap()),
             "57edf4a22be3c955ac49da2e2107b67a"
         );
         // Splitting the input must not change the digest.
         let data: Vec<u8> = (0..300u32).map(|i| i as u8).collect();
         for cut in [0, 1, 55, 63, 64, 65, 200, 300] {
-            assert_eq!(sha256_parts(&[&data[..cut], &data[cut..]], &Unmetered).unwrap(), sha256(&data));
+            assert_eq!(sha256_parts(&[&data[..cut], &data[cut..]], &UnlimitedMeter).unwrap(), sha256(&data));
         }
     }
 
@@ -110,12 +113,12 @@ mod tests {
     fn hmac_rfc4231() {
         let key = [0x0bu8; 20];
         assert_eq!(
-            hex(&hmac_sha256(&key, b"Hi There", &Unmetered).unwrap()),
+            hex(&hmac_sha256(&key, b"Hi There", &UnlimitedMeter).unwrap()),
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
         );
         let long_key = [0xaau8; 131];
         assert_eq!(
-            hex(&hmac_sha256(&long_key, b"Test Using Larger Than Block-Size Key - Hash Key First", &Unmetered).unwrap()),
+            hex(&hmac_sha256(&long_key, b"Test Using Larger Than Block-Size Key - Hash Key First", &UnlimitedMeter).unwrap()),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
     }

@@ -3,8 +3,8 @@
 use crate::native::ty::Never;
 use crate::vm::bytecode::Program;
 use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
-use crate::vm::heap::Heap;
-use crate::vm::meter::{Meter, Scratch};
+use crate::vm::heap::{Heap, ScratchMemoryTracker};
+use crate::vm::meter::VmMeter;
 use crate::vm::value::{FxHashMap, Obj, ValueRef, ValueType, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
 use smallvec::SmallVec;
@@ -440,7 +440,7 @@ encode_tuples! {
 
 /// Copies `value` from the heap of `vm`. See [`Vm::to_value`].
 pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
-    let (allocated, scratch, type_names) = (0, Scratch::new(), FxHashMap::default());
+    let (allocated, scratch, type_names) = (0, ScratchMemoryTracker::new(), FxHashMap::default());
     ValueCopier { prog: &vm.prog, heap: &vm.heap, meter: &vm.meter, allocated, scratch, type_names }.copy_value(value)
 }
 
@@ -472,10 +472,10 @@ pub(crate) fn qualified_name_module(rust_module: &str) -> Option<&str> {
 struct ValueCopier<'h> {
     prog: &'h Program,
     heap: &'h Heap,
-    meter: &'h Meter,
+    meter: &'h VmMeter,
     /// Bytes of Rust memory allocated by the copy.
     allocated: usize,
-    scratch: Scratch,
+    scratch: ScratchMemoryTracker,
     /// Cached qualified names for native value types and opaque types.
     type_names: FxHashMap<(Option<&'static str>, &'static str), Arc<str>>,
 }
@@ -626,7 +626,7 @@ impl<'h> ValueCopier<'h> {
     #[inline]
     fn reserve(&mut self, bytes: usize) -> Result<(), Fail> {
         self.allocated = self.allocated.saturating_add(bytes);
-        self.scratch.check(self.heap, self.allocated)
+        self.scratch.check_memory(self.heap, self.allocated)
     }
 
     /// Charges fuel for `content` bytes and reserves `content + header` bytes

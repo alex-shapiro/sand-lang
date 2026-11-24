@@ -17,7 +17,7 @@ use crate::native::ty::VmVal;
 use crate::native::{NativeModule, NativeObject};
 use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
-use crate::vm::meter::{Allowance, Stopped};
+use crate::vm::meter::{WorkerMeter, WorkerStopped};
 use crate::vm::value::to_usize_saturating;
 use crate::vm::{Ctl, CtlKind, Fail, Permits, Vm};
 use std::io;
@@ -153,10 +153,10 @@ pub(crate) fn module() -> NativeModule {
         // directory `to` removes every entry below that.
         let (fs, policy) = (vm.host.fs.clone(), vm.host.policy.clone());
         let mut res = vm.io_reservation();
-        let renamed = vm.offload(move |allowance| -> Result<io::Result<()>, (Halt, bool)> {
+        let renamed = vm.offload(move |meter| -> Result<io::Result<()>, (Halt, bool)> {
             for (t, moved_to, is_to) in [(&from, Some(to.path.as_path()), false), (&to, None, true)] {
                 if fs.stat(t).is_ok_and(|m| m.kind == EntryKind::Dir)
-                    && let Err(e) = scan_tree(&fs, &policy, t, moved_to, None, &mut res, allowance).map_err(|h| (h, is_to))?
+                    && let Err(e) = scan_tree(&fs, &policy, t, moved_to, None, &mut res, meter).map_err(|h| (h, is_to))?
                 {
                     return Ok(Err(e));
                 }
@@ -300,15 +300,15 @@ enum Halt {
     Denied(PathBuf),
 }
 
-impl From<Stopped> for Halt {
-    fn from(_: Stopped) -> Halt {
+impl From<WorkerStopped> for Halt {
+    fn from(_: WorkerStopped) -> Halt {
         Halt::Stopped
     }
 }
 
 /// Charges for visiting the entry `path` of a tree, which includes reading
 /// the entry, checking it against the policy and acting on it.
-fn charge_entry(allowance: &mut Allowance, path: &Path) -> Result<(), Stopped> {
+fn charge_entry(allowance: &mut WorkerMeter, path: &Path) -> Result<(), WorkerStopped> {
     allowance.charge(4 + SYSCALL_FUEL)?;
     allowance.charge_bytes(path.as_os_str().len().saturating_mul(4))
 }
@@ -323,7 +323,7 @@ fn scan_tree(
     to: Option<&Path>,
     permits: Option<&Permits>,
     res: &mut Reservation,
-    allowance: &mut Allowance,
+    allowance: &mut WorkerMeter,
 ) -> Result<io::Result<()>, Halt> {
     let space = fs.space();
     let denies = policy.denies_under_normalized_in(&t.path, space) || to.is_some_and(|to| policy.denies_under_normalized_in(to, space));
@@ -389,14 +389,14 @@ fn remove_tree(vm: &mut Vm, path: VmVal<String>) -> FsResult<()> {
     check(vm, &mut t, Access::Write, &shown)?;
     let (fs, permits, root) = (vm.host.fs.clone(), vm.permits(), t.path.clone());
     let mut res = vm.io_reservation();
-    let removed = vm.offload(move |allowance| -> Result<io::Result<()>, Halt> {
+    let removed = vm.offload(move |meter| -> Result<io::Result<()>, Halt> {
         if fs.stat(&t).is_ok_and(|m| m.kind == EntryKind::Dir)
-            && let Err(e) = scan_tree(&fs, &permits.policy, &t, None, Some(&permits), &mut res, allowance)?
+            && let Err(e) = scan_tree(&fs, &permits.policy, &t, None, Some(&permits), &mut res, meter)?
         {
             return Ok(Err(e));
         }
         fs.walk_tree(&t, &mut res, true, |path| {
-            charge_entry(allowance, path)?;
+            charge_entry(meter, path)?;
             permit_entry(&permits, path).map(Ok)
         })
     })?;
@@ -895,15 +895,15 @@ fn read_rest<R: IntoVmValue>(
         st.take_unread();
         st.shrink();
         let mut file = st.file.take().ok_or_else(|| Fail::internal("a file without its file"))?;
-        let (file, read) = vm.offload(move |allowance| {
-            let r = read_to_end(&mut file, &mut data, &mut res, allowance);
+        let (file, read) = vm.offload(move |meter| {
+            let r = read_to_end(&mut file, &mut data, &mut res, meter);
             (file, r.map(|r| r.map(|()| (data, res))))
         })?;
         st.file = Some(file);
         let (data, res) = match read {
             Ok(Ok(read)) => read,
             Ok(Err(e)) => return Ok(Err(e)),
-            Err(Stopped) => unreachable!("`offload` reports a stopped read"),
+            Err(WorkerStopped) => unreachable!("`offload` reports a stopped read"),
         };
         // What was read is consumed: from here on, a failure is not a retry.
         drop(res);
@@ -919,11 +919,11 @@ fn read_to_end(
     f: &mut OpenedFile,
     data: &mut Vec<u8>,
     res: &mut Reservation,
-    allowance: &mut Allowance,
-) -> Result<io::Result<()>, Stopped> {
+    meter: &mut WorkerMeter,
+) -> Result<io::Result<()>, WorkerStopped> {
     let mut chunk = [0u8; 8192];
     loop {
-        allowance.charge(SYSCALL_FUEL)?;
+        meter.charge(SYSCALL_FUEL)?;
         let start = data.len();
         let n = if data.capacity() > start {
             data.resize(data.capacity(), 0);

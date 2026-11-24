@@ -11,8 +11,8 @@ use crate::types::traits;
 use crate::vm::bytecode::{Program, VariantRt};
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
-use crate::vm::heap::{Heap, Staging};
-use crate::vm::meter::{Meter, SLOW_BYTES_PER_UNIT, Scratch};
+use crate::vm::heap::{Heap, ScratchMemoryTracker, Staging};
+use crate::vm::meter::{SLOW_BYTES_PER_FUEL_UNIT, VmMeter};
 use crate::vm::value::{
     FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, ReflectVariantDesc, TypeDesc, ValueRef, VmValue,
     slot_fits,
@@ -113,7 +113,7 @@ pub(crate) fn module() -> NativeModule {
         let (prog, heap, meter, indent) = (&vm.prog, &vm.heap, &vm.meter, indent.clamp(0, 1 << 16) as usize);
         let ids = JsonIds::new(prog)?;
         let out = {
-            let (out, scratch, open_brackets) = (String::new(), Scratch::new(), SmallVec::new());
+            let (out, scratch, open_brackets) = (String::new(), ScratchMemoryTracker::new(), SmallVec::new());
             let mut e = JsonTextEncoder { prog, heap, meter, ids, indent, out, charged: 0, scratch, open_brackets };
             e.encode(value.raw())?;
             e.out
@@ -216,7 +216,7 @@ const SCANNED_KEYS: usize = 16;
 struct Builder<'a, 's, 'h> {
     heap: &'a Heap,
     st: &'s mut Staging<'h>,
-    meter: &'a Meter,
+    meter: &'a VmMeter,
     pending: usize,
     keys: HashTable<(u64, Cow<'a, str>, VmValue)>,
     entries: Vec<Entry<'a>>,
@@ -236,7 +236,7 @@ struct MapBuilder {
 }
 
 impl<'a, 's, 'h> Builder<'a, 's, 'h> {
-    fn new(heap: &'a Heap, st: &'s mut Staging<'h>, meter: &'a Meter) -> Self {
+    fn new(heap: &'a Heap, st: &'s mut Staging<'h>, meter: &'a VmMeter) -> Self {
         Builder { heap, st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new() }
     }
 
@@ -577,10 +577,10 @@ impl<'a> Parser<'a> {
         Parser { src, b: src.as_bytes(), pos: 0, depth: 0, charged: 0 }
     }
 
-    fn charge(&mut self, meter: &Meter) -> Result<(), Fail> {
+    fn charge(&mut self, meter: &VmMeter) -> Result<(), Fail> {
         let consumed = self.pos.saturating_sub(self.charged);
         self.charged = self.pos;
-        meter.charge(1 + (consumed / SLOW_BYTES_PER_UNIT) as u64)
+        meter.charge(1 + (consumed / SLOW_BYTES_PER_FUEL_UNIT) as u64)
     }
 
     fn err_at(&self, pos: usize, what: &str) -> Error {
@@ -912,7 +912,7 @@ impl<'a> Source<'a> for Decoder<'a, '_, '_, '_> {
 
 const LOOKUPS_PER_UNIT: usize = 16;
 
-fn lookup<T>(meter: &Meter, items: &[T], pred: impl Fn(&T) -> bool) -> Result<Option<usize>, Fail> {
+fn lookup<T>(meter: &VmMeter, items: &[T], pred: impl Fn(&T) -> bool) -> Result<Option<usize>, Fail> {
     meter.charge(1 + (items.len() / LOOKUPS_PER_UNIT) as u64)?;
     Ok(items.iter().position(pred))
 }
@@ -1430,13 +1430,13 @@ fn map_key_text<'v>(prog: &'v Program, heap: &'v Heap, key: VmValue) -> Result<C
 struct JsonTextEncoder<'v> {
     prog: &'v Program,
     heap: &'v Heap,
-    meter: &'v Meter,
+    meter: &'v VmMeter,
     ids: JsonIds,
     indent: usize,
     out: String,
     /// Bytes of `out` already charged to `meter`.
     charged: usize,
-    scratch: Scratch,
+    scratch: ScratchMemoryTracker,
     /// Open JSON arrays and objects awaiting their remaining members.
     open_brackets: SmallVec<[OpenJsonBracket<'v>; INLINE_OPEN_CONTAINERS]>,
 }
@@ -1615,7 +1615,7 @@ impl<'v> JsonTextEncoder<'v> {
             return Ok(());
         }
         let mut left = self.indent.saturating_mul(self.open_brackets.len());
-        self.scratch.check(self.heap, self.out.len().saturating_add(left))?;
+        self.scratch.check_memory(self.heap, self.out.len().saturating_add(left))?;
         self.out.push('\n');
         while left > 0 {
             let spaces = &SPACES[..left.min(SPACES.len())];
@@ -1650,7 +1650,7 @@ impl<'v> JsonTextEncoder<'v> {
         let written = self.out.len() - self.charged;
         self.charged = self.out.len();
         self.meter.charge_bytes(written)?;
-        self.scratch.check(self.heap, self.out.capacity())
+        self.scratch.check_memory(self.heap, self.out.capacity())
     }
 }
 

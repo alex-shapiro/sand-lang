@@ -348,7 +348,7 @@ impl Heap {
     }
 
     /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
-    /// Allocate the bytes immediately after this check, or use [`Scratch`](super::meter::Scratch) to track a growing buffer.
+    /// Allocate the bytes immediately after this check, or use [`ScratchMemoryTracker`] to track a growing buffer.
     pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Fail> {
         if self.would_exceed_memory_limit(extra) { Err(crate::vm::Fail::limit(LimitKind::Memory)) } else { Ok(()) }
     }
@@ -1604,6 +1604,40 @@ impl GcStats {
     }
 }
 
+/// Prevents growing Rust-side temporary buffers from bypassing the VM memory
+/// limit.
+///
+/// Native functions and runtime helpers build temporary strings and vectors in
+/// Rust memory outside the SandLang heap. Checking the heap limit on every byte
+/// appended is too expensive. This tracker amortizes checks to every 64 KiB of
+/// growth.
+pub struct ScratchMemoryTracker {
+    next_check_bytes: usize,
+}
+
+impl ScratchMemoryTracker {
+    /// Creates a tracker.
+    pub fn new() -> ScratchMemoryTracker {
+        ScratchMemoryTracker { next_check_bytes: SCRATCH_CHECK_BYTES }
+    }
+
+    /// Verifies that temporary Rust buffer space fits within the VM memory limit.
+    #[inline]
+    pub fn check_memory(&mut self, heap: &Heap, bytes: usize) -> Result<(), crate::vm::Fail> {
+        if bytes < self.next_check_bytes && !heap.fail_next_check.get() {
+            return Ok(());
+        }
+        self.next_check_bytes = bytes.saturating_add(SCRATCH_CHECK_BYTES);
+        heap.check_memory(bytes)
+    }
+}
+
+impl Default for ScratchMemoryTracker {
+    fn default() -> Self {
+        ScratchMemoryTracker::new()
+    }
+}
+
 // ------------------------------------------------------------------
 // Internal collector state and tracing helpers
 
@@ -1808,6 +1842,8 @@ const STAGE_CHUNK_BYTES: usize = STAGE_CHUNK_LEN * std::mem::size_of::<(u32, Obj
 const MAX_SPARE_BOX_LEN: usize = 4;
 /// Maximum number of freed boxes cached per slice length.
 const MAX_SPARE_BOXES_PER_LEN: usize = 1 << 14;
+/// Buffer growth in bytes between memory-limit checks in [`ScratchMemoryTracker`].
+const SCRATCH_CHECK_BYTES: usize = 64 << 10;
 
 #[cfg(test)]
 mod tests {

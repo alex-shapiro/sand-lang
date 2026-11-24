@@ -10,7 +10,8 @@ use crate::native::convert::HostError;
 use crate::native::ty::VmVal;
 use crate::native::{NativeModule, NativeObject};
 use crate::platform::Instant;
-use crate::vm::meter::{BYTES_PER_UNIT, SLOW_BYTES_PER_UNIT, Scratch};
+use crate::vm::heap::ScratchMemoryTracker;
+use crate::vm::meter::{BYTES_PER_FUEL_UNIT, SLOW_BYTES_PER_FUEL_UNIT};
 use crate::vm::value::{FxHasher, VmValue};
 use crate::vm::{Fail, Vm};
 use regex_automata::meta::{self, Cache};
@@ -38,7 +39,7 @@ const MATCH_COST: usize = 128;
 const REGEX_OVERHEAD: usize = 256;
 
 /// Fuel charged before compiling a regex: a base cost plus a cost per
-/// pattern byte. Compiling then costs one unit per `SLOW_BYTES_PER_UNIT`
+/// pattern byte. Compiling then costs one unit per `SLOW_BYTES_PER_FUEL_UNIT`
 /// bytes of compiled program (or of the size limit, when it is exceeded).
 const COMPILE_BASE: u64 = 1000;
 const COMPILE_PER_BYTE: u64 = 16;
@@ -64,7 +65,7 @@ struct Scan {
     start: Instant,
     /// Charges since the clock was last read.
     unclocked: u32,
-    scratch: Scratch,
+    scratch: ScratchMemoryTracker,
 }
 
 /// The clock is read every this many charges (and for every large charge):
@@ -73,7 +74,7 @@ const CLOCK_EVERY: u32 = 32;
 
 impl Scan {
     fn new(vm: &Vm) -> Scan {
-        Scan { searched: 0, charged: 0, start: vm.host.clock.now(), unclocked: 0, scratch: Scratch::new() }
+        Scan { searched: 0, charged: 0, start: vm.host.clock.now(), unclocked: 0, scratch: ScratchMemoryTracker::new() }
     }
 
     /// Charges `units`, plus whatever the time floor requires.
@@ -93,15 +94,15 @@ impl Scan {
 
     /// Charges for one search through `text`, before it runs.
     fn search(&mut self, vm: &Vm, text: &str) -> Result<(), Fail> {
-        self.charge(vm, (text.len() / SLOW_BYTES_PER_UNIT) as u64)
+        self.charge(vm, (text.len() / SLOW_BYTES_PER_FUEL_UNIT) as u64)
     }
 
     /// A match ending at `end` was found; `collected` bytes are held so far.
     fn step(&mut self, vm: &Vm, end: usize, collected: usize) -> Result<(), Fail> {
         let searched = end.saturating_sub(self.searched);
         self.searched = self.searched.max(end);
-        self.charge(vm, 1 + (searched / SLOW_BYTES_PER_UNIT) as u64)?;
-        self.scratch.check(&vm.heap, collected)
+        self.charge(vm, 1 + (searched / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
+        self.scratch.check_memory(&vm.heap, collected)
     }
 
     /// Applies the time floor to the work done since the last charge.
@@ -344,7 +345,7 @@ fn replace(vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>, rep: VmVal<Str
             Ok(caps.get_match())
         }) {
             let added = if expand {
-                scan.charge(vm, (rep.len() / SLOW_BYTES_PER_UNIT) as u64)?;
+                scan.charge(vm, (rep.len() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
                 expansion_len(&caps, rep, &mut literal)
             } else {
                 rep.len()
@@ -399,7 +400,7 @@ pub(crate) fn module() -> NativeModule {
         let hash = pattern_hash(pattern.str(&vm.heap));
         let cached = lookup_cached_regex(vm, pattern.str(&vm.heap), hash);
         let is_new_pattern = matches!(cached, CachedRegex::Absent);
-        let cached_cost = CACHED_COST + (text_len / BYTES_PER_UNIT) as u64;
+        let cached_cost = CACHED_COST + (text_len / BYTES_PER_FUEL_UNIT) as u64;
         let mut scan = match cached {
             CachedRegex::Live(regex) => {
                 vm.charge(cached_cost)?;
@@ -419,7 +420,7 @@ pub(crate) fn module() -> NativeModule {
         let built = builder().build(pattern.str(&vm.heap));
         if is_new_pattern {
             let compiled_bytes = built.as_ref().map_or_else(|e| e.size_limit().unwrap_or(0), |re| re.memory_usage());
-            scan.charge(vm, (compiled_bytes / SLOW_BYTES_PER_UNIT) as u64)?;
+            scan.charge(vm, (compiled_bytes / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
         }
         scan.finish(vm)?;
         let re = match built {
