@@ -1748,10 +1748,10 @@ impl Vm {
         None
     }
 
-    /// Calls a native; `Ok(None)` to continue, `Ok(Some(exit))` to suspend.
-    /// Arguments are borrowed from the fiber's stack: the running fiber is not
-    /// in `self.fibers`, so natives cannot observe or move it. A native that
-    /// exhausts the slice's fuel preempts the task once it returns.
+    /// Calls a native. `Ok(None)` to continue, `Ok(Some(exit))` to suspend.
+    /// Arguments are borrowed from the fiber's stack because the running fiber
+    /// is not in `self.fibers` and so natives cannot observe or move it. If a
+    /// native exhausts the slice's fuel, the VM preempts the task on return.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn call_native(
@@ -1768,18 +1768,17 @@ impl Vm {
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
         let fuel_at_call = self.meter.remaining_slice_fuel();
-        let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+        let mut r = self.invoke_native(natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
         if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
-            // Native functions check memory and resource limits before garbage
-            // collection. Collect all garbage, refund the failed attempt's
-            // fuel, and retry the call once.
+            // Check memory and resource limits before GC.
+            // Run a collection, refund the failed attempt's fuel, and retry once.
             self.collect_all_garbage(Some(fiber));
             self.meter.refund_to(fuel_at_call);
             r = match self.meter.check_limits() {
                 Ok(()) => {
                     self.collected = true;
-                    let retried = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+                    let retried = self.invoke_native(natives, n, &fiber.stack[start..start + argc]);
                     self.collected = false;
                     retried
                 }
@@ -1839,7 +1838,6 @@ impl Vm {
             CtlKind::Cancelled => Ok(Some(FiberStop::Cancelled)),
             CtlKind::Yield | CtlKind::Blocked { .. } => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
-            // `call_native` already retried any memory-limit failure after garbage collection.
             CtlKind::Fail(fail) => Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32)))),
         }
     }
@@ -2002,8 +2000,7 @@ impl Vm {
         self.heap.append_text(cur, &s).map_err(Fail::limit)
     }
 
-    /// Calls native `n`. The scheduler catches Rust panics around the fiber
-    /// turn (`crate::unwind`).
+    /// Invokes a native function.
     #[inline(always)]
     fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[VmValue]) -> Result<VmValue, Ctl> {
         let entry = &natives[n as usize];
