@@ -459,7 +459,7 @@ pub fn map_slot_tuple(heap: &Heap, meter: &impl Meter, m: &MapObj, items: &[VmVa
         h.write_u64(hash_key(heap, meter, x)?);
     }
     meter.charge(1)?;
-    find_metered(meter, &m.index, VmValue::Unit, h.finish(), |slot| {
+    find_metered(&m.index, VmValue::Unit, h.finish(), |slot| {
         let Some((VmValue::Obj(tuple_handle), _)) = m.entries[slot] else { return Ok(false) };
         let Obj::Tuple(tuple) = heap.obj(tuple_handle) else { return Ok(false) };
         if tuple.len() != items.len() {
@@ -504,32 +504,18 @@ pub fn find_key(
     k: VmValue,
     key_at: impl Fn(usize) -> Option<VmValue>,
 ) -> Result<Option<usize>, Fail> {
-    find_metered(meter, table, k, hash, |slot| match key_at(slot) {
+    find_metered(table, k, hash, |slot| match key_at(slot) {
         Some(stored_key) => keys_eq(heap, meter, stored_key, k),
         None => Ok(false),
     })
 }
 
 /// Finds the slot in `table` for `key` with `hash` that satisfies `is_match`.
-///
-/// Refunds the fuel of each failed comparison. Only the matching comparison
-/// charges the meter.
 #[inline]
-fn find_metered(
-    meter: &impl Meter,
-    table: &KeyIndex,
-    key: VmValue,
-    hash: u64,
-    is_match: impl Fn(usize) -> Result<bool, Fail>,
-) -> Result<Option<usize>, Fail> {
-    let mark = meter.fuel_mark();
+fn find_metered(table: &KeyIndex, key: VmValue, hash: u64, is_match: impl Fn(usize) -> Result<bool, Fail>) -> Result<Option<usize>, Fail> {
     let mut failure = None;
     let slot = table.find(key, hash, |slot| match is_match(slot) {
-        Ok(true) => true,
-        Ok(false) => {
-            meter.refund_to(mark);
-            false
-        }
+        Ok(matched) => matched,
         Err(fail) => {
             failure.get_or_insert(fail);
             false
@@ -1265,26 +1251,18 @@ mod tests {
 
     #[derive(Default)]
     struct CountingMeter {
-        units: std::cell::Cell<i64>,
+        units: std::cell::Cell<u64>,
     }
 
     impl Meter for CountingMeter {
         fn charge(&self, units: u64) -> Result<(), Fail> {
-            self.units.set(self.units.get() + units as i64);
+            self.units.set(self.units.get() + units);
             Ok(())
-        }
-
-        fn fuel_mark(&self) -> i64 {
-            self.units.get()
-        }
-
-        fn refund_to(&self, mark: i64) {
-            self.units.set(mark);
         }
     }
 
     #[test]
-    fn find_key_charges_only_for_the_matching_comparison() {
+    fn find_key_charges_for_comparisons() {
         let mut heap = Heap::new(None, usize::MAX);
         let key = heap.new_str("a".repeat(6400));
         let equal = heap.new_str("a".repeat(6400));
@@ -1295,9 +1273,9 @@ mod tests {
 
         let budget = CountingMeter::default();
         assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(other)).unwrap(), None);
-        assert_eq!(budget.units.get(), 0, "hash-tag collision refunded");
+        assert_eq!(budget.units.get(), 100, "colliding comparison charged");
         assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(equal)).unwrap(), Some(0));
-        assert_eq!(budget.units.get(), 100, "6400 bytes compared");
+        assert_eq!(budget.units.get(), 200, "matching comparison charged");
     }
 
     #[test]

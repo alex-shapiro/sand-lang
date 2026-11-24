@@ -1900,11 +1900,12 @@ n numbers costs about n·log₂(n) units, `==` on two lists of n integers about 
 units, and `json.parse` about one unit per value plus one per 8 bytes of
 text.
 
-All fuel charges except regex charges are a deterministic function of the
-program and its inputs across hash seeds and garbage collections. If the
-engine runs an instruction or library function again after garbage collection
-as described in §16.3, it charges fuel only for the attempt that completes.
-Regex compilation charges fuel from the size of the compiled regex, which can
+Fuel is monotonic: once spent, it is never refunded. If the engine runs an
+instruction or library function again after garbage collection as described in
+§16.3, both attempts charge fuel.
+
+Map and set lookups charge fuel for each key comparison they perform. Regex
+compilation charges fuel from the size of the compiled regex, which can
 differ across platforms. Regex functions also measure elapsed time and charge
 at least 1 unit per microsecond. This time floor bounds leftmost-first
 searches that scan past a match and searches that fall back from the lazy DFA

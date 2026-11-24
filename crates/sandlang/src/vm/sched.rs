@@ -217,42 +217,42 @@ struct RunTimer {
     now: Instant,
     last_yield: Instant,
     unrecorded_slices: u32,
-    unrecorded_fuel: u64,
+    last_clock_fuel: u64,
 }
 
 impl RunTimer {
-    fn start(clock: Arc<dyn crate::platform::Clock>) -> RunTimer {
+    fn start(clock: Arc<dyn crate::platform::Clock>, initial_fuel: u64) -> RunTimer {
         let now = clock.now();
         let cpu_mark = clock.cpu_time();
-        RunTimer { clock, cpu: Duration::ZERO, cpu_mark, now, last_yield: now, unrecorded_slices: 0, unrecorded_fuel: 0 }
+        RunTimer { clock, cpu: Duration::ZERO, cpu_mark, now, last_yield: now, unrecorded_slices: 0, last_clock_fuel: initial_fuel }
     }
 
     /// Updates CPU and monotonic times.
-    fn read(&mut self) {
+    fn read(&mut self, total_fuel: u64) {
         let mark = self.clock.cpu_time();
         self.cpu += mark.saturating_sub(self.cpu_mark);
         self.cpu_mark = mark;
         self.now = self.clock.now();
         self.unrecorded_slices = 0;
-        self.unrecorded_fuel = 0;
+        self.last_clock_fuel = total_fuel;
     }
 
     /// Resumes time tracking after an asynchronous wait.
-    fn resume(&mut self) {
+    fn resume(&mut self, total_fuel: u64) {
         self.cpu_mark = self.clock.cpu_time();
         self.now = self.clock.now();
         self.unrecorded_slices = 0;
-        self.unrecorded_fuel = 0;
+        self.last_clock_fuel = total_fuel;
     }
 
-    /// Adds the turn's fuel to the unrecorded batch. Reports work and reads the
-    /// clock once the slice count or fuel reaches its threshold.
+    /// Reports fuel and reads the clock once the slice count or fuel since the
+    /// last read reaches its threshold.
     fn ran(&mut self, meter: &VmMeter) {
         self.unrecorded_slices += 1;
-        self.unrecorded_fuel += meter.slice_fuel_spent();
-        if self.unrecorded_slices >= CLOCK_SLICES || self.unrecorded_fuel >= SLICE_FUEL as u64 {
-            meter.report_work();
-            self.read();
+        let used = meter.total_fuel_used();
+        if self.unrecorded_slices >= CLOCK_SLICES || used.saturating_sub(self.last_clock_fuel) >= SLICE_FUEL as u64 {
+            meter.report_fuel_to_clock();
+            self.read(used);
         }
     }
 
@@ -446,7 +446,7 @@ impl Vm {
 
     /// Drives bytecode slices on `fiber` for the active synchronous callback.
     fn run_callback_slices(&mut self, code: &ProgramCode, fiber: &mut Fiber) -> Result<VmValue, RunEnding> {
-        let mut fuel = self.meter.callback_fuel();
+        let mut fuel = self.meter.reload_interpreter_fuel();
         let result = loop {
             let stop = match self.run_slice(code, fiber, &mut fuel) {
                 Ok(stop) => stop,
@@ -456,7 +456,7 @@ impl Vm {
                 FiberStop::CallbackReturn(value) => break Ok(value),
                 FiberStop::Preempt => {
                     self.meter.flush_interpreter_fuel(fuel);
-                    match self.meter.next_callback_slice() {
+                    match self.meter.refill_after_limit_check() {
                         Ok(next_fuel) => {
                             fuel = next_fuel;
                             continue;
@@ -560,7 +560,7 @@ fn run_fiber_turn(
             if let Some(stop) = polled? {
                 return Ok(stop);
             }
-            if *fuel <= 0 {
+            if vm.meter.is_slice_exhausted() {
                 return Ok(FiberStop::Preempt);
             }
             continue;
@@ -776,24 +776,27 @@ pub(crate) async fn end_tasks(shared_vm: &SharedVm) -> Result<(), RunEnding> {
 /// Releases the VM lock only while polling async native calls or awaiting in
 /// `drive`. Dropping this future at an `.await` point leaves all tasks in `Vm`.
 pub(crate) async fn drive<U: DriveUntil>(shared_vm: &SharedVm, stop_policy: U) -> Result<U::Stop, RunEnding> {
-    let mut timer = RunTimer::start(shared_vm.lock().host.clock.clone());
+    let mut timer = {
+        let vm = shared_vm.lock();
+        RunTimer::start(vm.host.clock.clone(), vm.meter.total_fuel_used())
+    };
     loop {
-        let pause = {
+        let (pause, total_fuel) = {
             let mut vm = shared_vm.lock();
             let pause = run_ready(&mut vm, shared_vm, &stop_policy, &mut timer);
-            vm.meter.report_work();
-            pause?
+            vm.meter.report_fuel_to_clock();
+            (pause?, vm.meter.total_fuel_used())
         };
         match pause {
             Pause::Stop(stop) => return Ok(stop),
             Pause::Yield => {
-                timer.read();
+                timer.read(total_fuel);
                 if tokio::task::coop::has_budget_remaining() {
                     timer.yield_now().await;
                 } else {
                     tokio::task::yield_now().await;
                 }
-                timer.resume();
+                timer.resume(total_fuel);
                 timer.last_yield = timer.now;
             }
             Pause::Prompt(cap) => {
@@ -803,7 +806,7 @@ pub(crate) async fn drive<U: DriveUntil>(shared_vm: &SharedVm, stop_policy: U) -
                     vm.drain_output()?;
                     (vm.host.prompter.clone(), vm.host.interrupt.clone())
                 };
-                timer.read();
+                timer.read(total_fuel);
                 let asked = timer.now;
                 let answer = match prompter {
                     Some(prompter) => interrupt.unless_interrupted(prompter.prompt(cap.clone())).await.ok_or(Trap::Interrupted)?,
@@ -811,7 +814,7 @@ pub(crate) async fn drive<U: DriveUntil>(shared_vm: &SharedVm, stop_policy: U) -
                 };
                 let mut vm = shared_vm.lock();
                 vm.exclude_wall_time(asked, &timer);
-                timer.resume();
+                timer.resume(vm.meter.total_fuel_used());
                 vm.apply_answer(cap, answer);
                 vm.check_limits(&timer)?;
             }
@@ -829,7 +832,7 @@ pub(crate) async fn drive<U: DriveUntil>(shared_vm: &SharedVm, stop_policy: U) -
                     if let Some(stop) = stop_policy.stop_before_io_wait() {
                         return Ok(stop);
                     }
-                    timer.read();
+                    timer.read(vm.meter.total_fuel_used());
                     HostEventWait {
                         idle_guard: vm.host.stdin.clone().map(crate::stdin_feed::StdinIdleGuard::new),
                         user_wait_start: (wait_kind == WaitKind::User).then_some(timer.now),
@@ -850,7 +853,7 @@ pub(crate) async fn drive<U: DriveUntil>(shared_vm: &SharedVm, stop_policy: U) -
                 if let Some(start) = wait.user_wait_start {
                     vm.exclude_wall_time(start, &timer);
                 }
-                timer.resume();
+                timer.resume(vm.meter.total_fuel_used());
                 timer.last_yield = timer.now;
                 vm.wake_host_waits();
                 vm.check_limits(&timer)?;

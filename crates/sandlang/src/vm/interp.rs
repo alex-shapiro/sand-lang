@@ -484,9 +484,9 @@ impl Vm {
         let Some(e) = self.heap.field(res, 0) else {
             return self.fail_stop(fiber, ip, Fail::runtime_error("none", "`?` found None"));
         };
-        let fuel_mark = self.begin_retryable_op();
+        self.begin_retryable_op();
         let text = display::to_display_metered(prog, &self.heap, &self.meter, e);
-        match self.end_retryable_op(fuel_mark, text) {
+        match self.end_retryable_op(text) {
             Ok(text) => Err(self.error_trap(fiber, ip, text)),
             Err(c) => self.fail_stop(fiber, ip, c),
         }
@@ -555,28 +555,20 @@ impl Vm {
         Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32))))
     }
 
-    /// Records the meter fuel before an instruction that may hit a memory limit.
+    /// Arms retry stress before an instruction that may hit a memory limit.
     #[inline(always)]
-    fn begin_retryable_op(&mut self) -> i64 {
+    fn begin_retryable_op(&mut self) {
         if self.retry_stress {
             self.arm_instruction_retry_stress();
         }
-        self.meter.remaining_slice_fuel()
     }
 
-    /// Finishes an instruction started with [`Vm::begin_retryable_op`].
-    ///
-    /// Refunds the instruction's fuel on a memory limit before the scheduler
-    /// collects garbage and retries the instruction.
+    /// Clears retry stress after an instruction started with
+    /// [`Vm::begin_retryable_op`].
     #[inline(always)]
-    fn end_retryable_op<T>(&self, fuel_mark: i64, result: Result<T, Fail>) -> Result<T, Fail> {
+    fn end_retryable_op<T>(&self, result: Result<T, Fail>) -> Result<T, Fail> {
         if self.retry_stress {
             self.heap.fail_next_check.set(false);
-        }
-        if let Err(fail) = &result
-            && fail.as_limit() == Some(LimitKind::Memory)
-        {
-            self.meter.refund_to(fuel_mark);
         }
         result
     }
@@ -703,9 +695,9 @@ impl Vm {
         // a machine register.
         macro_rules! retryable {
             ($body:expr) => {{
-                let fuel_mark = self.begin_retryable_op();
+                self.begin_retryable_op();
                 let result = $body;
-                self.end_retryable_op(fuel_mark, result)
+                self.end_retryable_op(result)
             }};
         }
         // A safe point of a call instruction: on preemption the call is
@@ -1769,15 +1761,13 @@ impl Vm {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
-        let fuel_at_call = self.meter.remaining_slice_fuel();
         let native_fn = &natives[n as usize].f;
         let mut r = native_fn.call(self, fiber, start..start + argc);
         self.heap.fail_next_check.set(false);
         if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
             // Check memory and resource limits before GC.
-            // Run a collection, refund the failed attempt's fuel, and retry once.
+            // Run a collection and retry once.
             self.collect_all_garbage(Some(fiber));
-            self.meter.refund_to(fuel_at_call);
             r = match self.meter.check_limits() {
                 Ok(()) => {
                     self.collected = true;
@@ -1795,7 +1785,7 @@ impl Vm {
             Ok(v) => {
                 fiber.stack[slot] = v;
                 self.enforce_limit(Some(fiber)).map_err(Trap::Limit)?;
-                if self.meter.remaining_slice_fuel() <= 0 {
+                if self.meter.is_slice_exhausted() {
                     // Natives used up the slice: let the scheduler check
                     // limits and run other tasks.
                     fiber.stopped_in_native_call = true;
