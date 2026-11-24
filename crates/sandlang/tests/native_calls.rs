@@ -692,7 +692,7 @@ impl sandlang::platform::Clock for WorkClock {
         self.yield_count.fetch_add(1, Ordering::SeqCst);
         Box::pin(std::future::ready(()))
     }
-    fn work(&self, fuel: u64) {
+    fn record_work(&self, fuel: u64) {
         self.reported_fuel.fetch_add(fuel, Ordering::SeqCst);
     }
 }

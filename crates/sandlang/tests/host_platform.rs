@@ -54,7 +54,7 @@ impl Clock for ManualClock {
         Box::pin(std::future::ready(()))
     }
 
-    fn work(&self, fuel: u64) {
+    fn record_work(&self, fuel: u64) {
         *self.work.lock() += fuel;
         *self.elapsed.lock() += Duration::from_nanos(fuel * 10);
     }

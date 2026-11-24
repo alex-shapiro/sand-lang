@@ -34,7 +34,7 @@ pub trait Clock: Send + Sync {
     fn yield_now(&self) -> ClockFuture;
 
     /// Records fuel units of work completed by the engine.
-    fn work(&self, fuel: u64) {
+    fn record_work(&self, fuel: u64) {
         let _ = fuel;
     }
 }

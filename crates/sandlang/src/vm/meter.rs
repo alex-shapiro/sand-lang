@@ -67,7 +67,7 @@ pub trait Meter {
 /// Tracks fuel and enforces limits inside the VM.
 pub struct VmMeter {
     /// Fuel spent in the current run.
-    total_fuel: Cell<u64>,
+    spent_fuel: Cell<u64>,
     /// Fuel at which the next limit check runs.
     next_check_fuel: Cell<u64>,
     /// Fuel at which the current fiber slice ends.
@@ -87,7 +87,7 @@ impl VmMeter {
     /// Creates a meter.
     pub fn new(max_instructions: Option<u64>, interrupt_flag: Arc<AtomicBool>, clock: Arc<dyn Clock>) -> VmMeter {
         VmMeter {
-            total_fuel: Cell::new(0),
+            spent_fuel: Cell::new(0),
             next_check_fuel: Cell::new(0),
             slice_fuel: Cell::new(0),
             clock_reported_fuel: Cell::new(0),
@@ -103,8 +103,8 @@ impl VmMeter {
     /// Charges fuel for work and enforces execution limits.
     #[inline]
     pub fn charge(&self, units: u64) -> Result<(), Fail> {
-        let used = self.total_fuel.get().saturating_add(units);
-        self.total_fuel.set(used);
+        let used = self.spent_fuel.get().saturating_add(units);
+        self.spent_fuel.set(used);
         if used > self.next_check_fuel.get() { self.advance_limit_check() } else { Ok(()) }
     }
 
@@ -127,7 +127,7 @@ impl VmMeter {
             return Err(Fail::interrupted());
         }
         if let Some(max) = self.max_instructions
-            && self.total_fuel.get() > max
+            && self.spent_fuel.get() > max
         {
             return Err(Fail::limit(LimitKind::Instructions));
         }
@@ -147,13 +147,13 @@ impl VmMeter {
     /// Returns `true` if the current fiber slice has spent its fuel allowance.
     #[inline]
     pub fn is_slice_exhausted(&self) -> bool {
-        self.total_fuel.get() >= self.slice_fuel.get()
+        self.spent_fuel.get() >= self.slice_fuel.get()
     }
 
     /// Returns fuel spent across the current run.
     #[inline]
     pub fn total_fuel_used(&self) -> u64 {
-        self.total_fuel.get()
+        self.spent_fuel.get()
     }
 
     /// Begins a scheduling slice with a fuel allowance and time deadline.
@@ -162,7 +162,7 @@ impl VmMeter {
     /// after `SLICE_FUEL` units or stops at `max_instructions`. Returns the
     /// starting fuel for the interpreter's local counter.
     pub(crate) fn start_slice(&self, cpu_deadline: Option<Duration>, wall_deadline: Option<Instant>) -> i64 {
-        let end = self.cap_target(self.total_fuel.get().saturating_add(super::SLICE_FUEL as u64));
+        let end = self.cap_target(self.spent_fuel.get().saturating_add(super::SLICE_FUEL as u64));
         self.slice_fuel.set(end);
         self.next_check_fuel.set(end);
         self.cpu_deadline.set(cpu_deadline);
@@ -172,11 +172,11 @@ impl VmMeter {
 
     /// Sends fuel spent since the last report to [`Clock::work`].
     pub(crate) fn report_fuel_to_clock(&self) {
-        let used = self.total_fuel.get();
-        let unreported = used.saturating_sub(self.clock_reported_fuel.get());
+        let spent = self.spent_fuel.get();
+        let unreported = spent.saturating_sub(self.clock_reported_fuel.get());
         if unreported > 0 {
-            self.clock_reported_fuel.set(used);
-            self.clock.work(unreported);
+            self.clock_reported_fuel.set(spent);
+            self.clock.record_work(unreported);
         }
     }
 
@@ -197,7 +197,7 @@ impl VmMeter {
     #[inline]
     pub(crate) fn flush_interpreter_fuel(&self, interpreter_fuel: i64) {
         let spent = self.interpreter_fuel_baseline.get().saturating_sub(interpreter_fuel).max(0) as u64;
-        self.total_fuel.set(self.total_fuel.get().saturating_add(spent));
+        self.spent_fuel.set(self.spent_fuel.get().saturating_add(spent));
     }
 
     /// Synchronizes the interpreter's local counter with fuel remaining until
@@ -207,7 +207,7 @@ impl VmMeter {
     /// value becomes the interpreter's local counter and the new sync baseline.
     #[inline]
     pub(crate) fn reload_interpreter_fuel(&self) -> i64 {
-        let remaining = self.next_check_fuel.get().saturating_sub(self.total_fuel.get()).min(i64::MAX as u64) as i64;
+        let remaining = self.next_check_fuel.get().saturating_sub(self.spent_fuel.get()).min(i64::MAX as u64) as i64;
         self.interpreter_fuel_baseline.set(remaining);
         remaining
     }
@@ -215,7 +215,7 @@ impl VmMeter {
     /// Clears accumulated run fuel and installs a fresh interrupt flag to begin
     /// a new session run.
     pub(crate) fn reset_for_run(&mut self, interrupt_flag: Arc<AtomicBool>) {
-        self.total_fuel.set(0);
+        self.spent_fuel.set(0);
         self.next_check_fuel.set(0);
         self.slice_fuel.set(0);
         self.clock_reported_fuel.set(0);
@@ -230,7 +230,7 @@ impl VmMeter {
             interrupt_flag: self.interrupt_flag.clone(),
             abandoned_flag: Arc::new(AtomicBool::new(false)),
             wall_deadline: self.wall_deadline.get().map(|at| Deadline { at, clock: self.clock.clone() }),
-            fuel_limit: self.max_instructions.map_or(u64::MAX, |max| max.saturating_sub(self.total_fuel.get())),
+            fuel_limit: self.max_instructions.map_or(u64::MAX, |max| max.saturating_sub(self.spent_fuel.get())),
             fuel_used: 0,
             next_deadline_check_fuel: 0,
             stopped: false,
@@ -248,7 +248,7 @@ impl VmMeter {
     #[inline(never)]
     fn advance_limit_check(&self) -> Result<(), Fail> {
         self.check_limits()?;
-        self.next_check_fuel.set(self.cap_target(self.total_fuel.get().saturating_add(LIMIT_CHECK_FUEL_INTERVAL as u64)));
+        self.next_check_fuel.set(self.cap_target(self.spent_fuel.get().saturating_add(LIMIT_CHECK_FUEL_INTERVAL as u64)));
         Ok(())
     }
 }
