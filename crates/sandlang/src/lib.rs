@@ -8,6 +8,8 @@
 //! defines it.
 //!
 //! See `docs/SPEC.md` for the language specification.
+#![feature(explicit_tail_calls, rust_preserve_none_cc)]
+#![allow(incomplete_features)]
 #![forbid(unsafe_code)]
 
 extern crate self as sandlang;

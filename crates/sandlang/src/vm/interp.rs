@@ -27,6 +27,9 @@ use super::meter::{back_edge_fuel, code_fuel_surcharge};
 use super::*;
 use crate::engine::LimitKind;
 
+#[path = "dispatch.rs"]
+mod dispatch;
+
 /// Why metered work stopped. Must fit in a register.
 #[derive(Clone, Copy)]
 enum Stop {
@@ -602,6 +605,7 @@ impl Vm {
             return Err(self.error_trap(fiber, ip, msg));
         }
         let prog = self.prog.clone();
+        let packed = self.packed_code.clone();
         let natives = self.natives.clone();
         // As few values as possible stay live across the loop, so that the
         // register allocator keeps `code`, `ip`, `regs` and fuel in registers.
@@ -611,9 +615,7 @@ impl Vm {
         let mut ip = fr.ip as usize;
         let mut base = fr.base as usize;
         let mut fuel = FuelGuard { left: *fuel_out, out: fuel_out };
-        // The current frame's register window. Re-derived (`reload!`) after
-        // anything that may move or resize the stack.
-        let mut regs: &mut [VmValue] = &mut fiber.stack[base..];
+        let mut regs: &mut [VmValue];
 
         macro_rules! r {
             ($x:expr) => {
@@ -776,8 +778,64 @@ impl Vm {
         }
 
         'dispatch: loop {
-            let op = code[ip];
-            ip += 1;
+            let mut stack = std::mem::take(&mut fiber.stack);
+            let exit = {
+                let packed_code: &[u64] = &packed[fiber.frames.last().unwrap().proto as usize];
+                let mut ctx = dispatch::DispatchCtx { vm: self, fiber, prog: &prog, packed: &packed, natives: &natives };
+                dispatch::enter(&mut ctx, packed_code, ip, &mut stack, base, fuel.left)
+            };
+            fiber.stack = stack;
+            let op = match exit {
+                dispatch::DispatchExit::Done(v, f) => {
+                    fuel.left = f;
+                    fiber.stack.truncate(0);
+                    return Ok(FiberStop::Done(v));
+                }
+                dispatch::DispatchExit::SafePoint { resume_ip, fuel: f } => {
+                    fuel.left = f;
+                    let fr = *fiber.frames.last().unwrap();
+                    code = &protos[fr.proto as usize].code;
+                    base = fr.base as usize;
+                    ip = resume_ip;
+                    if let Some(exit) = self.safe_point(fiber, fuel.left, resume_ip) {
+                        return exit;
+                    }
+                    continue 'dispatch;
+                }
+                dispatch::DispatchExit::FailStop { ctl, ip: fail_ip, fuel: f } => {
+                    fuel.left = f;
+                    ip = fail_ip;
+                    save!();
+                    return self.fail_stop(fiber, ip, ctl);
+                }
+                dispatch::DispatchExit::LimitMemory { ip: limit_ip, fuel: f } => {
+                    fuel.left = f;
+                    ip = limit_ip;
+                    return self.limit_stop(fiber, ip, LimitKind::Memory);
+                }
+                dispatch::DispatchExit::NativeSlow { result, n, start, argc, slot, ip: call_ip, fuel_at_call } => {
+                    let fr = *fiber.frames.last().unwrap();
+                    code = &protos[fr.proto as usize].code;
+                    base = fr.base as usize;
+                    ip = call_ip;
+                    let r = self.finish_native_call(&natives, fiber, n, start, argc, slot, call_ip, fuel_at_call, result);
+                    fuel.left = self.meter.reload_interpreter_fuel();
+                    match r {
+                        Ok(None) => continue 'dispatch,
+                        Ok(Some(exit)) => return Ok(exit),
+                        Err(t) => return Err(t),
+                    }
+                }
+                dispatch::DispatchExit::SlowOp { ip: slow_ip, fuel: f } => {
+                    fuel.left = f;
+                    let fr = *fiber.frames.last().unwrap();
+                    code = &protos[fr.proto as usize].code;
+                    base = fr.base as usize;
+                    ip = slow_ip + 1;
+                    code[slow_ip]
+                }
+            };
+            regs = &mut fiber.stack[base..];
             // Back edges leave the `match` with their offset, to share one
             // safe point; every other instruction continues the loop.
             let back = 'back: {
@@ -1756,8 +1814,25 @@ impl Vm {
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
         let fuel_at_call = self.meter.remaining_slice_fuel();
-        let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+        let r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
+        self.finish_native_call(natives, fiber, n, start, argc, slot, ip, fuel_at_call, r)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn finish_native_call(
+        &mut self,
+        natives: &[NativeEntry],
+        fiber: &mut Fiber,
+        n: u32,
+        start: usize,
+        argc: usize,
+        slot: usize,
+        ip: usize,
+        fuel_at_call: i64,
+        mut r: Result<VmValue, Ctl>,
+    ) -> Result<Option<FiberStop>, RunEnding> {
         if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
             // Native functions check memory and resource limits before garbage
             // collection. Collect all garbage, refund the failed attempt's

@@ -579,6 +579,7 @@ pub struct Host {
 
 pub struct Vm {
     pub prog: Arc<Program>,
+    pub(crate) packed_code: Arc<Vec<Box<[u64]>>>,
     pub natives: Arc<Vec<NativeEntry>>,
     pub heap: Heap,
     pub globals: Vec<VmValue>,
@@ -694,6 +695,7 @@ impl Vm {
         let meter = VmMeter::new(host.limits.max_instructions, host.interrupt.flag.clone(), host.clock.clone());
         let mut vm = Vm {
             prog,
+            packed_code: Arc::new(Vec::new()),
             natives,
             heap,
             globals,
@@ -752,6 +754,13 @@ impl Vm {
         }
         if self.globals.len() < self.prog.nglobals {
             self.globals.resize(self.prog.nglobals, VmValue::Uninit);
+        }
+        if self.packed_code.len() < prog.protos.len() {
+            let mut packed = (*self.packed_code).clone();
+            for proto in &prog.protos[packed.len()..] {
+                packed.push(proto.code.iter().map(|op| op.pack()).collect());
+            }
+            self.packed_code = Arc::new(packed);
         }
     }
 
