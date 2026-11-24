@@ -1641,6 +1641,7 @@ pub const SET_ENTRY_SIZE: usize = std::mem::size_of::<Option<VmValue>>();
 
 impl Obj {
     /// Approximate memory footprint in bytes.
+    #[inline]
     pub fn size(&self) -> usize {
         let base = std::mem::size_of::<Obj>();
         base + match self {
