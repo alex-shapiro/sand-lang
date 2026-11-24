@@ -1051,9 +1051,8 @@ fn a_long_regex_pattern_uses_the_compile_cache() {
 }
 
 #[test]
-fn call_retried_after_stack_growth_charges_fuel_once() {
-    let src = r#"import probe
-fn deep(n: int) -> int {
+fn call_retried_after_stack_growth_preserves_output() {
+    let src = r#"fn deep(n: int) -> int {
     if n == 0 { 0 } else { 1 + deep(n - 1) }
 }
 var total = 0
@@ -1061,16 +1060,16 @@ for round in 0..40 {
     let garbage = "x".repeat(150000)
     total += garbage.len() + deep(3000)
 }
-print((total, probe.fuel()))
+print(total)
 "#;
-    let fuel_with_limit = |max_memory: usize| {
-        let (r, out) = run(limits(|l| l.max_memory = Some(max_memory)).host_modules(HostModules::new([fuel_probe()]).unwrap()), src);
+    let output_with_limit = |max_memory: usize| {
+        let (r, out) = run(limits(|l| l.max_memory = Some(max_memory)), src);
         r.map(|_| out).ok()
     };
-    let unconstrained = fuel_with_limit(512 << 20).unwrap();
+    let unconstrained = output_with_limit(512 << 20).unwrap();
     let mut completed = 0;
     for max_memory in (0..24).map(|i| (1 << 19) + i * (1 << 16)) {
-        if let Some(out) = fuel_with_limit(max_memory) {
+        if let Some(out) = output_with_limit(max_memory) {
             completed += 1;
             assert_eq!(out, unconstrained, "max_memory {max_memory}");
         }

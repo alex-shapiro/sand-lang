@@ -322,9 +322,8 @@ impl Vm {
 
     /// Runs a bytecode slice on `fiber` with `fuel`.
     ///
-    /// On a memory-limit error, `run_slice` collects all garbage. It restores
-    /// the instruction's fuel. It then retries the instruction in the same
-    /// slice.
+    /// On a memory-limit error, `run_slice` collects all garbage and retries
+    /// the instruction in the same slice.
     fn run_slice(&mut self, code: &ProgramCode, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
         let mut last_retry_site = None;
         loop {
@@ -339,7 +338,6 @@ impl Vm {
                 return Err(Trap::Limit(LimitKind::Memory).into());
             }
             last_retry_site = Some(retry_site);
-            *fuel += tick;
             self.collect_all_garbage(Some(fiber));
             self.instruction_retried = self.retry_stress;
             if let Err(fail) = self.meter.check_limits() {

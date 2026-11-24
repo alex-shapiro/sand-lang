@@ -18,8 +18,8 @@
 //! for stack loads and stores around the dispatch jump.
 
 use super::compare::{
-    find_entry, find_key, hash_key, map_get_int, map_slot, map_slot_tuple, set_has_int, set_slot, values_eq, values_eq_metered, values_le,
-    values_le_metered, values_lt, values_lt_metered,
+    find_entry, find_key, hash_key, map_get_int, map_slot, map_slot_tuple, set_has_int, set_slot, values_eq_metered, values_le_metered,
+    values_lt_metered,
 };
 use super::display;
 use super::heap::ScratchMemoryTracker;
@@ -1880,21 +1880,12 @@ impl Vm {
             return Err(internal("not a comparison"));
         };
         let (x, y) = (regs[a as usize], regs[b as usize]);
-        // Anything but two plain scalars may be arbitrarily large (inline
-        // variants such as `Some(x)` hold heap values too).
-        let scalar = |v: VmValue| {
-            matches!(v, VmValue::Unit | VmValue::Bool(_) | VmValue::Int(_) | VmValue::Float(_) | VmValue::Dur(_) | VmValue::Tag(_))
-        };
-        let composite = !(scalar(x) && scalar(y));
         let v = match op {
             Op::Eq { .. } | Op::Ne { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
-                let eq = if composite { values_eq_metered(&self.heap, &self.meter, x, y)? } else { values_eq(&self.heap, x, y) };
-                eq == matches!(op, Op::Eq { .. } | Op::JNeq { .. })
+                values_eq_metered(&self.heap, &self.meter, x, y)? == matches!(op, Op::Eq { .. } | Op::JNeq { .. })
             }
-            Op::Lt { .. } if composite => values_lt_metered(prog, &self.heap, &self.meter, x, y)?,
-            Op::Lt { .. } => values_lt(prog, &self.heap, x, y),
-            _ if composite => values_le_metered(prog, &self.heap, &self.meter, x, y)?,
-            _ => values_le(prog, &self.heap, x, y),
+            Op::Lt { .. } => values_lt_metered(prog, &self.heap, &self.meter, x, y)?,
+            _ => values_le_metered(prog, &self.heap, &self.meter, x, y)?,
         };
         Ok(match op {
             Op::Eq { dst, .. } | Op::Ne { dst, .. } | Op::Lt { dst, .. } | Op::Le { dst, .. } => {

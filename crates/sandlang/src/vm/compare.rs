@@ -233,12 +233,6 @@ fn hash_small(heap: &Heap, v: VmValue, depth: u32, w: &mut Small) -> Option<u64>
     Some(h.finish())
 }
 
-/// Deep structural equality. Floats at the top level use IEEE semantics;
-/// inside composites NaN equals NaN.
-pub fn values_eq(heap: &Heap, a: VmValue, b: VmValue) -> bool {
-    values_eq_metered(heap, &UnlimitedMeter, a, b).unwrap_or(false)
-}
-
 /// Pending work of an equality check.
 enum EqWork {
     Pair(VmValue, VmValue),
@@ -248,7 +242,8 @@ enum EqWork {
     Map(VmValue, VmValue, usize),
 }
 
-/// [`values_eq`], charging the meter for the work.
+/// Deep structural equality, charging the meter for the work.
+/// Floats at the top level use IEEE semantics; inside composites NaN equals NaN.
 pub fn values_eq_metered(heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => return Ok(x == y),
@@ -817,11 +812,6 @@ fn variant_index(prog: &Program, id: u32) -> u32 {
     prog.variants.get(id as usize).map(|r| r.index).unwrap_or(0)
 }
 
-/// Total ordering used by `sort` and comparisons of composite values.
-pub fn values_cmp(prog: &Program, heap: &Heap, a: VmValue, b: VmValue) -> Ordering {
-    values_cmp_metered(prog, heap, &UnlimitedMeter, a, b).unwrap_or(Ordering::Equal)
-}
-
 /// Pending work of an ordering comparison.
 enum CmpWork {
     Pair(VmValue, VmValue),
@@ -834,8 +824,9 @@ enum CmpWork {
     },
 }
 
-/// [`values_cmp`], charging the meter for the work. Comparisons are
-/// lexicographic and stop at the first difference.
+/// Total ordering used by `sort` and comparisons of composite values, charging
+/// the meter for the work. Comparisons are lexicographic and stop at the first
+/// difference.
 pub fn values_cmp_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<Ordering, Fail> {
     // Fast paths for the common element types of sorted lists.
     match (a, b) {
@@ -969,22 +960,8 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: Vm
     Ok(Ordering::Equal)
 }
 
-/// `a < b` for generic values (IEEE semantics for top-level floats).
-pub fn values_lt(prog: &Program, heap: &Heap, a: VmValue, b: VmValue) -> bool {
-    match (a, b) {
-        (VmValue::Float(x), VmValue::Float(y)) => x < y,
-        _ => values_cmp(prog, heap, a, b) == Ordering::Less,
-    }
-}
-
-pub fn values_le(prog: &Program, heap: &Heap, a: VmValue, b: VmValue) -> bool {
-    match (a, b) {
-        (VmValue::Float(x), VmValue::Float(y)) => x <= y,
-        _ => values_cmp(prog, heap, a, b) != Ordering::Greater,
-    }
-}
-
-/// [`values_lt`], charging the meter.
+/// `a < b` for generic values (IEEE semantics for top-level floats), charging
+/// the meter.
 pub fn values_lt_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => x < y,
@@ -992,7 +969,8 @@ pub fn values_lt_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmV
     })
 }
 
-/// [`values_le`], charging the meter.
+/// `a <= b` for generic values (IEEE semantics for top-level floats), charging
+/// the meter.
 pub fn values_le_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => x <= y,
