@@ -606,8 +606,6 @@ pub struct Vm {
     pub(crate) collected: bool,
     /// Function and instruction pointer of the active native call.
     caller_site: (u32, u32),
-    /// Extra GC roots (e.g. values held by the test runner).
-    pub pinned: Vec<VmValue>,
     /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
     spare_ctl: Option<Box<CtlKind>>,
     /// The map handle and slot of the last lookup of a key other than an
@@ -712,7 +710,6 @@ impl Vm {
             deadline: None,
             collected: false,
             caller_site: (0, 0),
-            pinned: Vec::new(),
             spare_ctl: None,
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
             ascii_strs: Vec::new(),
@@ -1654,7 +1651,6 @@ impl Vm {
         let mut roots: Vec<VmValue> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());
         roots.extend(self.consts.iter().copied());
-        roots.extend(self.pinned.iter().copied());
         roots.extend(self.ascii_strs.iter().copied());
         roots.extend(self.host.regex_cache.iter().flatten().filter_map(|entry| entry.regex));
         let prog = &self.prog;

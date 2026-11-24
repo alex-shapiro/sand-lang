@@ -23,6 +23,9 @@ use std::sync::{Arc, OnceLock};
 /// [`Heap::variant_id`](super::heap::Heap::variant_id), and
 /// [`Heap::field`](super::heap::Heap::field).
 #[derive(Clone, Copy, Debug, PartialEq)]
+// `#[repr(u32)]` aligns every payload to byte 4 or byte 8.
+// The CPU can then forward `VmValue` stores directly to loads.
+#[repr(u32)]
 pub enum VmValue {
     Unit,
     Bool(bool),

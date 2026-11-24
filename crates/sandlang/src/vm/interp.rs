@@ -64,7 +64,9 @@ pub enum FiberStop {
     AsyncNative(AsyncNativeCall),
     /// Finished a Sand callback for the innermost async native call.
     CallbackReturn(VmValue),
-    Prompt(Capability),
+    /// A native call requested a permission prompt.
+    // `Box<Capability>` keeps `FiberStop` at 40 bytes.
+    Prompt(Box<Capability>),
     /// `task.yield_now()`.
     YieldNow,
     /// The running task was cancelled.
@@ -489,6 +491,15 @@ impl Vm {
         }
     }
 
+    /// Raises the pending error of a resumed `fiber`.
+    #[cold]
+    #[inline(never)]
+    fn raise_pending_error(&mut self, fiber: &mut Fiber) -> RunEnding {
+        let message = fiber.pending_error.take().unwrap_or_default();
+        let ip = fiber.frames.last().map(|frame| frame.ip).unwrap_or(0) as usize;
+        self.error_trap(fiber, ip, message)
+    }
+
     /// `Op::Internal`: an internal error with constant message `msg`.
     #[cold]
     #[inline(never)]
@@ -594,17 +605,20 @@ impl Vm {
         Err(Trap::Limit(k).into())
     }
 
-    /// Runs `fiber` until it finishes, blocks, or exhausts `fuel`.
-    pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel_out: &mut i64) -> Result<FiberStop, RunEnding> {
+    /// Executes bytecode on `fiber` with `fuel_out`.
+    pub(crate) fn interp(
+        &mut self,
+        prog: &Arc<Program>,
+        natives: &Arc<Vec<NativeEntry>>,
+        fiber: &mut Fiber,
+        fuel_out: &mut i64,
+    ) -> Result<FiberStop, RunEnding> {
         fiber.stopped_in_native_call = false;
-        if let Some(msg) = fiber.pending_error.take() {
-            let ip = fiber.frames.last().map(|f| f.ip).unwrap_or(0) as usize;
-            return Err(self.error_trap(fiber, ip, msg));
+        if fiber.pending_error.is_some() {
+            return Err(self.raise_pending_error(fiber));
         }
-        let prog = self.prog.clone();
-        let natives = self.natives.clone();
-        // As few values as possible stay live across the loop, so that the
-        // register allocator keeps `code`, `ip`, `regs` and fuel in registers.
+        // Keep few locals live across the dispatch loop. The register allocator
+        // can then keep the hot loop state in registers.
         let fr = *fiber.frames.last().unwrap();
         let protos: &[Proto] = &prog.protos;
         let mut code: &[Op] = &protos[fr.proto as usize].code;
@@ -705,7 +719,7 @@ impl Vm {
         macro_rules! native_call {
             ($n:expr, $start:expr, $argc:expr, $slot:expr) => {{
                 self.meter.flush_interpreter_fuel(fuel.left);
-                let r = self.call_native(&natives, fiber, $n, $start, $argc, $slot, ip);
+                let r = self.call_native(natives, fiber, $n, $start, $argc, $slot, ip);
                 fuel.left = self.meter.reload_interpreter_fuel();
                 match r {
                     Ok(None) => reload!(),
@@ -792,7 +806,7 @@ impl Vm {
                     Op::LoadGlobal { dst, g } => {
                         let v = &self.globals[g as usize];
                         if let VmValue::Uninit = v {
-                            fail!(uninit_global(&prog, g));
+                            fail!(uninit_global(prog, g));
                         }
                         r!(dst) = *v;
                     }
@@ -962,7 +976,7 @@ impl Vm {
                     // Metered and out of line (`op_compare`); the branches
                     // `JNeq` and `JNne` share the arm to keep one call site.
                     Op::Eq { .. } | Op::Ne { .. } | Op::Lt { .. } | Op::Le { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
-                        match retryable!(self.op_compare(&prog, op, regs)) {
+                        match retryable!(self.op_compare(prog, op, regs)) {
                             Ok(off) => jump!(off),
                             Err(c) => fail_stop!(c),
                         }
@@ -1116,9 +1130,9 @@ impl Vm {
                             break 'back off as i32;
                         }
                     }
-                    Op::SwitchVariant { src, table } => ip = switch_target(&prog, table, self.heap.variant_id(r!(src)) as i64),
-                    Op::SwitchInt { src, table } => ip = switch_target(&prog, table, int!(src)),
-                    Op::SwitchChar { src, table } => ip = switch_target(&prog, table, char_code(&self.heap, &r!(src))),
+                    Op::SwitchVariant { src, table } => ip = switch_target(prog, table, self.heap.variant_id(r!(src)) as i64),
+                    Op::SwitchInt { src, table } => ip = switch_target(prog, table, int!(src)),
+                    Op::SwitchChar { src, table } => ip = switch_target(prog, table, char_code(&self.heap, &r!(src))),
                     Op::JNotVariant { src, variant, off } => {
                         if self.heap.variant_id(r!(src)) != variant as u32 {
                             jump!(off)
@@ -1667,24 +1681,24 @@ impl Vm {
                             r!(dst) = v;
                             continue 'dispatch;
                         }
-                        match retryable!(self.op_display(&prog, v, false)) {
+                        match retryable!(self.op_display(prog, v, false)) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         }
                     }
-                    Op::Debug { dst, src } => match retryable!(self.op_display(&prog, r!(src), true)) {
+                    Op::Debug { dst, src } => match retryable!(self.op_display(prog, r!(src), true)) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::Interp { dst, tmpl } => match retryable!(self.op_interp(&prog, tmpl, regs)) {
+                    Op::Interp { dst, tmpl } => match retryable!(self.op_interp(prog, tmpl, regs)) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::AppendInterp { local, tmpl } => match retryable!(self.op_append_interp(&prog, tmpl, local, regs)) {
+                    Op::AppendInterp { local, tmpl } => match retryable!(self.op_append_interp(prog, tmpl, local, regs)) {
                         Ok(v) => r!(local) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::Describe { base, tmpl } => match retryable!(self.op_describe(&prog, tmpl, &regs[base as usize..])) {
+                    Op::Describe { base, tmpl } => match retryable!(self.op_describe(prog, tmpl, &regs[base as usize..])) {
                         Ok(v) => r!(base) = v,
                         Err(c) => fail_stop!(c),
                     },
@@ -1700,11 +1714,11 @@ impl Vm {
                     Op::TryTop { src } => {
                         save!();
                         let e = r!(src);
-                        return self.try_top(fiber, ip, &prog, e);
+                        return self.try_top(fiber, ip, prog, e);
                     }
                     Op::Internal { msg } => {
                         save!();
-                        return Err(self.const_internal(fiber, ip, &prog, msg));
+                        return Err(self.const_internal(fiber, ip, prog, msg));
                     }
                 }
                 continue 'dispatch;
@@ -1809,7 +1823,7 @@ impl Vm {
             CtlKind::NeedPermission(cap) => {
                 // Retry the call instruction after the prompt.
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
-                Ok(Some(FiberStop::Prompt(cap)))
+                Ok(Some(FiberStop::Prompt(Box::new(cap))))
             }
             CtlKind::AsyncNative(call) => {
                 fiber.result_slot = slot;
@@ -1988,8 +2002,8 @@ impl Vm {
         self.heap.append_text(cur, &s).map_err(Fail::limit)
     }
 
-    /// Calls native `n`. A Rust panic in it is caught by the scheduler
-    /// around the whole slice (`crate::unwind`).
+    /// Calls native `n`. The scheduler catches Rust panics around the fiber
+    /// turn (`crate::unwind`).
     #[inline(always)]
     fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[VmValue]) -> Result<VmValue, Ctl> {
         let entry = &natives[n as usize];

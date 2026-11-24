@@ -819,17 +819,18 @@ fn lists(m: &mut NativeModule) {
         let set = set_of(vm, xs.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
-    fn fold_num(vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>, product: bool) -> Result<Param<0>, Ctl> {
-        produce(vm, list_len(vm, xs), 0)?;
-        let mut acc = if product { num.one(vm)? } else { num.zero(vm)? }.raw();
-        let items = xs.items(&vm.heap).to_vec();
-        for x in items {
-            acc = vm.arith(if product { 2 } else { 0 }, acc, x)?;
+    fn fold_num(vm: &mut Vm, num: Num<0>, list: List<Param<0, traits::Num>>, is_product: bool) -> Result<Param<0>, Ctl> {
+        let len = list_len(vm, list);
+        vm.charge(len as u64)?;
+        let mut accumulator = if is_product { num.one(vm)? } else { num.zero(vm)? }.raw();
+        for index in 0..len {
+            let item = list.items(&vm.heap)[index];
+            accumulator = vm.arith(if is_product { 2 } else { 0 }, accumulator, item)?;
         }
-        Ok(Param::from_raw(acc))
+        Ok(Param::from_raw(accumulator))
     }
-    m.function("List.sum", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, false));
-    m.function("List.product", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, true));
+    m.function("List.sum", |vm: &mut Vm, num: Num<0>, list: List<Param<0, traits::Num>>| fold_num(vm, num, list, false));
+    m.function("List.product", |vm: &mut Vm, num: Num<0>, list: List<Param<0, traits::Num>>| fold_num(vm, num, list, true));
     fn extreme(vm: &mut Vm, xs: List<Param<0, traits::Ord>>, want: Ordering) -> Result<Option<Param<0>>, Fail> {
         let items = xs.items(&vm.heap);
         let mut best: Option<VmValue> = None;
