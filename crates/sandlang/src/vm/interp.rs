@@ -64,7 +64,7 @@ pub enum FiberStop {
     AsyncNative(AsyncNativeCall),
     /// Finished a Sand callback for the innermost async native call.
     CallbackReturn(VmValue),
-    Prompt(Capability),
+    Prompt(Box<Capability>),
     /// `task.yield_now()`.
     YieldNow,
     /// The running task was cancelled.

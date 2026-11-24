@@ -538,7 +538,7 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &m
 /// Reason [`run_ready`] returned control to [`drive`].
 enum Pause<S> {
     Stop(S),
-    Prompt(Capability),
+    Prompt(Box<Capability>),
     Yield,
     /// The ready queue is empty.
     Idle,
@@ -696,13 +696,13 @@ pub(crate) async fn drive<U: DriveUntil>(shared_vm: &SharedVm, stop_policy: U) -
                 timer.read();
                 let asked = timer.now;
                 let answer = match prompter {
-                    Some(prompter) => interrupt.unless_interrupted(prompter.prompt(cap.clone())).await.ok_or(Trap::Interrupted)?,
+                    Some(prompter) => interrupt.unless_interrupted(prompter.prompt((*cap).clone())).await.ok_or(Trap::Interrupted)?,
                     None => PromptAnswer::DenyOnce,
                 };
                 let mut vm = shared_vm.lock();
                 vm.exclude_wall_time(asked, &timer);
                 timer.resume();
-                vm.apply_answer(cap, answer);
+                vm.apply_answer(*cap, answer);
                 vm.check_limits(&timer)?;
             }
             Pause::Idle => {

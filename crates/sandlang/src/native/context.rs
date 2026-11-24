@@ -87,7 +87,7 @@ pub(crate) enum VmRequest {
     /// Collect all garbage.
     Collect,
     /// Prompt the user for a capability.
-    Prompt(Capability),
+    Prompt(Box<Capability>),
 }
 
 /// Pending async native call for a Sand task.

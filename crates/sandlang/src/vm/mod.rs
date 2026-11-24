@@ -94,7 +94,7 @@ pub enum WaitKind {
 pub(crate) enum CtlKind {
     Fail(Fail),
     /// Prompt the user for the capability, and then retry the call.
-    NeedPermission(Capability),
+    NeedPermission(Box<Capability>),
     /// Suspend the calling task on an async native call.
     AsyncNative(AsyncNativeCall),
     /// Wait for the scheduler event that [`Vm::block`] registered as
@@ -185,7 +185,7 @@ impl Ctl {
 
     /// Prompts the user for `cap`.
     pub(crate) fn need_permission(cap: Capability) -> Ctl {
-        Ctl(Box::new(CtlKind::NeedPermission(cap)))
+        Ctl(Box::new(CtlKind::NeedPermission(Box::new(cap))))
     }
 
     pub(crate) fn kind(&self) -> &CtlKind {
