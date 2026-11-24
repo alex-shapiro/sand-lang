@@ -196,6 +196,11 @@ impl Heap {
     /// Stores `obj` in the arena as a young object and returns its handle.
     #[inline]
     pub fn alloc(&mut self, obj: Obj) -> VmValue {
+        self.alloc_inner(obj)
+    }
+
+    #[inline(always)]
+    fn alloc_inner(&mut self, obj: Obj) -> VmValue {
         self.object_bytes += obj.size();
         self.live_objects += 1;
         if let Obj::Native(native) = &obj
@@ -297,14 +302,14 @@ impl Heap {
     /// Allocates a new list copied from `items`.
     #[inline(never)]
     pub fn new_list_from_slice(&mut self, items: &[VmValue]) -> VmValue {
-        self.alloc(Obj::List(items.to_vec()))
+        self.alloc_inner(Obj::List(items.to_vec()))
     }
 
     /// Allocates a new struct `def` with fields copied from `fields`.
     #[inline(never)]
     pub fn new_struct(&mut self, def: u32, fields: &[VmValue]) -> VmValue {
         let items = self.box_values(fields);
-        self.alloc(Obj::Struct(def, items))
+        self.alloc_inner(Obj::Struct(def, items))
     }
 
     /// Stores `value` into field `idx` of struct `obj`. Returns `false` if `obj` is not a struct.

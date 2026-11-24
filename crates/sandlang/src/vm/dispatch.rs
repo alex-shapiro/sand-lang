@@ -346,6 +346,10 @@ static HANDLERS: [Handler; 256] = {
     t[162] = op_append_str;
     t[163] = op_freeze_str;
     t[166] = op_to_str;
+    t[167] = op_debug;
+    t[168] = op_interp;
+    t[169] = op_describe;
+    t[170] = op_append_interp;
     t
 };
 
@@ -3047,6 +3051,20 @@ extern "rust-preserve-none" fn op_freeze_str<'a>(
 }
 
 #[inline(never)]
+fn retry_display(ctx: &mut DispatchCtx<'_>, stack: &mut [VmValue], dst: usize, src: usize, debug: bool, ip: usize, fuel: i64) -> bool {
+    match retryable_op!(ctx, ctx.vm.op_display(ctx.prog, stack[src], debug)) {
+        Ok(v) => {
+            stack[dst] = v;
+            true
+        }
+        Err(ctl) => {
+            ctx.exit = Some(DispatchExit::FailStop { ctl, ip, fuel });
+            false
+        }
+    }
+}
+
+#[inline(never)]
 extern "rust-preserve-none" fn op_to_str<'a>(
     ctx: &mut DispatchCtx<'a>,
     code: &'a [u64],
@@ -3063,5 +3081,86 @@ extern "rust-preserve-none" fn op_to_str<'a>(
         r!(stack, base, op_a(op)) = v;
         dispatch!(ctx, code, ip, stack, base, fuel)
     }
-    exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel })
+    if retry_display(ctx, stack, base + op_a(op), base + op_b(op), false, ip, fuel) {
+        dispatch!(ctx, code, ip, stack, base, fuel)
+    }
+}
+
+#[inline(never)]
+extern "rust-preserve-none" fn op_debug<'a>(
+    ctx: &mut DispatchCtx<'a>,
+    code: &'a [u64],
+    ip: usize,
+    stack: &mut [VmValue],
+    base: usize,
+    fuel: i64,
+    op: u64,
+) {
+    let v = r!(stack, base, op_b(op));
+    match retryable_op!(ctx, ctx.vm.op_display(ctx.prog, v, true)) {
+        Ok(s) => {
+            r!(stack, base, op_a(op)) = s;
+            dispatch!(ctx, code, ip, stack, base, fuel)
+        }
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
+    }
+}
+
+#[inline(never)]
+extern "rust-preserve-none" fn op_interp<'a>(
+    ctx: &mut DispatchCtx<'a>,
+    code: &'a [u64],
+    ip: usize,
+    stack: &mut [VmValue],
+    base: usize,
+    fuel: i64,
+    op: u64,
+) {
+    match retryable_op!(ctx, ctx.vm.op_interp(ctx.prog, op_imm_u32(op), &stack[base..])) {
+        Ok(v) => {
+            r!(stack, base, op_a(op)) = v;
+            dispatch!(ctx, code, ip, stack, base, fuel)
+        }
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
+    }
+}
+
+#[inline(never)]
+extern "rust-preserve-none" fn op_describe<'a>(
+    ctx: &mut DispatchCtx<'a>,
+    code: &'a [u64],
+    ip: usize,
+    stack: &mut [VmValue],
+    base: usize,
+    fuel: i64,
+    op: u64,
+) {
+    let arg_base = op_a(op);
+    match retryable_op!(ctx, ctx.vm.op_describe(ctx.prog, op_imm_u32(op), &stack[base + arg_base..])) {
+        Ok(v) => {
+            r!(stack, base, arg_base) = v;
+            dispatch!(ctx, code, ip, stack, base, fuel)
+        }
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
+    }
+}
+
+#[inline(never)]
+extern "rust-preserve-none" fn op_append_interp<'a>(
+    ctx: &mut DispatchCtx<'a>,
+    code: &'a [u64],
+    ip: usize,
+    stack: &mut [VmValue],
+    base: usize,
+    fuel: i64,
+    op: u64,
+) {
+    let local = op_a(op);
+    match retryable_op!(ctx, ctx.vm.op_append_interp(ctx.prog, op_imm_u32(op), local as Reg, &stack[base..])) {
+        Ok(v) => {
+            r!(stack, base, local) = v;
+            dispatch!(ctx, code, ip, stack, base, fuel)
+        }
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
+    }
 }
