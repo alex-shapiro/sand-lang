@@ -799,7 +799,7 @@ impl Vm {
                     Op::StoreGlobal { g, src } => self.globals[g as usize] = r!(src),
                     Op::NewCell { dst, src } => {
                         let v = r!(src);
-                        r!(dst) = self.heap.alloc(Obj::Cell(v));
+                        r!(dst) = self.heap.new_cell(v);
                     }
                     // Store only in the matching branch. Merging a loaded
                     // `VmValue` with a fallback constant spills to the stack.
@@ -1284,8 +1284,7 @@ impl Vm {
                     // ---------------- data structures
                     Op::NewList { dst, start, count } => {
                         let s = start as usize;
-                        let items = regs[s..s + count as usize].to_vec();
-                        r!(dst) = self.heap.new_list(items);
+                        r!(dst) = self.heap.new_list_from_slice(&regs[s..s + count as usize]);
                     }
                     Op::NewTuple { dst, start, count } => {
                         let s = start as usize;
@@ -1297,8 +1296,7 @@ impl Vm {
                     Op::NewStruct { dst, start, def } => {
                         let n = prog.types[def as usize].fields.len();
                         let s = start as usize;
-                        let items = self.heap.box_values(&regs[s..s + n]);
-                        r!(dst) = self.heap.alloc(Obj::Struct(def as u32, items));
+                        r!(dst) = self.heap.new_struct(def as u32, &regs[s..s + n]);
                     }
                     Op::NewVariant { dst, start, variant } => {
                         let n = prog.variants[variant as usize].arity;

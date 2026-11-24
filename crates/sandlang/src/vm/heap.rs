@@ -196,7 +196,30 @@ impl Heap {
     /// Stores `obj` in the arena as a young object and returns its handle.
     #[inline]
     pub fn alloc(&mut self, obj: Obj) -> VmValue {
-        self.object_bytes += obj.size();
+        self.alloc_inner(obj)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow_slot_bitsets(&mut self) {
+        self.mark_bits.push_word();
+        self.remembered_bits.push_word();
+        self.partial_barrier_bits.push_word();
+        self.pushed_tail_bits.push_word();
+        self.cycle_mark_bits.push_word();
+        self.gray_bits.push_word();
+        self.update_table_bytes();
+    }
+
+    #[inline(always)]
+    fn alloc_inner(&mut self, obj: Obj) -> VmValue {
+        let size = obj.size();
+        self.alloc_sized(obj, size)
+    }
+
+    #[inline(always)]
+    fn alloc_sized(&mut self, obj: Obj, size: usize) -> VmValue {
+        self.object_bytes += size;
         self.live_objects += 1;
         if let Obj::Native(native) = &obj
             && native.is_resource()
@@ -206,22 +229,17 @@ impl Heap {
         // Free and newly appended slots have clear mark bits, so the object starts young.
         let handle = if self.free_list_head != FREE_LIST_END {
             let handle = self.free_list_head;
-            match self.slots[handle as usize] {
-                Obj::Free(next) => self.free_list_head = next,
-                _ => unreachable!("corrupt free list"),
-            }
-            self.slots[handle as usize] = obj;
+            let slot = &mut self.slots[handle as usize];
+            let Obj::Free(next) = *slot else { unreachable!("corrupt free list") };
+            self.free_list_head = next;
+            // `prev` is guaranteed to be `Obj::Free`, which needs no drop glue.
+            let prev = std::mem::replace(slot, obj);
+            std::mem::forget(prev);
             handle
         } else {
             self.slots.push(obj);
             if self.mark_bits.slot_capacity() < self.slots.len() {
-                self.mark_bits.push_word();
-                self.remembered_bits.push_word();
-                self.partial_barrier_bits.push_word();
-                self.pushed_tail_bits.push_word();
-                self.cycle_mark_bits.push_word();
-                self.gray_bits.push_word();
-                self.update_table_bytes();
+                self.grow_slot_bitsets();
             }
             (self.slots.len() - 1) as u32
         };
@@ -291,7 +309,30 @@ impl Heap {
     }
 
     pub fn new_list(&mut self, items: Vec<VmValue>) -> VmValue {
-        self.alloc(Obj::List(items))
+        let size = size_of::<Obj>() + items.capacity() * VALUE_SIZE;
+        self.alloc_sized(Obj::List(items), size)
+    }
+
+    /// Allocates a new list copied from `items`.
+    #[inline(never)]
+    pub fn new_list_from_slice(&mut self, items: &[VmValue]) -> VmValue {
+        let vec = items.to_vec();
+        let size = size_of::<Obj>() + vec.capacity() * VALUE_SIZE;
+        self.alloc_sized(Obj::List(vec), size)
+    }
+
+    /// Allocates a new struct `def` with fields copied from `fields`.
+    #[inline(never)]
+    pub fn new_struct(&mut self, def: u32, fields: &[VmValue]) -> VmValue {
+        let items = self.box_values(fields);
+        let size = size_of::<Obj>() + items.len() * VALUE_SIZE;
+        self.alloc_sized(Obj::Struct(def, items), size)
+    }
+
+    /// Allocates a new mutable cell holding `value`.
+    #[inline(never)]
+    pub fn new_cell(&mut self, value: VmValue) -> VmValue {
+        self.alloc_sized(Obj::Cell(value), size_of::<Obj>())
     }
 
     /// Builds a tuple from `items`. Uses [`VmValue::Pair`] if `items` is an
@@ -301,7 +342,8 @@ impl Heap {
             [a, b] if let Some(value) = VmValue::tuple2(a, b) => value,
             _ => {
                 let items = self.box_values(items);
-                self.alloc(Obj::Tuple(items))
+                let size = size_of::<Obj>() + items.len() * VALUE_SIZE;
+                self.alloc_sized(Obj::Tuple(items), size)
             }
         }
     }
@@ -317,7 +359,8 @@ impl Heap {
             [payload] if let Some(value) = VmValue::variant1(id, *payload) => value,
             _ => {
                 let fields = self.box_values(fields);
-                self.alloc(Obj::Variant(id, fields))
+                let size = size_of::<Obj>() + fields.len() * VALUE_SIZE;
+                self.alloc_sized(Obj::Variant(id, fields), size)
             }
         }
     }
@@ -648,6 +691,18 @@ impl Heap {
     #[inline]
     pub fn list_push(&mut self, list: VmValue, value: VmValue) -> Result<(), LimitKind> {
         let VmValue::Obj(handle) = list else { return Ok(()) };
+        if value.handle().is_none() {
+            let Obj::List(items) = &mut self.slots[handle as usize] else { return Ok(()) };
+            if items.len() < items.capacity() {
+                items.push(value);
+                return Ok(());
+            }
+        }
+        self.list_push_slow(handle, list, value)
+    }
+
+    #[inline(never)]
+    fn list_push_slow(&mut self, handle: u32, list: VmValue, value: VmValue) -> Result<(), LimitKind> {
         let Obj::List(items) = &self.slots[handle as usize] else { return Ok(()) };
         let len = items.len();
         if len == items.capacity() {
@@ -1256,20 +1311,16 @@ impl Heap {
     }
 
     /// Frees slot `handle` and returns its accounted size in bytes.
+    #[inline]
     fn free_slot(&mut self, handle: u32) -> usize {
-        let index = handle as usize;
-        let size = self.slots[index].size();
-        self.release_slot(handle);
+        let obj = std::mem::replace(&mut self.slots[handle as usize], Obj::Free(self.free_list_head));
+        self.free_list_head = handle;
+        let size = obj.size();
+        self.recycle_box(obj);
         self.live_objects -= 1;
         self.cycle_mark_bits.remove(handle);
         self.gray_bits.remove(handle);
         size
-    }
-
-    fn release_slot(&mut self, handle: u32) {
-        let obj = std::mem::replace(&mut self.slots[handle as usize], Obj::Free(self.free_list_head));
-        self.free_list_head = handle;
-        self.recycle_box(obj);
     }
 
     fn recycle_box(&mut self, obj: Obj) {
