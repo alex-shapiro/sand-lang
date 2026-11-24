@@ -11,16 +11,17 @@ pub(super) struct DispatchCtx<'a> {
     pub(super) prog: &'a Program,
     pub(super) packed: &'a [Box<[u64]>],
     pub(super) natives: &'a [NativeEntry],
+    pub(super) exit: Option<DispatchExit>,
 }
 
-/// Outcome returned when the tail-call chain exits back to `Vm::interp`.
+/// Outcome stored in `DispatchCtx::exit` when the tail-call chain returns to `Vm::interp`.
 pub(super) enum DispatchExit {
     Done(VmValue, i64),
     SafePoint { resume_ip: usize, fuel: i64 },
     SlowOp { ip: usize, fuel: i64 },
     FailStop { ctl: Fail, ip: usize, fuel: i64 },
     LimitMemory { ip: usize, fuel: i64 },
-    NativeSlow { result: Result<VmValue, Ctl>, n: u32, start: usize, argc: usize, slot: usize, ip: usize, fuel_at_call: i64 },
+    NativeSlow { result: Result<VmValue, Ctl>, ip: usize, fuel_at_call: i64 },
 }
 
 type Handler = for<'a, 'b, 'c> extern "rust-preserve-none" fn(
@@ -31,20 +32,19 @@ type Handler = for<'a, 'b, 'c> extern "rust-preserve-none" fn(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit;
+);
 
 /// Enters the tail-call dispatch chain at `(code, ip, base, fuel)`.
 #[inline(always)]
-pub(super) fn enter<'a>(
-    ctx: &mut DispatchCtx<'a>,
-    code: &'a [u64],
-    ip: usize,
-    stack: &mut [VmValue],
-    base: usize,
-    fuel: i64,
-) -> DispatchExit {
+pub(super) fn enter<'a>(ctx: &mut DispatchCtx<'a>, code: &'a [u64], ip: usize, stack: &mut [VmValue], base: usize, fuel: i64) {
     let op = code[ip];
-    HANDLERS[(op & 0xff) as usize](ctx, code, ip + 1, stack, base, fuel, op)
+    HANDLERS[(op & 0xff) as usize](ctx, code, ip + 1, stack, base, fuel, op);
+}
+
+#[cold]
+#[inline(never)]
+fn exit_with(ctx: &mut DispatchCtx<'_>, exit: DispatchExit) {
+    ctx.exit = Some(exit);
 }
 
 #[inline(always)]
@@ -99,19 +99,19 @@ macro_rules! r {
 }
 
 macro_rules! int {
-    ($stack:expr, $base:expr, $reg:expr, $ip:expr, $fuel:expr) => {
+    ($ctx:expr, $stack:expr, $base:expr, $reg:expr, $ip:expr, $fuel:expr) => {
         match r!($stack, $base, $reg) {
             VmValue::Int(i) => i,
-            _ => return DispatchExit::SlowOp { ip: $ip - 1, fuel: $fuel },
+            _ => return exit_with($ctx, DispatchExit::SlowOp { ip: $ip - 1, fuel: $fuel }),
         }
     };
 }
 
 macro_rules! float {
-    ($stack:expr, $base:expr, $reg:expr, $ip:expr, $fuel:expr) => {
+    ($ctx:expr, $stack:expr, $base:expr, $reg:expr, $ip:expr, $fuel:expr) => {
         match r!($stack, $base, $reg) {
             VmValue::Float(f) => f,
-            _ => return DispatchExit::SlowOp { ip: $ip - 1, fuel: $fuel },
+            _ => return exit_with($ctx, DispatchExit::SlowOp { ip: $ip - 1, fuel: $fuel }),
         }
     };
 }
@@ -128,7 +128,7 @@ macro_rules! back_edge {
         let target = jump_ip!($ip, off);
         let fuel = $fuel - back_edge_fuel(off);
         if fuel <= 0 || $ctx.vm.heap.needs_gc() {
-            return DispatchExit::SafePoint { resume_ip: target, fuel };
+            return exit_with($ctx, DispatchExit::SafePoint { resume_ip: target, fuel });
         }
         dispatch!($ctx, $code, target, $stack, $base, fuel)
     }};
@@ -147,7 +147,7 @@ macro_rules! do_return {
         let v: VmValue = $val;
         let ret = $ctx.fiber.frames.pop().map_or(0, |f| f.ret as usize);
         match $ctx.fiber.frames.last() {
-            None => DispatchExit::Done(v, $fuel),
+            None => exit_with($ctx, DispatchExit::Done(v, $fuel)),
             Some(caller) => {
                 let new_code: &'a [u64] = &$ctx.packed[caller.proto as usize];
                 let new_ip = caller.ip as usize;
@@ -166,13 +166,13 @@ macro_rules! enter_frame {
         let p = &$ctx.prog.protos[proto as usize];
         let need = nb + p.nregs as usize;
         if $fuel <= 1 || $ctx.vm.heap.needs_gc() {
-            return DispatchExit::SafePoint { resume_ip: $ip - 1, fuel: $fuel - 1 };
+            return exit_with($ctx, DispatchExit::SafePoint { resume_ip: $ip - 1, fuel: $fuel - 1 });
         }
         if $ctx.fiber.frames.len() >= $ctx.vm.host.limits.max_call_depth
             || $stack.len() < need
             || $ctx.fiber.frames.len() == $ctx.fiber.frames.capacity()
         {
-            return DispatchExit::SlowOp { ip: $ip - 1, fuel: $fuel };
+            return exit_with($ctx, DispatchExit::SlowOp { ip: $ip - 1, fuel: $fuel });
         }
         let mut fuel = $fuel - 1;
         $ctx.fiber.frames.last_mut().unwrap().ip = $ip as u32;
@@ -351,15 +351,15 @@ static HANDLERS: [Handler; 256] = {
 
 #[inline(never)]
 extern "rust-preserve-none" fn op_slow<'a>(
-    _ctx: &mut DispatchCtx<'a>,
+    ctx: &mut DispatchCtx<'a>,
     _code: &'a [u64],
     ip: usize,
     _stack: &mut [VmValue],
     _base: usize,
     fuel: i64,
     _op: u64,
-) -> DispatchExit {
-    DispatchExit::SlowOp { ip: ip - 1, fuel }
+) {
+    exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel })
 }
 
 // ---------------- loads / moves / cells / closures
@@ -373,7 +373,7 @@ extern "rust-preserve-none" fn op_nop<'a>(
     base: usize,
     fuel: i64,
     _op: u64,
-) -> DispatchExit {
+) {
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -386,7 +386,7 @@ extern "rust-preserve-none" fn op_move<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     r!(stack, base, op_a(op)) = r!(stack, base, op_b(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -400,7 +400,7 @@ extern "rust-preserve-none" fn op_load_unit<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     r!(stack, base, op_a(op)) = VmValue::Unit;
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -414,7 +414,7 @@ extern "rust-preserve-none" fn op_load_bool<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     r!(stack, base, op_a(op)) = VmValue::Bool(op_b(op) != 0);
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -428,7 +428,7 @@ extern "rust-preserve-none" fn op_load_int<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     r!(stack, base, op_a(op)) = VmValue::Int(op_imm_i64(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -442,7 +442,7 @@ extern "rust-preserve-none" fn op_load_const<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     r!(stack, base, op_a(op)) = ctx.vm.consts[op_imm_u32(op) as usize];
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -456,7 +456,7 @@ extern "rust-preserve-none" fn op_load_tag<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     r!(stack, base, op_a(op)) = VmValue::Tag(op_imm_u32(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -470,10 +470,10 @@ extern "rust-preserve-none" fn op_load_global<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let v = ctx.vm.globals[op_imm_u32(op) as usize];
     if let VmValue::Uninit = v {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     }
     r!(stack, base, op_a(op)) = v;
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -488,7 +488,7 @@ extern "rust-preserve-none" fn op_store_global<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     ctx.vm.globals[op_imm_u32(op) as usize] = r!(stack, base, op_a(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -502,7 +502,7 @@ extern "rust-preserve-none" fn op_new_cell<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let v = r!(stack, base, op_b(op));
     r!(stack, base, op_a(op)) = ctx.vm.heap.alloc(Obj::Cell(v));
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -517,7 +517,7 @@ extern "rust-preserve-none" fn op_load_cell<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     if let VmValue::Obj(h) = r!(stack, base, op_b(op))
         && let Obj::Cell(v) = ctx.vm.heap.obj(h)
     {
@@ -535,7 +535,7 @@ extern "rust-preserve-none" fn op_store_cell<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     ctx.vm.heap.set_cell(r!(stack, base, op_a(op)), r!(stack, base, op_b(op)));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -549,7 +549,7 @@ extern "rust-preserve-none" fn op_make_closure<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let proto = op_imm_u32(op);
     let p = &ctx.prog.protos[proto as usize];
     let fuel = fuel - code_fuel_surcharge(p.captures.len());
@@ -569,9 +569,9 @@ extern "rust-preserve-none" fn op_add_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Some(v) = int!(stack, base, op_b(op), ip, fuel).checked_add(int!(stack, base, op_c(op), ip, fuel)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Some(v) = int!(ctx, stack, base, op_b(op), ip, fuel).checked_add(int!(ctx, stack, base, op_c(op), ip, fuel)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -586,9 +586,9 @@ extern "rust-preserve-none" fn op_sub_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Some(v) = int!(stack, base, op_b(op), ip, fuel).checked_sub(int!(stack, base, op_c(op), ip, fuel)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Some(v) = int!(ctx, stack, base, op_b(op), ip, fuel).checked_sub(int!(ctx, stack, base, op_c(op), ip, fuel)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -603,9 +603,9 @@ extern "rust-preserve-none" fn op_mul_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Some(v) = int!(stack, base, op_b(op), ip, fuel).checked_mul(int!(stack, base, op_c(op), ip, fuel)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Some(v) = int!(ctx, stack, base, op_b(op), ip, fuel).checked_mul(int!(ctx, stack, base, op_c(op), ip, fuel)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -620,9 +620,9 @@ extern "rust-preserve-none" fn op_div_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Ok(v) = int_div(int!(stack, base, op_b(op), ip, fuel), int!(stack, base, op_c(op), ip, fuel)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Ok(v) = int_div(int!(ctx, stack, base, op_b(op), ip, fuel), int!(ctx, stack, base, op_c(op), ip, fuel)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -637,9 +637,9 @@ extern "rust-preserve-none" fn op_rem_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Ok(v) = int_rem(int!(stack, base, op_b(op), ip, fuel), int!(stack, base, op_c(op), ip, fuel)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Ok(v) = int_rem(int!(ctx, stack, base, op_b(op), ip, fuel), int!(ctx, stack, base, op_c(op), ip, fuel)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -654,9 +654,9 @@ extern "rust-preserve-none" fn op_pow_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Ok(v) = int_pow(int!(stack, base, op_b(op), ip, fuel), int!(stack, base, op_c(op), ip, fuel)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Ok(v) = int_pow(int!(ctx, stack, base, op_b(op), ip, fuel), int!(ctx, stack, base, op_c(op), ip, fuel)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -671,9 +671,9 @@ extern "rust-preserve-none" fn op_add_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Some(v) = int!(stack, base, op_b(op), ip, fuel).checked_add(op_c_i64(op)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Some(v) = int!(ctx, stack, base, op_b(op), ip, fuel).checked_add(op_c_i64(op)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -688,9 +688,9 @@ extern "rust-preserve-none" fn op_mul_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Some(v) = int!(stack, base, op_b(op), ip, fuel).checked_mul(op_c_i64(op)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Some(v) = int!(ctx, stack, base, op_b(op), ip, fuel).checked_mul(op_c_i64(op)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -705,14 +705,14 @@ extern "rust-preserve-none" fn op_div_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let k = op_c_i16(op);
-    let x = int!(stack, base, op_b(op), ip, fuel);
+    let x = int!(ctx, stack, base, op_b(op), ip, fuel);
     let v = if k > 0 && k & (k - 1) == 0 {
         x >> k.trailing_zeros()
     } else {
         let Some(v) = floor_div(x, k as i64) else {
-            return DispatchExit::SlowOp { ip: ip - 1, fuel };
+            return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
         };
         v
     };
@@ -729,9 +729,9 @@ extern "rust-preserve-none" fn op_rem_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let k = op_c_i16(op);
-    let x = int!(stack, base, op_b(op), ip, fuel);
+    let x = int!(ctx, stack, base, op_b(op), ip, fuel);
     let v = if k > 0 && k & (k - 1) == 0 { x & (k as i64 - 1) } else { floor_rem(x, k as i64) };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -746,9 +746,9 @@ extern "rust-preserve-none" fn op_neg_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Some(v) = int!(stack, base, op_b(op), ip, fuel).checked_neg() else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Some(v) = int!(ctx, stack, base, op_b(op), ip, fuel).checked_neg() else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
     r!(stack, base, op_a(op)) = VmValue::Int(v);
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -763,8 +763,8 @@ extern "rust-preserve-none" fn op_bit_and<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Int(int!(stack, base, op_b(op), ip, fuel) & int!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Int(int!(ctx, stack, base, op_b(op), ip, fuel) & int!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -777,8 +777,8 @@ extern "rust-preserve-none" fn op_bit_or<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Int(int!(stack, base, op_b(op), ip, fuel) | int!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Int(int!(ctx, stack, base, op_b(op), ip, fuel) | int!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -791,8 +791,8 @@ extern "rust-preserve-none" fn op_bit_xor<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Int(int!(stack, base, op_b(op), ip, fuel) ^ int!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Int(int!(ctx, stack, base, op_b(op), ip, fuel) ^ int!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -805,11 +805,11 @@ extern "rust-preserve-none" fn op_shl<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Ok(s) = shift_amount(int!(stack, base, op_c(op), ip, fuel)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Ok(s) = shift_amount(int!(ctx, stack, base, op_c(op), ip, fuel)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
-    r!(stack, base, op_a(op)) = VmValue::Int(int!(stack, base, op_b(op), ip, fuel).wrapping_shl(s));
+    r!(stack, base, op_a(op)) = VmValue::Int(int!(ctx, stack, base, op_b(op), ip, fuel).wrapping_shl(s));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -822,11 +822,11 @@ extern "rust-preserve-none" fn op_shr<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let Ok(s) = shift_amount(int!(stack, base, op_c(op), ip, fuel)) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+) {
+    let Ok(s) = shift_amount(int!(ctx, stack, base, op_c(op), ip, fuel)) else {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     };
-    r!(stack, base, op_a(op)) = VmValue::Int(int!(stack, base, op_b(op), ip, fuel) >> s);
+    r!(stack, base, op_a(op)) = VmValue::Int(int!(ctx, stack, base, op_b(op), ip, fuel) >> s);
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -839,8 +839,8 @@ extern "rust-preserve-none" fn op_bit_not<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Int(!int!(stack, base, op_b(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Int(!int!(ctx, stack, base, op_b(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -855,8 +855,8 @@ extern "rust-preserve-none" fn op_add_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Float(float!(stack, base, op_b(op), ip, fuel) + float!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Float(float!(ctx, stack, base, op_b(op), ip, fuel) + float!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -869,8 +869,8 @@ extern "rust-preserve-none" fn op_sub_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Float(float!(stack, base, op_b(op), ip, fuel) - float!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Float(float!(ctx, stack, base, op_b(op), ip, fuel) - float!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -883,8 +883,8 @@ extern "rust-preserve-none" fn op_mul_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Float(float!(stack, base, op_b(op), ip, fuel) * float!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Float(float!(ctx, stack, base, op_b(op), ip, fuel) * float!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -897,8 +897,8 @@ extern "rust-preserve-none" fn op_div_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Float(float!(stack, base, op_b(op), ip, fuel) / float!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Float(float!(ctx, stack, base, op_b(op), ip, fuel) / float!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -911,8 +911,9 @@ extern "rust-preserve-none" fn op_rem_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Float(float_rem(float!(stack, base, op_b(op), ip, fuel), float!(stack, base, op_c(op), ip, fuel)));
+) {
+    r!(stack, base, op_a(op)) =
+        VmValue::Float(float_rem(float!(ctx, stack, base, op_b(op), ip, fuel), float!(ctx, stack, base, op_c(op), ip, fuel)));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -925,8 +926,9 @@ extern "rust-preserve-none" fn op_pow_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Float(float!(stack, base, op_b(op), ip, fuel).powf(float!(stack, base, op_c(op), ip, fuel)));
+) {
+    r!(stack, base, op_a(op)) =
+        VmValue::Float(float!(ctx, stack, base, op_b(op), ip, fuel).powf(float!(ctx, stack, base, op_c(op), ip, fuel)));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -939,8 +941,8 @@ extern "rust-preserve-none" fn op_neg_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Float(-float!(stack, base, op_b(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Float(-float!(ctx, stack, base, op_b(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -955,7 +957,7 @@ extern "rust-preserve-none" fn op_arith_gen<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let code_op = ((op & 0xff) as u8) - 37;
     let (x, y) = (r!(stack, base, op_b(op)), r!(stack, base, op_c(op)));
     match ctx.vm.arith(code_op, x, y) {
@@ -963,7 +965,7 @@ extern "rust-preserve-none" fn op_arith_gen<'a>(
             r!(stack, base, op_a(op)) = v;
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
     }
 }
 
@@ -976,18 +978,18 @@ extern "rust-preserve-none" fn op_neg<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     r!(stack, base, op_a(op)) = match r!(stack, base, op_b(op)) {
         VmValue::Int(i) => match i.checked_neg() {
             Some(v) => VmValue::Int(v),
-            None => return DispatchExit::SlowOp { ip: ip - 1, fuel },
+            None => return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
         },
         VmValue::Float(f) => VmValue::Float(-f),
         VmValue::Dur(d) => match d.checked_neg() {
             Some(v) => VmValue::Dur(v),
-            None => return DispatchExit::SlowOp { ip: ip - 1, fuel },
+            None => return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
         },
-        _ => return DispatchExit::SlowOp { ip: ip - 1, fuel },
+        _ => return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
     };
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -1001,7 +1003,7 @@ extern "rust-preserve-none" fn op_not<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     r!(stack, base, op_a(op)) = VmValue::Bool(!r!(stack, base, op_b(op)).as_bool());
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -1017,8 +1019,8 @@ extern "rust-preserve-none" fn op_eq_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) == int!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) == int!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1031,8 +1033,8 @@ extern "rust-preserve-none" fn op_ne_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) != int!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) != int!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1045,8 +1047,8 @@ extern "rust-preserve-none" fn op_lt_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) < int!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) < int!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1059,8 +1061,8 @@ extern "rust-preserve-none" fn op_le_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) <= int!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) <= int!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1073,8 +1075,8 @@ extern "rust-preserve-none" fn op_eq_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) == op_c_i64(op));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) == op_c_i64(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1087,8 +1089,8 @@ extern "rust-preserve-none" fn op_ne_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) != op_c_i64(op));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) != op_c_i64(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1101,8 +1103,8 @@ extern "rust-preserve-none" fn op_lt_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) < op_c_i64(op));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) < op_c_i64(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1115,8 +1117,8 @@ extern "rust-preserve-none" fn op_le_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) <= op_c_i64(op));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) <= op_c_i64(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1129,8 +1131,8 @@ extern "rust-preserve-none" fn op_gt_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) > op_c_i64(op));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) > op_c_i64(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1143,8 +1145,8 @@ extern "rust-preserve-none" fn op_ge_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(int!(stack, base, op_b(op), ip, fuel) >= op_c_i64(op));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(int!(ctx, stack, base, op_b(op), ip, fuel) >= op_c_i64(op));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1157,8 +1159,8 @@ extern "rust-preserve-none" fn op_eq_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(float!(stack, base, op_b(op), ip, fuel) == float!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(float!(ctx, stack, base, op_b(op), ip, fuel) == float!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1171,8 +1173,8 @@ extern "rust-preserve-none" fn op_ne_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(float!(stack, base, op_b(op), ip, fuel) != float!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(float!(ctx, stack, base, op_b(op), ip, fuel) != float!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1185,8 +1187,8 @@ extern "rust-preserve-none" fn op_lt_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(float!(stack, base, op_b(op), ip, fuel) < float!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(float!(ctx, stack, base, op_b(op), ip, fuel) < float!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1199,8 +1201,8 @@ extern "rust-preserve-none" fn op_le_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Bool(float!(stack, base, op_b(op), ip, fuel) <= float!(stack, base, op_c(op), ip, fuel));
+) {
+    r!(stack, base, op_a(op)) = VmValue::Bool(float!(ctx, stack, base, op_b(op), ip, fuel) <= float!(ctx, stack, base, op_c(op), ip, fuel));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -1213,12 +1215,12 @@ extern "rust-preserve-none" fn op_eq<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     if let Some(eq) = quick_eq(&ctx.vm.heap, &r!(stack, base, op_b(op)), &r!(stack, base, op_c(op))) {
         r!(stack, base, op_a(op)) = VmValue::Bool(eq);
         dispatch!(ctx, code, ip, stack, base, fuel)
     }
-    DispatchExit::SlowOp { ip: ip - 1, fuel }
+    exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel })
 }
 
 #[inline(never)]
@@ -1230,12 +1232,12 @@ extern "rust-preserve-none" fn op_ne<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     if let Some(eq) = quick_eq(&ctx.vm.heap, &r!(stack, base, op_b(op)), &r!(stack, base, op_c(op))) {
         r!(stack, base, op_a(op)) = VmValue::Bool(!eq);
         dispatch!(ctx, code, ip, stack, base, fuel)
     }
-    DispatchExit::SlowOp { ip: ip - 1, fuel }
+    exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel })
 }
 
 // ---------------- control flow
@@ -1249,7 +1251,7 @@ extern "rust-preserve-none" fn op_jmp<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nip = jump_ip!(ip, op_imm_i32(op));
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
@@ -1263,7 +1265,7 @@ extern "rust-preserve-none" fn op_loop<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     back_edge!(ctx, code, ip, op_imm_i32(op), stack, base, fuel)
 }
 
@@ -1276,7 +1278,7 @@ extern "rust-preserve-none" fn op_jmp_if<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nip = if r!(stack, base, op_a(op)).as_bool() { jump_ip!(ip, op_imm_i32(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
@@ -1290,7 +1292,7 @@ extern "rust-preserve-none" fn op_jmp_if_not<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nip = if !r!(stack, base, op_a(op)).as_bool() { jump_ip!(ip, op_imm_i32(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
@@ -1304,8 +1306,12 @@ extern "rust-preserve-none" fn op_jnlt_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) >= int!(stack, base, op_b(op), ip, fuel) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) >= int!(ctx, stack, base, op_b(op), ip, fuel) {
+        jump_ip!(ip, op_c_i16(op))
+    } else {
+        ip
+    };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1318,8 +1324,12 @@ extern "rust-preserve-none" fn op_jnle_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) > int!(stack, base, op_b(op), ip, fuel) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) > int!(ctx, stack, base, op_b(op), ip, fuel) {
+        jump_ip!(ip, op_c_i16(op))
+    } else {
+        ip
+    };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1332,8 +1342,12 @@ extern "rust-preserve-none" fn op_jneq_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) != int!(stack, base, op_b(op), ip, fuel) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) != int!(ctx, stack, base, op_b(op), ip, fuel) {
+        jump_ip!(ip, op_c_i16(op))
+    } else {
+        ip
+    };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1346,8 +1360,12 @@ extern "rust-preserve-none" fn op_jnne_i<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) == int!(stack, base, op_b(op), ip, fuel) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) == int!(ctx, stack, base, op_b(op), ip, fuel) {
+        jump_ip!(ip, op_c_i16(op))
+    } else {
+        ip
+    };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1360,8 +1378,8 @@ extern "rust-preserve-none" fn op_jnlt_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if float!(stack, base, op_a(op), ip, fuel).partial_cmp(&float!(stack, base, op_b(op), ip, fuel))
+) {
+    let nip = if float!(ctx, stack, base, op_a(op), ip, fuel).partial_cmp(&float!(ctx, stack, base, op_b(op), ip, fuel))
         != Some(std::cmp::Ordering::Less)
     {
         jump_ip!(ip, op_c_i16(op))
@@ -1380,9 +1398,9 @@ extern "rust-preserve-none" fn op_jnle_f<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nip = if !matches!(
-        float!(stack, base, op_a(op), ip, fuel).partial_cmp(&float!(stack, base, op_b(op), ip, fuel)),
+        float!(ctx, stack, base, op_a(op), ip, fuel).partial_cmp(&float!(ctx, stack, base, op_b(op), ip, fuel)),
         Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
     ) {
         jump_ip!(ip, op_c_i16(op))
@@ -1401,12 +1419,12 @@ extern "rust-preserve-none" fn op_jneq<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     if let Some(eq) = quick_eq(&ctx.vm.heap, &r!(stack, base, op_a(op)), &r!(stack, base, op_b(op))) {
         let nip = if !eq { jump_ip!(ip, op_c_i16(op)) } else { ip };
         dispatch!(ctx, code, nip, stack, base, fuel)
     }
-    DispatchExit::SlowOp { ip: ip - 1, fuel }
+    exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel })
 }
 
 #[inline(never)]
@@ -1418,12 +1436,12 @@ extern "rust-preserve-none" fn op_jnne<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     if let Some(eq) = quick_eq(&ctx.vm.heap, &r!(stack, base, op_a(op)), &r!(stack, base, op_b(op))) {
         let nip = if eq { jump_ip!(ip, op_c_i16(op)) } else { ip };
         dispatch!(ctx, code, nip, stack, base, fuel)
     }
-    DispatchExit::SlowOp { ip: ip - 1, fuel }
+    exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel })
 }
 
 #[inline(never)]
@@ -1435,14 +1453,14 @@ extern "rust-preserve-none" fn op_jneq_k<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     match ctx.vm.eq_const(&r!(stack, base, op_a(op)), op_b(op) as u16) {
         Ok(true) => dispatch!(ctx, code, ip, stack, base, fuel),
         Ok(false) => {
             let nip = jump_ip!(ip, op_c_i16(op));
             dispatch!(ctx, code, nip, stack, base, fuel)
         }
-        Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
     }
 }
 
@@ -1455,14 +1473,14 @@ extern "rust-preserve-none" fn op_jnne_k<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     match ctx.vm.eq_const(&r!(stack, base, op_a(op)), op_b(op) as u16) {
         Ok(true) => {
             let nip = jump_ip!(ip, op_c_i16(op));
             dispatch!(ctx, code, nip, stack, base, fuel)
         }
         Ok(false) => dispatch!(ctx, code, ip, stack, base, fuel),
-        Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
     }
 }
 
@@ -1475,8 +1493,8 @@ extern "rust-preserve-none" fn op_jnlt_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) >= op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) >= op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1489,8 +1507,8 @@ extern "rust-preserve-none" fn op_jnle_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) > op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) > op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1503,8 +1521,8 @@ extern "rust-preserve-none" fn op_jngt_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) <= op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) <= op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1517,8 +1535,8 @@ extern "rust-preserve-none" fn op_jnge_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) < op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) < op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1531,8 +1549,8 @@ extern "rust-preserve-none" fn op_jneq_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) != op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) != op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1545,8 +1563,8 @@ extern "rust-preserve-none" fn op_jnne_ik<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = if int!(stack, base, op_a(op), ip, fuel) == op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
+) {
+    let nip = if int!(ctx, stack, base, op_a(op), ip, fuel) == op_b_i64(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1559,7 +1577,7 @@ extern "rust-preserve-none" fn op_jnot_some<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     match ctx.vm.heap.variant_payload_if(&r!(stack, base, op_a(op)), ctx.prog.ids.some) {
         VmValue::Uninit => {
             let nip = jump_ip!(ip, op_c_i16(op));
@@ -1581,7 +1599,7 @@ extern "rust-preserve-none" fn op_jnot_ok<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     match ctx.vm.heap.variant_payload_if(&r!(stack, base, op_a(op)), ctx.prog.ids.ok) {
         VmValue::Uninit => {
             let nip = jump_ip!(ip, op_c_i16(op));
@@ -1603,7 +1621,7 @@ extern "rust-preserve-none" fn op_jnot_variant<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nip = if ctx.vm.heap.variant_id(r!(stack, base, op_a(op))) != op_b(op) as u32 { jump_ip!(ip, op_c_i16(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
@@ -1617,7 +1635,7 @@ extern "rust-preserve-none" fn op_switch_variant<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nip = switch_target(ctx.prog, op_imm_u32(op), ctx.vm.heap.variant_id(r!(stack, base, op_a(op))) as i64);
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
@@ -1631,8 +1649,8 @@ extern "rust-preserve-none" fn op_switch_int<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let nip = switch_target(ctx.prog, op_imm_u32(op), int!(stack, base, op_a(op), ip, fuel));
+) {
+    let nip = switch_target(ctx.prog, op_imm_u32(op), int!(ctx, stack, base, op_a(op), ip, fuel));
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
 
@@ -1645,7 +1663,7 @@ extern "rust-preserve-none" fn op_switch_char<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nip = switch_target(ctx.prog, op_imm_u32(op), char_code(&ctx.vm.heap, &r!(stack, base, op_a(op))));
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
@@ -1661,7 +1679,7 @@ extern "rust-preserve-none" fn op_jmp_if_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     if r!(stack, base, op_a(op)).as_bool() {
         back_edge!(ctx, code, ip, op_imm_i32(op), stack, base, fuel)
     }
@@ -1677,7 +1695,7 @@ extern "rust-preserve-none" fn op_jmp_if_not_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     if !r!(stack, base, op_a(op)).as_bool() {
         back_edge!(ctx, code, ip, op_imm_i32(op), stack, base, fuel)
     }
@@ -1693,8 +1711,8 @@ extern "rust-preserve-none" fn op_jnlt_i_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) >= int!(stack, base, op_b(op), ip, fuel) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) >= int!(ctx, stack, base, op_b(op), ip, fuel) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1709,8 +1727,8 @@ extern "rust-preserve-none" fn op_jnle_i_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) > int!(stack, base, op_b(op), ip, fuel) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) > int!(ctx, stack, base, op_b(op), ip, fuel) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1725,8 +1743,8 @@ extern "rust-preserve-none" fn op_jneq_i_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) != int!(stack, base, op_b(op), ip, fuel) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) != int!(ctx, stack, base, op_b(op), ip, fuel) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1741,8 +1759,8 @@ extern "rust-preserve-none" fn op_jnne_i_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) == int!(stack, base, op_b(op), ip, fuel) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) == int!(ctx, stack, base, op_b(op), ip, fuel) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1757,8 +1775,8 @@ extern "rust-preserve-none" fn op_jnlt_ik_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) >= op_b_i64(op) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) >= op_b_i64(op) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1773,8 +1791,8 @@ extern "rust-preserve-none" fn op_jnle_ik_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) > op_b_i64(op) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) > op_b_i64(op) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1789,8 +1807,8 @@ extern "rust-preserve-none" fn op_jngt_ik_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) <= op_b_i64(op) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) <= op_b_i64(op) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1805,8 +1823,8 @@ extern "rust-preserve-none" fn op_jnge_ik_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) < op_b_i64(op) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) < op_b_i64(op) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1821,8 +1839,8 @@ extern "rust-preserve-none" fn op_jneq_ik_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) != op_b_i64(op) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) != op_b_i64(op) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1837,8 +1855,8 @@ extern "rust-preserve-none" fn op_jnne_ik_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if int!(stack, base, op_a(op), ip, fuel) == op_b_i64(op) {
+) {
+    if int!(ctx, stack, base, op_a(op), ip, fuel) == op_b_i64(op) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -1853,7 +1871,7 @@ extern "rust-preserve-none" fn op_jsome_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let p = ctx.vm.heap.variant_payload_if(&r!(stack, base, op_a(op)), ctx.prog.ids.some);
     if !matches!(p, VmValue::Uninit) {
         r!(stack, base, op_b(op)) = p;
@@ -1873,7 +1891,7 @@ extern "rust-preserve-none" fn op_call_direct<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nb = base + op_a(op);
     enter_frame!(ctx, ip, stack, fuel, op_imm_u32(op), nb, nb, NO_CLOSURE, false)
 }
@@ -1887,7 +1905,7 @@ extern "rust-preserve-none" fn op_call_direct_to<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nb = base + op_a(op);
     enter_frame!(ctx, ip, stack, fuel, op_c(op) as u32, nb, base + op_b(op), NO_CLOSURE, false)
 }
@@ -1901,7 +1919,7 @@ extern "rust-preserve-none" fn op_call_self<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let fr = *ctx.fiber.frames.last().unwrap();
     let nb = base + op_a(op);
     enter_frame!(ctx, ip, stack, fuel, fr.proto, nb, base + op_b(op), fr.closure, true)
@@ -1929,7 +1947,7 @@ macro_rules! native_call_fast {
             let next_fuel = $ctx.vm.meter.reload_interpreter_fuel();
             dispatch!($ctx, $code, $ip, $stack, $base, next_fuel)
         } else {
-            DispatchExit::NativeSlow { result, n, start, argc, slot, ip: $ip, fuel_at_call }
+            exit_with($ctx, DispatchExit::NativeSlow { result, ip: $ip, fuel_at_call })
         }
     }};
 }
@@ -1943,7 +1961,7 @@ extern "rust-preserve-none" fn op_call_native<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let start = base + op_a(op);
     native_call_fast!(ctx, code, ip, stack, base, fuel, op_imm_u32(op), start, start)
 }
@@ -1957,7 +1975,7 @@ extern "rust-preserve-none" fn op_call_native_to<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let start = base + op_a(op);
     native_call_fast!(ctx, code, ip, stack, base, fuel, op_c(op) as u32, start, base + op_b(op))
 }
@@ -1971,7 +1989,7 @@ extern "rust-preserve-none" fn op_call_r<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let callee = r!(stack, base, op_a(op));
     let b = op_b(op);
     let dst = op_c(op);
@@ -1984,7 +2002,7 @@ extern "rust-preserve-none" fn op_call_r<'a>(
         }
         Obj::IterFn(_) => {
             if fuel <= 1 || ctx.vm.heap.needs_gc() {
-                return DispatchExit::SafePoint { resume_ip: ip - 1, fuel: fuel - 1 };
+                return exit_with(ctx, DispatchExit::SafePoint { resume_ip: ip - 1, fuel: fuel - 1 });
             }
             let fuel = fuel - 1;
             let next = ctx.vm.iter_next(callee);
@@ -2014,7 +2032,7 @@ extern "rust-preserve-none" fn op_call_r<'a>(
             }
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        _ => DispatchExit::SlowOp { ip: ip - 1, fuel },
+        _ => exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
     }
 }
 
@@ -2027,15 +2045,15 @@ extern "rust-preserve-none" fn op_tail_call_direct<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let proto = op_imm_u32(op);
     let p = &ctx.prog.protos[proto as usize];
     let need = base + p.nregs as usize;
     if fuel <= 1 || ctx.vm.heap.needs_gc() {
-        return DispatchExit::SafePoint { resume_ip: ip - 1, fuel: fuel - 1 };
+        return exit_with(ctx, DispatchExit::SafePoint { resume_ip: ip - 1, fuel: fuel - 1 });
     }
     if stack.len() < need {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     }
     shift_args(&mut stack[base..], op_a(op), p.nparams as usize);
     let top = ctx.fiber.frames.last_mut().unwrap();
@@ -2055,7 +2073,7 @@ extern "rust-preserve-none" fn op_tail_call<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let callee = r!(stack, base, op_a(op));
     let b = op_b(op);
     let argc = op_c(op);
@@ -2065,10 +2083,10 @@ extern "rust-preserve-none" fn op_tail_call<'a>(
             let pr = &ctx.prog.protos[proto as usize];
             let need = base + pr.nregs as usize;
             if fuel <= 1 || ctx.vm.heap.needs_gc() {
-                return DispatchExit::SafePoint { resume_ip: ip - 1, fuel: fuel - 1 };
+                return exit_with(ctx, DispatchExit::SafePoint { resume_ip: ip - 1, fuel: fuel - 1 });
             }
             if stack.len() < need {
-                return DispatchExit::SlowOp { ip: ip - 1, fuel };
+                return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
             }
             shift_args(&mut stack[base..], b, argc);
             let VmValue::Obj(h) = callee else { unreachable!() };
@@ -2082,12 +2100,12 @@ extern "rust-preserve-none" fn op_tail_call<'a>(
         }
         Obj::IterFn(_) => {
             if fuel <= 1 || ctx.vm.heap.needs_gc() {
-                return DispatchExit::SafePoint { resume_ip: ip - 1, fuel: fuel - 1 };
+                return exit_with(ctx, DispatchExit::SafePoint { resume_ip: ip - 1, fuel: fuel - 1 });
             }
             r!(stack, base, b) = ctx.vm.iter_step(callee);
             dispatch!(ctx, code, ip, stack, base, fuel - 1)
         }
-        _ => DispatchExit::SlowOp { ip: ip - 1, fuel },
+        _ => exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
     }
 }
 
@@ -2100,7 +2118,7 @@ extern "rust-preserve-none" fn op_ret<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let v = r!(stack, base, op_a(op));
     do_return!(ctx, stack, fuel, v)
 }
@@ -2114,7 +2132,7 @@ extern "rust-preserve-none" fn op_ret_variant<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let val = r!(stack, base, op_a(op));
     let variant = op_b(op) as u32;
     let v = match VmValue::variant1(variant, val) {
@@ -2133,7 +2151,7 @@ extern "rust-preserve-none" fn op_ret_unit<'a>(
     _base: usize,
     fuel: i64,
     _op: u64,
-) -> DispatchExit {
+) {
     do_return!(ctx, stack, fuel, VmValue::Unit)
 }
 
@@ -2148,10 +2166,10 @@ extern "rust-preserve-none" fn op_new_list<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let s = base + op_b(op);
-    let items = stack[s..s + op_c(op)].to_vec();
-    r!(stack, base, op_a(op)) = ctx.vm.heap.new_list(items);
+    let list = ctx.vm.heap.new_list_from_slice(&stack[s..s + op_c(op)]);
+    r!(stack, base, op_a(op)) = list;
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -2164,14 +2182,14 @@ extern "rust-preserve-none" fn op_new_map<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let s = base + op_b(op);
     match retryable_op!(ctx, ctx.vm.op_new_map(&stack[s..s + 2 * op_c(op)])) {
         Ok(m) => {
             r!(stack, base, op_a(op)) = m;
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
     }
 }
 
@@ -2184,7 +2202,7 @@ extern "rust-preserve-none" fn op_new_tuple<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let s = base + op_b(op);
     let count = op_c(op);
     r!(stack, base, op_a(op)) = match stack[s..s + count] {
@@ -2203,12 +2221,12 @@ extern "rust-preserve-none" fn op_new_struct<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let def = op_c(op);
     let n = ctx.prog.types[def].fields.len();
     let s = base + op_b(op);
-    let items = ctx.vm.heap.box_values(&stack[s..s + n]);
-    r!(stack, base, op_a(op)) = ctx.vm.heap.alloc(Obj::Struct(def as u32, items));
+    let obj = ctx.vm.heap.new_struct(def as u32, &stack[s..s + n]);
+    r!(stack, base, op_a(op)) = obj;
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -2221,7 +2239,7 @@ extern "rust-preserve-none" fn op_new_variant<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let variant = op_c(op);
     let n = ctx.prog.variants[variant].arity;
     let s = base + op_b(op);
@@ -2241,8 +2259,8 @@ extern "rust-preserve-none" fn op_new_range<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let (x, y) = (int!(stack, base, op_b(op), ip, fuel), int!(stack, base, op_c(op), ip, fuel));
+) {
+    let (x, y) = (int!(ctx, stack, base, op_b(op), ip, fuel), int!(ctx, stack, base, op_c(op), ip, fuel));
     r!(stack, base, op_a(op)) = ctx.vm.heap.alloc(Obj::Range(x, y, false));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -2256,8 +2274,8 @@ extern "rust-preserve-none" fn op_new_range_incl<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let (x, y) = (int!(stack, base, op_b(op), ip, fuel), int!(stack, base, op_c(op), ip, fuel));
+) {
+    let (x, y) = (int!(ctx, stack, base, op_b(op), ip, fuel), int!(ctx, stack, base, op_c(op), ip, fuel));
     r!(stack, base, op_a(op)) = ctx.vm.heap.alloc(Obj::Range(x, y, true));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -2271,21 +2289,20 @@ extern "rust-preserve-none" fn op_get_field<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let idx = op_c(op);
-    match r!(stack, base, op_b(op)) {
-        VmValue::Obj(h) => match ctx.vm.heap.obj(h) {
-            Obj::Struct(_, f) | Obj::Tuple(f) | Obj::Variant(_, f) | Obj::Closure(_, f) if idx < f.len() => {
-                r!(stack, base, op_a(op)) = f[idx];
-            }
-            _ => return DispatchExit::SlowOp { ip: ip - 1, fuel },
+    let val = match &r!(stack, base, op_b(op)) {
+        &VmValue::Obj(h) => match ctx.vm.heap.obj(h) {
+            Obj::Struct(_, f) | Obj::Tuple(f) | Obj::Variant(_, f) | Obj::Closure(_, f) if idx < f.len() => f[idx],
+            _ => return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
         },
-        VmValue::Pair(a, b) => r!(stack, base, op_a(op)) = VmValue::Int(if idx == 0 { a as i64 } else { b }),
-        v => match inline_field(&v, idx as u16) {
-            VmValue::Uninit => return DispatchExit::SlowOp { ip: ip - 1, fuel },
-            p => r!(stack, base, op_a(op)) = p,
+        &VmValue::Pair(a, b) => VmValue::Int(if idx == 0 { a as i64 } else { b }),
+        v => match inline_field(v, idx as u16) {
+            VmValue::Uninit => return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
+            p => p,
         },
-    }
+    };
+    r!(stack, base, op_a(op)) = val;
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -2298,13 +2315,13 @@ extern "rust-preserve-none" fn op_payload<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     match payload(&ctx.vm.heap, r!(stack, base, op_b(op))) {
         Some(p) => {
             r!(stack, base, op_a(op)) = p;
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        None => DispatchExit::SlowOp { ip: ip - 1, fuel },
+        None => exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
     }
 }
 
@@ -2317,13 +2334,12 @@ extern "rust-preserve-none" fn op_set_field<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let o = r!(stack, base, op_a(op));
     let idx = op_b(op);
     let v = r!(stack, base, op_c(op));
-    match ctx.vm.heap.get_mut_storing(o, &[v]) {
-        Obj::Struct(_, f) => f[idx] = v,
-        _ => return DispatchExit::SlowOp { ip: ip - 1, fuel },
+    if !ctx.vm.heap.set_struct_field(o, idx, v) {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -2337,16 +2353,16 @@ extern "rust-preserve-none" fn op_index<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let o = r!(stack, base, op_b(op));
-    let i = int!(stack, base, op_c(op), ip, fuel);
+    let i = int!(ctx, stack, base, op_c(op), ip, fuel);
     let l = ctx.vm.heap.list(o);
     match to_index(i).and_then(|at| l.get(at)) {
         Some(&v) => {
             r!(stack, base, op_a(op)) = v;
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        None => DispatchExit::SlowOp { ip: ip - 1, fuel },
+        None => exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
     }
 }
 
@@ -2359,7 +2375,7 @@ extern "rust-preserve-none" fn op_index_map<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let obj = op_b(op);
     let key = op_c(op);
     match dense_get(&ctx.vm.heap, &r!(stack, base, obj), &r!(stack, base, key)) {
@@ -2372,7 +2388,7 @@ extern "rust-preserve-none" fn op_index_map<'a>(
                 r!(stack, base, op_a(op)) = v;
                 dispatch!(ctx, code, ip, stack, base, fuel)
             }
-            Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+            Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
         },
     }
 }
@@ -2386,21 +2402,15 @@ extern "rust-preserve-none" fn op_set_index<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let o = r!(stack, base, op_a(op));
-    let i = int!(stack, base, op_b(op), ip, fuel);
+    let i = int!(ctx, stack, base, op_b(op), ip, fuel);
     let v = r!(stack, base, op_c(op));
     let at = to_index(i).unwrap_or(usize::MAX);
-    let Some(l) = ctx.vm.heap.list_mut_storing(o, at, v) else {
-        return DispatchExit::SlowOp { ip: ip - 1, fuel };
-    };
-    match l.get_mut(at) {
-        Some(slot) => {
-            *slot = v;
-            dispatch!(ctx, code, ip, stack, base, fuel)
-        }
-        None => DispatchExit::SlowOp { ip: ip - 1, fuel },
+    if !ctx.vm.heap.set_list_index(o, at, v) {
+        return exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel });
     }
+    dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
 #[inline(never)]
@@ -2412,10 +2422,10 @@ extern "rust-preserve-none" fn op_set_index_map<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let (m, k, v) = (r!(stack, base, op_a(op)), r!(stack, base, op_b(op)), r!(stack, base, op_c(op)));
     if let Err(ctl) = retryable_op!(ctx, ctx.vm.map_set(m, k, v)) {
-        return DispatchExit::FailStop { ctl, ip, fuel };
+        return exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel });
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -2429,10 +2439,10 @@ extern "rust-preserve-none" fn op_list_push<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let (l, v) = (r!(stack, base, op_a(op)), r!(stack, base, op_b(op)));
     if ctx.vm.heap.list_push(l, v).is_err() {
-        return DispatchExit::LimitMemory { ip, fuel };
+        return exit_with(ctx, DispatchExit::LimitMemory { ip, fuel });
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -2448,10 +2458,10 @@ extern "rust-preserve-none" fn op_for_list<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let b = op_b(op);
-    let i = int!(stack, base, b + 1, ip, fuel);
-    let n = int!(stack, base, b + 2, ip, fuel);
+    let i = int!(ctx, stack, base, b + 1, ip, fuel);
+    let n = int!(ctx, stack, base, b + 2, ip, fuel);
     let l = ctx.vm.heap.list(r!(stack, base, b));
     if i < n && (i as usize) < l.len() {
         let v = l[i as usize];
@@ -2472,10 +2482,10 @@ extern "rust-preserve-none" fn op_for_range<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let b = op_b(op);
-    let i = int!(stack, base, b, ip, fuel);
-    if i < int!(stack, base, b + 1, ip, fuel) {
+    let i = int!(ctx, stack, base, b, ip, fuel);
+    if i < int!(ctx, stack, base, b + 1, ip, fuel) {
         r!(stack, base, op_a(op)) = VmValue::Int(i);
         r!(stack, base, b) = VmValue::Int(i + 1);
         dispatch!(ctx, code, ip, stack, base, fuel)
@@ -2493,10 +2503,10 @@ extern "rust-preserve-none" fn op_for_range_incl<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let b = op_b(op);
-    let i = int!(stack, base, b, ip, fuel);
-    let end = int!(stack, base, b + 1, ip, fuel);
+    let i = int!(ctx, stack, base, b, ip, fuel);
+    let end = int!(ctx, stack, base, b + 1, ip, fuel);
     if !r!(stack, base, b + 2).as_bool() && i <= end {
         r!(stack, base, op_a(op)) = VmValue::Int(i);
         if i == end {
@@ -2519,7 +2529,7 @@ extern "rust-preserve-none" fn op_for_set<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let it = r!(stack, base, op_b(op));
     if !ctx.vm.set_step(it, &mut r!(stack, base, op_a(op))) {
         let nip = jump_ip!(ip, op_c_i16(op));
@@ -2537,7 +2547,7 @@ extern "rust-preserve-none" fn op_for_map<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let (it, k) = (r!(stack, base, op_b(op)), base + op_a(op));
     if !ctx.vm.map_step(it, &mut stack[k..k + 2]) {
         let nip = jump_ip!(ip, op_c_i16(op));
@@ -2555,7 +2565,7 @@ extern "rust-preserve-none" fn op_for_chars<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let b = op_b(op);
     match ctx.vm.next_char(&r!(stack, base, b), &r!(stack, base, b + 1)) {
         Some((c, at)) => {
@@ -2579,10 +2589,10 @@ extern "rust-preserve-none" fn op_for_list_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let b = op_b(op);
-    let i = int!(stack, base, b + 1, ip, fuel);
-    let n = int!(stack, base, b + 2, ip, fuel);
+    let i = int!(ctx, stack, base, b + 1, ip, fuel);
+    let n = int!(ctx, stack, base, b + 2, ip, fuel);
     let l = ctx.vm.heap.list(r!(stack, base, b));
     if i < n && (i as usize) < l.len() {
         let v = l[i as usize];
@@ -2602,10 +2612,10 @@ extern "rust-preserve-none" fn op_for_range_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let b = op_b(op);
-    let i = int!(stack, base, b, ip, fuel);
-    if i < int!(stack, base, b + 1, ip, fuel) {
+    let i = int!(ctx, stack, base, b, ip, fuel);
+    if i < int!(ctx, stack, base, b + 1, ip, fuel) {
         r!(stack, base, op_a(op)) = VmValue::Int(i);
         r!(stack, base, b) = VmValue::Int(i + 1);
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
@@ -2622,10 +2632,10 @@ extern "rust-preserve-none" fn op_for_range_incl_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let b = op_b(op);
-    let i = int!(stack, base, b, ip, fuel);
-    let end = int!(stack, base, b + 1, ip, fuel);
+    let i = int!(ctx, stack, base, b, ip, fuel);
+    let end = int!(ctx, stack, base, b + 1, ip, fuel);
     if !r!(stack, base, b + 2).as_bool() && i <= end {
         r!(stack, base, op_a(op)) = VmValue::Int(i);
         if i == end {
@@ -2647,7 +2657,7 @@ extern "rust-preserve-none" fn op_for_set_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let it = r!(stack, base, op_b(op));
     if ctx.vm.set_step(it, &mut r!(stack, base, op_a(op))) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
@@ -2664,7 +2674,7 @@ extern "rust-preserve-none" fn op_for_map_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let (it, k) = (r!(stack, base, op_b(op)), base + op_a(op));
     if ctx.vm.map_step(it, &mut stack[k..k + 2]) {
         back_edge!(ctx, code, ip, op_c_i16(op), stack, base, fuel)
@@ -2681,7 +2691,7 @@ extern "rust-preserve-none" fn op_for_chars_back<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let b = op_b(op);
     if let Some((c, at)) = ctx.vm.next_char(&r!(stack, base, b), &r!(stack, base, b + 1)) {
         r!(stack, base, op_a(op)) = c;
@@ -2702,7 +2712,7 @@ extern "rust-preserve-none" fn op_unpack_range<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let b = op_a(op);
     match unpack_range(ctx.vm.heap.get(r!(stack, base, op_b(op)))) {
         Some((first, last, done)) => {
@@ -2711,7 +2721,7 @@ extern "rust-preserve-none" fn op_unpack_range<'a>(
             r!(stack, base, b + 2) = VmValue::Bool(done);
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        None => DispatchExit::SlowOp { ip: ip - 1, fuel },
+        None => exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel }),
     }
 }
 
@@ -2724,13 +2734,13 @@ extern "rust-preserve-none" fn op_new_iter<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     match ctx.vm.container_iter(r!(stack, base, op_b(op))) {
         Ok(v) => {
             r!(stack, base, op_a(op)) = v;
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
     }
 }
 
@@ -2743,7 +2753,7 @@ extern "rust-preserve-none" fn op_jlist_len<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nip = if ctx.vm.heap.list(r!(stack, base, op_a(op))).len() != op_b(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
@@ -2757,7 +2767,7 @@ extern "rust-preserve-none" fn op_jlist_min_len<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let nip = if ctx.vm.heap.list(r!(stack, base, op_a(op))).len() < op_b(op) { jump_ip!(ip, op_c_i16(op)) } else { ip };
     dispatch!(ctx, code, nip, stack, base, fuel)
 }
@@ -2771,7 +2781,7 @@ extern "rust-preserve-none" fn op_list_elem<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let l = ctx.vm.heap.list(r!(stack, base, op_b(op)));
     let idx = op_c_i16(op);
     let i = if idx < 0 { l.len() as isize + idx as isize } else { idx as isize };
@@ -2790,7 +2800,7 @@ extern "rust-preserve-none" fn op_len<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let o = r!(stack, base, op_b(op));
     let n = match ctx.vm.heap.get(o) {
         Obj::List(l) => l.len(),
@@ -2813,9 +2823,12 @@ extern "rust-preserve-none" fn op_list_get<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let v = to_index(int!(stack, base, op_c(op), ip, fuel)).and_then(|i| ctx.vm.heap.list(r!(stack, base, op_b(op))).get(i)).copied();
-    r!(stack, base, op_a(op)) = ctx.vm.option(v);
+) {
+    let opt = match to_index(int!(ctx, stack, base, op_c(op), ip, fuel)).and_then(|i| ctx.vm.heap.list(r!(stack, base, op_b(op))).get(i)) {
+        Some(&v) => ctx.vm.some(v),
+        None => ctx.vm.none(),
+    };
+    r!(stack, base, op_a(op)) = opt;
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -2828,8 +2841,9 @@ extern "rust-preserve-none" fn op_list_get_or<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    if let Some(&v) = to_index(int!(stack, base, op_c(op), ip, fuel)).and_then(|i| ctx.vm.heap.list(r!(stack, base, op_b(op))).get(i)) {
+) {
+    if let Some(&v) = to_index(int!(ctx, stack, base, op_c(op), ip, fuel)).and_then(|i| ctx.vm.heap.list(r!(stack, base, op_b(op))).get(i))
+    {
         r!(stack, base, op_a(op)) = v;
     }
     dispatch!(ctx, code, ip, stack, base, fuel)
@@ -2844,9 +2858,12 @@ extern "rust-preserve-none" fn op_list_pop<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    let v = ctx.vm.heap.list_mut_truncating(r!(stack, base, op_b(op))).and_then(Vec::pop);
-    r!(stack, base, op_a(op)) = ctx.vm.option(v);
+) {
+    let opt = match ctx.vm.heap.list_mut_truncating(r!(stack, base, op_b(op))).and_then(Vec::pop) {
+        Some(v) => ctx.vm.some(v),
+        None => ctx.vm.none(),
+    };
+    r!(stack, base, op_a(op)) = opt;
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -2859,7 +2876,7 @@ extern "rust-preserve-none" fn op_map_get<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let dst = op_a(op);
     let map = op_b(op);
     let key = op_c(op);
@@ -2892,7 +2909,7 @@ extern "rust-preserve-none" fn op_map_get<'a>(
                 r!(stack, base, dst) = v;
                 dispatch!(ctx, code, ip, stack, base, fuel)
             }
-            Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+            Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
         },
     }
 }
@@ -2906,7 +2923,7 @@ extern "rust-preserve-none" fn op_map_get_or<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let dst = op_a(op);
     let map = op_b(op);
     let key = op_c(op);
@@ -2916,7 +2933,7 @@ extern "rust-preserve-none" fn op_map_get_or<'a>(
         Dense::Unknown => {
             let (m, k) = (r!(stack, base, map), r!(stack, base, key));
             if let Err(ctl) = retryable_op!(ctx, ctx.vm.map_get_or(m, k, &mut r!(stack, base, dst))) {
-                return DispatchExit::FailStop { ctl, ip, fuel };
+                return exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel });
             }
         }
     }
@@ -2932,13 +2949,13 @@ extern "rust-preserve-none" fn op_map_has<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     match retryable_op!(ctx, ctx.vm.map_has(r!(stack, base, op_b(op)), r!(stack, base, op_c(op)))) {
         Ok(b) => {
             r!(stack, base, op_a(op)) = VmValue::Bool(b);
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
     }
 }
 
@@ -2951,13 +2968,13 @@ extern "rust-preserve-none" fn op_set_has<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     match retryable_op!(ctx, ctx.vm.set_contains(r!(stack, base, op_b(op)), r!(stack, base, op_c(op)))) {
         Ok(b) => {
             r!(stack, base, op_a(op)) = VmValue::Bool(b);
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
     }
 }
 
@@ -2970,13 +2987,13 @@ extern "rust-preserve-none" fn op_set_add<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     match retryable_op!(ctx, ctx.vm.set_add(r!(stack, base, op_b(op)), r!(stack, base, op_c(op)))) {
         Ok(b) => {
             r!(stack, base, op_a(op)) = VmValue::Bool(b);
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
     }
 }
 
@@ -2989,8 +3006,8 @@ extern "rust-preserve-none" fn op_int_to_float<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
-    r!(stack, base, op_a(op)) = VmValue::Float(int!(stack, base, op_b(op), ip, fuel) as f64);
+) {
+    r!(stack, base, op_a(op)) = VmValue::Float(int!(ctx, stack, base, op_b(op), ip, fuel) as f64);
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
 
@@ -3003,7 +3020,7 @@ extern "rust-preserve-none" fn op_append_str<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let local = op_a(op);
     let (cur, add) = (r!(stack, base, local), r!(stack, base, op_b(op)));
     match retryable_op!(ctx, ctx.vm.op_append_str(cur, add)) {
@@ -3011,7 +3028,7 @@ extern "rust-preserve-none" fn op_append_str<'a>(
             r!(stack, base, local) = v;
             dispatch!(ctx, code, ip, stack, base, fuel)
         }
-        Err(ctl) => DispatchExit::FailStop { ctl, ip, fuel },
+        Err(ctl) => exit_with(ctx, DispatchExit::FailStop { ctl, ip, fuel }),
     }
 }
 
@@ -3024,7 +3041,7 @@ extern "rust-preserve-none" fn op_freeze_str<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     ctx.vm.heap.freeze_str(r!(stack, base, op_a(op)));
     dispatch!(ctx, code, ip, stack, base, fuel)
 }
@@ -3038,7 +3055,7 @@ extern "rust-preserve-none" fn op_to_str<'a>(
     base: usize,
     fuel: i64,
     op: u64,
-) -> DispatchExit {
+) {
     let v = r!(stack, base, op_b(op));
     if let VmValue::Obj(_) = v
         && let Obj::Str(_) = ctx.vm.heap.get(v)
@@ -3046,5 +3063,5 @@ extern "rust-preserve-none" fn op_to_str<'a>(
         r!(stack, base, op_a(op)) = v;
         dispatch!(ctx, code, ip, stack, base, fuel)
     }
-    DispatchExit::SlowOp { ip: ip - 1, fuel }
+    exit_with(ctx, DispatchExit::SlowOp { ip: ip - 1, fuel })
 }

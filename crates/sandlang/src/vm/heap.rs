@@ -294,6 +294,46 @@ impl Heap {
         self.alloc(Obj::List(items))
     }
 
+    /// Allocates a new list copied from `items`.
+    #[inline(never)]
+    pub fn new_list_from_slice(&mut self, items: &[VmValue]) -> VmValue {
+        self.alloc(Obj::List(items.to_vec()))
+    }
+
+    /// Allocates a new struct `def` with fields copied from `fields`.
+    #[inline(never)]
+    pub fn new_struct(&mut self, def: u32, fields: &[VmValue]) -> VmValue {
+        let items = self.box_values(fields);
+        self.alloc(Obj::Struct(def, items))
+    }
+
+    /// Stores `value` into field `idx` of struct `obj`. Returns `false` if `obj` is not a struct.
+    #[inline(never)]
+    pub fn set_struct_field(&mut self, obj: VmValue, idx: usize, value: VmValue) -> bool {
+        match self.get_mut_storing(obj, &[value]) {
+            Obj::Struct(_, fields) => {
+                fields[idx] = value;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Stores `value` into slot `at` of list `obj`. Returns `false` if `obj` is not a list or `at` is out of bounds.
+    #[inline(never)]
+    pub fn set_list_index(&mut self, obj: VmValue, at: usize, value: VmValue) -> bool {
+        let Some(list) = self.list_mut_storing(obj, at, value) else {
+            return false;
+        };
+        match list.get_mut(at) {
+            Some(slot) => {
+                *slot = value;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Builds a tuple from `items`. Uses [`VmValue::Pair`] if `items` is an
     /// inline pair of integers.
     pub fn new_tuple(&mut self, items: &[VmValue]) -> VmValue {

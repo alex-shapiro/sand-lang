@@ -781,8 +781,9 @@ impl Vm {
             let mut stack = std::mem::take(&mut fiber.stack);
             let exit = {
                 let packed_code: &[u64] = &packed[fiber.frames.last().unwrap().proto as usize];
-                let mut ctx = dispatch::DispatchCtx { vm: self, fiber, prog: &prog, packed: &packed, natives: &natives };
-                dispatch::enter(&mut ctx, packed_code, ip, &mut stack, base, fuel.left)
+                let mut ctx = dispatch::DispatchCtx { vm: self, fiber, prog: &prog, packed: &packed, natives: &natives, exit: None };
+                dispatch::enter(&mut ctx, packed_code, ip, &mut stack, base, fuel.left);
+                ctx.exit.unwrap()
             };
             fiber.stack = stack;
             let op = match exit {
@@ -813,11 +814,17 @@ impl Vm {
                     ip = limit_ip;
                     return self.limit_stop(fiber, ip, LimitKind::Memory);
                 }
-                dispatch::DispatchExit::NativeSlow { result, n, start, argc, slot, ip: call_ip, fuel_at_call } => {
+                dispatch::DispatchExit::NativeSlow { result, ip: call_ip, fuel_at_call } => {
                     let fr = *fiber.frames.last().unwrap();
                     code = &protos[fr.proto as usize].code;
                     base = fr.base as usize;
                     ip = call_ip;
+                    let (n, start, slot) = match code[call_ip - 1] {
+                        Op::CallNative { base: b, native } => (native, base + b as usize, base + b as usize),
+                        Op::CallNativeTo { base: b, dst, native } => (native as u32, base + b as usize, base + dst as usize),
+                        _ => unreachable!(),
+                    };
+                    let argc = prog.native_argc.get(n as usize).copied().unwrap_or(0) as usize;
                     let r = self.finish_native_call(&natives, fiber, n, start, argc, slot, call_ip, fuel_at_call, result);
                     fuel.left = self.meter.reload_interpreter_fuel();
                     match r {
