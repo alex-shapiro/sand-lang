@@ -422,13 +422,12 @@ impl<'a> CallContext<'a> {
     ///
     /// A terminal run ending from `callee` is recorded, returned from this and
     /// all later `call` or `step` calls, and applied after the native call returns.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `args.len()` exceeds 255.
+    /// Returns a `"limit"` error if `args.len()` exceeds 255.
     #[inline]
     pub fn call(&mut self, callee: VmValue, args: &[VmValue]) -> Result<VmValue, Fail> {
-        assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
+        if args.len() > MAX_CALLBACK_ARGS {
+            return Err(Fail::runtime_error("limit", format!("a callback takes at most {MAX_CALLBACK_ARGS} arguments")));
+        }
         if let Some(ending) = &self.run_ending {
             return Err(ending.clone().into());
         }

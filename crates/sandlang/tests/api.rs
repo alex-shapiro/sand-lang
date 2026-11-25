@@ -2296,6 +2296,17 @@ fn deep_structural_encode_and_decode_fit_on_a_small_stack() {
 }
 
 #[test]
+fn decoding_an_init_with_over_255_args_returns_a_limit_error() {
+    let params: String = (0..256).map(|i| format!("a{i}: int = 0")).collect::<Vec<_>>().join(", ");
+    let src = format!("import json\nstruct Big {{\n    x: int\n    fn init({params}) -> Big {{ Big(x: a0) }}\n}}\nlet _: Result<Big> = json.decode(\"{{}}\")");
+    let (res, _, _) = run_src(Config::new(), &src);
+    assert!(
+        matches!(&res, Err(Error::Runtime { message, .. }) if message.contains("at most 255 arguments")),
+        "expected callback argument limit error, got {res:?}"
+    );
+}
+
+#[test]
 fn host_functions_take_and_return_durations_and_never() {
     use jiff::SignedDuration;
     use sandlang::native::ty::Never;
