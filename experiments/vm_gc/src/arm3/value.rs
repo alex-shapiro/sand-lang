@@ -6,7 +6,8 @@ use super::codec::{DecoderObj, EncoderObj};
 use crate::shared::{Fail, Result, ShortStr, Tracker};
 use std::any::Any;
 use std::mem::size_of;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use parking_lot::{Mutex, MutexGuard};
+use std::sync::Arc;
 
 /// Bytes of the reference counts at the start of every `Arc` allocation.
 pub const ARC_COUNTS: usize = 2 * size_of::<usize>();
@@ -55,21 +56,17 @@ impl<T> Shared<T> {
     /// Locks the object, or fails if this thread already holds the lock.
     #[inline]
     pub fn lock(&self) -> Result<MutexGuard<'_, T>> {
-        match self.data.try_lock() {
-            Ok(guard) => Ok(guard),
-            Err(TryLockError::Poisoned(p)) => Ok(p.into_inner()),
-            Err(TryLockError::WouldBlock) => Err(Fail::error("value is in use by a native call")),
-        }
+        self.data.try_lock().ok_or_else(|| Fail::error("value is in use by a native call"))
     }
 
     /// Locks the object if no one holds the lock.
     #[inline]
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-        self.lock().ok()
+        self.data.try_lock()
     }
 
     pub fn into_inner(self) -> T {
-        self.data.into_inner().unwrap_or_else(|p| p.into_inner())
+        self.data.into_inner()
     }
 }
 

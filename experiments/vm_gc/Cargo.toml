@@ -9,6 +9,8 @@ publish = false
 
 [dependencies]
 itoa = "1"
+# Arm 3 mutexes: `std::sync::Mutex` allocates a pthread mutex on first lock on macOS.
+parking_lot = "0.12"
 ryu = "1"
 
 [[bin]]
