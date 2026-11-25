@@ -154,6 +154,27 @@ impl std::fmt::Debug for Value {
 }
 
 impl Value {
+    /// Returns whether the value owns no object.
+    #[inline(always)]
+    pub fn is_immediate(&self) -> bool {
+        matches!(self, Value::Unit | Value::None | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Tag(_) | Value::Short(_))
+    }
+
+    /// Clones the value. Copies an immediate without a call to `clone`.
+    #[inline(always)]
+    pub fn dup(&self) -> Value {
+        match self {
+            Value::Unit => Value::Unit,
+            Value::None => Value::None,
+            Value::Bool(b) => Value::Bool(*b),
+            Value::Int(i) => Value::Int(*i),
+            Value::Float(f) => Value::Float(*f),
+            Value::Tag(t) => Value::Tag(*t),
+            Value::Short(s) => Value::Short(*s),
+            other => other.clone(),
+        }
+    }
+
     /// Returns the text of a string value.
     #[inline]
     pub fn str(&self) -> Option<&str> {
@@ -197,6 +218,16 @@ impl Value {
                 _ => false,
             },
         }
+    }
+}
+
+/// Stores `v` in `slot`. Skips the drop of an immediate old value.
+#[inline(always)]
+pub fn store(slot: &mut Value, v: Value) {
+    if slot.is_immediate() {
+        std::mem::forget(std::mem::replace(slot, v));
+    } else {
+        *slot = v;
     }
 }
 

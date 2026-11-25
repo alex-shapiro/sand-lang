@@ -218,12 +218,12 @@ impl Vm {
 
     /// Collects garbage now.
     pub fn collect(&mut self) {
-        let Vm { heap, stack, frames, roots, async_roots, fibers, globals, consts, .. } = self;
+        let Vm { heap, stack, frames, roots, async_roots, fibers, globals, consts, program, .. } = self;
         heap.collect(|mark| {
-            mark.values(stack);
+            mark.values(live_registers(program, stack, frames));
             frames.iter().for_each(|f| mark.value(f.closure));
             for fiber in fibers.iter() {
-                mark.values(&fiber.stack);
+                mark.values(live_registers(program, &fiber.stack, &fiber.frames));
                 fiber.frames.iter().for_each(|f| mark.value(f.closure));
             }
             mark.values(roots);
@@ -484,14 +484,18 @@ impl Vm {
         }
         let regs = f.regs as usize;
         let depth = self.frames.len();
-        let base = self.stack.len();
+        let base = live_registers(&self.program, &self.stack, &self.frames).len();
         debug_assert!(args.len() <= STACK_SLACK);
-        self.stack.extend_from_slice(args);
+        // The stack slack holds the arguments without a reallocation, so
+        // they are on the stack before a collection can run.
+        if self.stack.len() < base + args.len() {
+            self.stack.resize(base + args.len(), Value::Unit);
+        }
+        self.stack[base..base + args.len()].copy_from_slice(args);
         self.sync_depth += 1;
         let result = self.enter(func, closure, base, regs).and_then(|_| self.execute(depth));
         self.sync_depth -= 1;
         self.frames.truncate(depth);
-        self.stack.truncate(base);
         match result? {
             Exit::Return(v) => Ok(v),
             Exit::Await => unreachable!("async natives fail inside synchronous calls"),
@@ -502,7 +506,9 @@ impl Vm {
     fn enter(&mut self, func: u16, closure: Value, base: usize, regs: usize) -> Result<()> {
         self.push_frame(Frame { func, base: base as u32, pc: 0, ret: 0, closure })?;
         self.ensure_stack(base + regs)?;
-        self.stack.resize(base + regs, Value::Unit);
+        if self.stack.len() < base + regs {
+            self.stack.resize(base + regs, Value::Unit);
+        }
         Ok(())
     }
 
@@ -680,9 +686,6 @@ impl Vm {
                         if self.frames.len() == entry_depth {
                             return Ok(Exit::Return(v));
                         }
-                        let caller = *self.frames.last().expect("a caller");
-                        let caller_top = caller.base as usize + program.funcs[caller.func as usize].regs as usize;
-                        self.stack.resize(caller_top, Value::Unit);
                         self.stack[frame.ret as usize] = v;
                         continue 'frame;
                     }
@@ -853,8 +856,9 @@ impl Vm {
         let base = caller_base + b as usize;
         self.push_frame(Frame { func, base: base as u32, pc: 0, ret: (caller_base + dst as usize) as u32, closure })?;
         self.ensure_stack(base + regs)?;
-        self.stack.truncate(base + argc as usize);
-        self.stack.resize(base + regs, Value::Unit);
+        if self.stack.len() < base + regs {
+            self.stack.resize(base + regs, Value::Unit);
+        }
         Ok(())
     }
 
@@ -1023,6 +1027,15 @@ impl Vm {
         self.heap.live_objects
     }
 
+}
+
+/// Returns the registers of every frame in `frames`. Registers above them
+/// may hold stale handles, so collections do not trace them. Registers of a
+/// frame may hold stale handles from an earlier frame, which collections
+/// keep alive until the frame overwrites them.
+fn live_registers<'a>(program: &Program, stack: &'a [Value], frames: &[Frame]) -> &'a [Value] {
+    let top = frames.last().map_or(0, |f| f.base as usize + program.funcs[f.func as usize].regs as usize);
+    &stack[..top.min(stack.len())]
 }
 
 #[cold]

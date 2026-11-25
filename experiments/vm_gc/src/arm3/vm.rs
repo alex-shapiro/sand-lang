@@ -268,12 +268,14 @@ impl Vm {
         }
         let regs = f.regs as usize;
         let depth = self.frames.len();
-        let base = self.stack.len();
+        let base = self.top();
         self.sync_depth += 1;
         let result = self.enter(func, closure, base, regs, args).and_then(|_| self.execute(depth));
         self.sync_depth -= 1;
         self.frames.truncate(depth);
-        self.stack.truncate(base);
+        // A failed call can leave deeper frames' registers behind.
+        let end = if result.is_ok() { base + regs } else { self.stack.len() };
+        release(&mut self.stack[base..end]);
         match result? {
             Exit::Return(v) => Ok(v),
             Exit::Await => unreachable!("async natives fail inside synchronous calls"),
@@ -284,9 +286,19 @@ impl Vm {
     fn enter(&mut self, func: u16, closure: Value, base: usize, regs: usize, args: &[Value]) -> Result<()> {
         self.ensure_stack(base + regs)?;
         self.push_frame(Frame { func, base: base as u32, pc: 0, ret: 0, closure })?;
-        self.stack.extend_from_slice(args);
-        self.stack.resize(base + regs, Value::Unit);
+        if self.stack.len() < base + regs {
+            self.stack.resize(base + regs, Value::Unit);
+        }
+        for (slot, arg) in self.stack[base..].iter_mut().zip(args) {
+            store(slot, arg.dup());
+        }
         Ok(())
+    }
+
+    /// Returns the end of the current frame's registers. Registers at and
+    /// above it hold no objects.
+    fn top(&self) -> usize {
+        self.frames.last().map_or(0, |f| f.base as usize + self.program.funcs[f.func as usize].regs as usize)
     }
 
     fn method_of(&self, receiver: &Value, method: u16) -> Result<u16> {
@@ -317,6 +329,12 @@ impl Vm {
                 ($r:expr) => {
                     self.stack[base + $r as usize]
                 };
+            }
+            macro_rules! set {
+                ($r:expr, $v:expr) => {{
+                    let v = $v;
+                    store(&mut reg!($r), v)
+                }};
             }
             macro_rules! int {
                 ($r:expr) => {
@@ -355,42 +373,45 @@ impl Vm {
                 let op = code[pc];
                 pc += 1;
                 match op {
-                    Op::Const { dst, idx } => reg!(dst) = self.consts[idx as usize].clone(),
-                    Op::Int { dst, value } => reg!(dst) = Value::Int(value as i64),
-                    Op::Unit { dst } => reg!(dst) = Value::Unit,
-                    Op::None { dst } => reg!(dst) = Value::None,
-                    Op::Bool { dst, value } => reg!(dst) = Value::Bool(value),
-                    Op::Tag { dst, tag } => reg!(dst) = Value::Tag(tag),
-                    Op::Move { dst, src } => reg!(dst) = reg!(src).clone(),
-                    Op::Add { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_add(int!(b)).ok_or_else(overflow)?),
-                    Op::Sub { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_sub(int!(b)).ok_or_else(overflow)?),
-                    Op::Mul { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_mul(int!(b)).ok_or_else(overflow)?),
-                    Op::Div { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_div(int!(b)).ok_or_else(div_error)?),
-                    Op::Rem { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_rem(int!(b)).ok_or_else(div_error)?),
-                    Op::FAdd { dst, a, b } => reg!(dst) = Value::Float(float!(a) + float!(b)),
-                    Op::FSub { dst, a, b } => reg!(dst) = Value::Float(float!(a) - float!(b)),
-                    Op::FMul { dst, a, b } => reg!(dst) = Value::Float(float!(a) * float!(b)),
-                    Op::ToFloat { dst, src } => reg!(dst) = Value::Float(int!(src) as f64),
+                    Op::Const { dst, idx } => set!(dst, self.consts[idx as usize].dup()),
+                    Op::Int { dst, value } => set!(dst, Value::Int(value as i64)),
+                    Op::Unit { dst } => set!(dst, Value::Unit),
+                    Op::None { dst } => set!(dst, Value::None),
+                    Op::Bool { dst, value } => set!(dst, Value::Bool(value)),
+                    Op::Tag { dst, tag } => set!(dst, Value::Tag(tag)),
+                    Op::Move { dst, src } => set!(dst, reg!(src).dup()),
+                    Op::Add { dst, a, b } => set!(dst, Value::Int(int!(a).checked_add(int!(b)).ok_or_else(overflow)?)),
+                    Op::Sub { dst, a, b } => set!(dst, Value::Int(int!(a).checked_sub(int!(b)).ok_or_else(overflow)?)),
+                    Op::Mul { dst, a, b } => set!(dst, Value::Int(int!(a).checked_mul(int!(b)).ok_or_else(overflow)?)),
+                    Op::Div { dst, a, b } => set!(dst, Value::Int(int!(a).checked_div(int!(b)).ok_or_else(div_error)?)),
+                    Op::Rem { dst, a, b } => set!(dst, Value::Int(int!(a).checked_rem(int!(b)).ok_or_else(div_error)?)),
+                    Op::FAdd { dst, a, b } => set!(dst, Value::Float(float!(a) + float!(b))),
+                    Op::FSub { dst, a, b } => set!(dst, Value::Float(float!(a) - float!(b))),
+                    Op::FMul { dst, a, b } => set!(dst, Value::Float(float!(a) * float!(b))),
+                    Op::ToFloat { dst, src } => set!(dst, Value::Float(int!(src) as f64)),
                     Op::Lt { dst, a, b } => {
-                        reg!(dst) = Value::Bool(match (&reg!(a), &reg!(b)) {
+                        let r = match (&reg!(a), &reg!(b)) {
                             (Value::Int(x), Value::Int(y)) => x < y,
                             (Value::Float(x), Value::Float(y)) => x < y,
                             _ => return Err(type_error("numbers")),
-                        })
+                        };
+                        set!(dst, Value::Bool(r))
                     }
                     Op::Le { dst, a, b } => {
-                        reg!(dst) = Value::Bool(match (&reg!(a), &reg!(b)) {
+                        let r = match (&reg!(a), &reg!(b)) {
                             (Value::Int(x), Value::Int(y)) => x <= y,
                             (Value::Float(x), Value::Float(y)) => x <= y,
                             _ => return Err(type_error("numbers")),
-                        })
+                        };
+                        set!(dst, Value::Bool(r))
                     }
-                    Op::Eq { dst, a, b } => reg!(dst) = Value::Bool(reg!(a).same(&reg!(b))),
+                    Op::Eq { dst, a, b } => set!(dst, Value::Bool(reg!(a).same(&reg!(b)))),
                     Op::Not { dst, src } => {
-                        reg!(dst) = match reg!(src) {
+                        let r = match reg!(src) {
                             Value::Bool(b) => Value::Bool(!b),
                             _ => return Err(type_error("bool")),
-                        }
+                        };
+                        set!(dst, r)
                     }
                     Op::Jump { target } => pc = target as usize,
                     Op::JumpIf { cond, target } => match reg!(cond) {
@@ -411,7 +432,7 @@ impl Vm {
                     Op::CallClosure { dst, callee, base: b, argc } => {
                         let Value::Closure(c) = &reg!(callee) else { return Err(type_error("closure")) };
                         let func = c.data.func;
-                        let closure = reg!(callee).clone();
+                        let closure = reg!(callee).dup();
                         save_pc!();
                         self.call_frame(func, closure, base, b, argc, dst)?;
                         continue 'frame;
@@ -426,7 +447,7 @@ impl Vm {
                         save_pc!();
                         let args = Args { base: base + b as usize, len: argc as usize };
                         match &natives[native as usize] {
-                            Native::Sync(f) => reg!(dst) = f(self, args)?,
+                            Native::Sync(f) => set!(dst, f(self, args)?),
                             Native::Async(f) => {
                                 if self.sync_depth > 0 {
                                     return Err(Fail::error("an async native cannot run inside a synchronous call"));
@@ -443,38 +464,34 @@ impl Vm {
                         if self.frames.len() == entry_depth {
                             return Ok(Exit::Return(v));
                         }
-                        let caller = self.frames.last().expect("a caller");
-                        let caller_top = caller.base as usize + program.funcs[caller.func as usize].regs as usize;
-                        // Drop every callee register, including those that
-                        // overlap the caller's argument area.
-                        self.stack.truncate(frame.base as usize);
-                        self.stack.resize(caller_top, Value::Unit);
-                        self.stack[frame.ret as usize] = v;
+                        let callee_top = frame.base as usize + program.funcs[frame.func as usize].regs as usize;
+                        release(&mut self.stack[frame.base as usize..callee_top]);
+                        store(&mut self.stack[frame.ret as usize], v);
                         continue 'frame;
                     }
                     Op::Closure { dst, func, base: b, count } => {
                         let bytes = Heap::frozen_size::<ClosureObj>(count as usize);
                         self.heap.reserve_container(bytes)?;
                         let captures = take_args!(b, count).into_boxed_slice();
-                        reg!(dst) = self.heap.insert_closure(func, captures, bytes);
+                        set!(dst, self.heap.insert_closure(func, captures, bytes));
                     }
                     Op::Capture { dst, idx } => {
                         let Value::Closure(c) = &self.frames.last().expect("a frame").closure else { return Err(type_error("closure")) };
-                        reg!(dst) = c.data.captures[idx as usize].clone();
+                        set!(dst, c.data.captures[idx as usize].dup());
                     }
                     Op::NewCell { dst, src } => {
                         let bytes = Heap::shared_size::<CellObj>(0);
                         self.heap.reserve_container(bytes)?;
-                        let v = reg!(src).clone();
-                        reg!(dst) = self.heap.insert_cell(v, bytes);
+                        let v = reg!(src).dup();
+                        set!(dst, self.heap.insert_cell(v, bytes));
                     }
                     Op::CellGet { dst, cell } => {
                         let Value::Cell(c) = &reg!(cell) else { return Err(type_error("cell")) };
                         let v = c.lock()?.0.clone();
-                        reg!(dst) = v;
+                        set!(dst, v);
                     }
                     Op::CellSet { cell, src } => {
-                        let v = reg!(src).clone();
+                        let v = reg!(src).dup();
                         let Value::Cell(c) = &reg!(cell) else { return Err(type_error("cell")) };
                         let old = std::mem::replace(&mut c.lock()?.0, v);
                         drop(old);
@@ -488,18 +505,18 @@ impl Vm {
                         };
                         self.heap.reserve_container(bytes)?;
                         let fields = take_args!(b, count).into_boxed_slice();
-                        reg!(dst) = self.heap.insert_struct(ty, fields, mutable, bytes);
+                        set!(dst, self.heap.insert_struct(ty, fields, mutable, bytes));
                     }
                     Op::Field { dst, obj, idx } => {
                         let v = match &reg!(obj) {
-                            Value::Struct(o) => o.data.fields[idx as usize].clone(),
+                            Value::Struct(o) => o.data.fields[idx as usize].dup(),
                             Value::MutStruct(o) => o.lock()?.fields[idx as usize].clone(),
                             _ => return Err(type_error("struct")),
                         };
-                        reg!(dst) = v;
+                        set!(dst, v);
                     }
                     Op::SetField { obj, idx, src } => {
-                        let v = reg!(src).clone();
+                        let v = reg!(src).dup();
                         let Value::MutStruct(o) = &reg!(obj) else { return Err(type_error("struct")) };
                         let old = std::mem::replace(&mut o.lock()?.fields[idx as usize], v);
                         drop(old);
@@ -508,7 +525,7 @@ impl Vm {
                         let bytes = Heap::frozen_size::<VariantObj>(count as usize);
                         self.heap.reserve_container(bytes)?;
                         let fields = take_args!(b, count).into_boxed_slice();
-                        reg!(dst) = self.heap.insert_variant(tag, fields, bytes);
+                        set!(dst, self.heap.insert_variant(tag, fields, bytes));
                     }
                     Op::VariantIndex { dst, src } => {
                         let tag = match &reg!(src) {
@@ -516,25 +533,25 @@ impl Vm {
                             Value::Variant(o) => o.data.tag,
                             _ => return Err(type_error("variant")),
                         };
-                        reg!(dst) = Value::Int(program.tags[tag as usize].index as i64);
+                        set!(dst, Value::Int(program.tags[tag as usize].index as i64));
                     }
                     Op::VariantField { dst, src, idx } => {
                         let Value::Variant(o) = &reg!(src) else { return Err(type_error("variant")) };
-                        reg!(dst) = o.data.fields[idx as usize].clone();
+                        set!(dst, o.data.fields[idx as usize].dup());
                     }
-                    Op::IsNone { dst, src } => reg!(dst) = Value::Bool(matches!(reg!(src), Value::None)),
+                    Op::IsNone { dst, src } => set!(dst, Value::Bool(matches!(reg!(src), Value::None))),
                     Op::List { dst, base: b, count } => {
                         let bytes = Heap::shared_size::<ListObj>(count as usize * size_of::<Value>());
                         self.heap.reserve_container(bytes)?;
                         let items = take_args!(b, count);
-                        reg!(dst) = self.heap.insert_list(items, bytes);
+                        set!(dst, self.heap.insert_list(items, bytes));
                     }
                     Op::ListWithCapacity { dst, cap } => {
                         let n = usize::try_from(int!(cap)).map_err(|_| type_error("capacity"))?;
-                        reg!(dst) = self.new_list_with_capacity(n)?;
+                        set!(dst, self.new_list_with_capacity(n)?);
                     }
                     Op::Push { list, src } => {
-                        let v = reg!(src).clone();
+                        let v = reg!(src).dup();
                         let Vm { stack, heap, .. } = self;
                         let Value::List(l) = &stack[base + list as usize] else { return Err(type_error("list")) };
                         list_push(heap, l, v)?;
@@ -542,16 +559,16 @@ impl Vm {
                     Op::Pop { dst, list } => {
                         let Value::List(l) = &reg!(list) else { return Err(type_error("list")) };
                         let v = l.lock()?.0.pop().unwrap_or(Value::None);
-                        reg!(dst) = v;
+                        set!(dst, v);
                     }
                     Op::Index { dst, list, idx } => {
                         let i = int!(idx);
                         let Value::List(l) = &reg!(list) else { return Err(type_error("list")) };
                         let v = usize::try_from(i).ok().and_then(|i| l.lock().ok()?.0.get(i).cloned()).ok_or_else(index_error)?;
-                        reg!(dst) = v;
+                        set!(dst, v);
                     }
                     Op::SetIndex { list, idx, src } => {
-                        let (i, v) = (int!(idx), reg!(src).clone());
+                        let (i, v) = (int!(idx), reg!(src).dup());
                         let Value::List(l) = &reg!(list) else { return Err(type_error("list")) };
                         let mut items = l.lock()?;
                         let slot = usize::try_from(i).ok().and_then(|i| items.0.get_mut(i)).ok_or_else(index_error)?;
@@ -567,15 +584,15 @@ impl Vm {
                             Value::Map(m) => m.lock()?.0.len(),
                             _ => return Err(type_error("list, map, or str")),
                         };
-                        reg!(dst) = Value::Int(n as i64);
+                        set!(dst, Value::Int(n as i64));
                     }
                     Op::Map { dst } => {
                         let bytes = Heap::shared_size::<MapObj>(0);
                         self.heap.reserve_container(bytes)?;
-                        reg!(dst) = self.heap.insert_map(Vec::new(), bytes);
+                        set!(dst, self.heap.insert_map(Vec::new(), bytes));
                     }
                     Op::MapSet { map, key, value } => {
-                        let (k, v) = (reg!(key).clone(), reg!(value).clone());
+                        let (k, v) = (reg!(key).dup(), reg!(value).dup());
                         let Vm { stack, heap, .. } = self;
                         let Value::Map(m) = &stack[base + map as usize] else { return Err(type_error("map")) };
                         map_set(heap, m, k, v)?;
@@ -584,7 +601,7 @@ impl Vm {
                         let Value::Map(m) = &reg!(map) else { return Err(type_error("map")) };
                         let key = &reg!(key);
                         let v = m.lock()?.0.iter().find(|(k, _)| k.same(key)).map_or(Value::None, |(_, v)| v.clone());
-                        reg!(dst) = v;
+                        set!(dst, v);
                     }
                     Op::MapKey { dst, map, idx } | Op::MapValue { dst, map, idx } => {
                         let i = int!(idx);
@@ -593,7 +610,7 @@ impl Vm {
                         let (k, v) = usize::try_from(i).ok().and_then(|i| entries.0.get(i)).ok_or_else(index_error)?;
                         let v = if matches!(op, Op::MapKey { .. }) { k.clone() } else { v.clone() };
                         drop(entries);
-                        reg!(dst) = v;
+                        set!(dst, v);
                     }
                     Op::Concat { dst, a, b } => {
                         let Vm { stack, heap, .. } = self;
@@ -609,11 +626,11 @@ impl Vm {
                                 Value::Str(Arc::new(LongStr::new(s.into_boxed_str(), heap.tracker.clone())))
                             }
                         };
-                        reg!(dst) = v;
+                        set!(dst, v);
                     }
                     Op::IntToStr { dst, src } => {
                         let i = int!(src);
-                        reg!(dst) = self.heap.new_str(itoa::Buffer::new().format(i))?;
+                        set!(dst, self.heap.new_str(itoa::Buffer::new().format(i))?);
                     }
                     Op::Repeat { dst, s, n } => {
                         let count = usize::try_from(int!(n)).map_err(|_| type_error("count"))?;
@@ -626,10 +643,10 @@ impl Vm {
                             heap.reserve(LongStr::size(len))?;
                             Value::Str(Arc::new(LongStr::new(text.repeat(count).into_boxed_str(), heap.tracker.clone())))
                         };
-                        reg!(dst) = v;
+                        set!(dst, v);
                     }
-                    Op::Global { dst, idx } => reg!(dst) = self.globals[idx as usize].clone(),
-                    Op::SetGlobal { idx, src } => self.globals[idx as usize] = reg!(src).clone(),
+                    Op::Global { dst, idx } => set!(dst, self.globals[idx as usize].dup()),
+                    Op::SetGlobal { idx, src } => self.globals[idx as usize] = reg!(src).dup(),
                 }
             }
         }
@@ -646,8 +663,9 @@ impl Vm {
         let base = caller_base + b as usize;
         self.ensure_stack(base + regs)?;
         self.push_frame(Frame { func, base: base as u32, pc: 0, ret: (caller_base + dst as usize) as u32, closure })?;
-        self.stack.truncate(base + argc as usize);
-        self.stack.resize(base + regs, Value::Unit);
+        if self.stack.len() < base + regs {
+            self.stack.resize(base + regs, Value::Unit);
+        }
         Ok(())
     }
 
@@ -778,6 +796,16 @@ impl Vm {
         let values = args.iter().map(|a| self.from_arg(a)).collect::<Result<Vec<_>>>()?;
         let v = self.call_function(func, Value::Unit, &values)?;
         Ok(self.to_host(&v))
+    }
+}
+
+/// Drops the objects in `regs`, leaving immediates in place.
+#[inline(always)]
+fn release(regs: &mut [Value]) {
+    for v in regs {
+        if !v.is_immediate() {
+            *v = Value::Unit;
+        }
     }
 }
 
