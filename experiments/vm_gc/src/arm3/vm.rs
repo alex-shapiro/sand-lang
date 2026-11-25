@@ -275,7 +275,7 @@ impl Vm {
         self.frames.truncate(depth);
         // A failed call can leave deeper frames' registers behind.
         let end = if result.is_ok() { base + regs } else { self.stack.len() };
-        release(&mut self.stack[base..end]);
+        clear_registers(&mut self.stack[base..end]);
         match result? {
             Exit::Return(v) => Ok(v),
             Exit::Await => unreachable!("async natives fail inside synchronous calls"),
@@ -295,8 +295,8 @@ impl Vm {
         Ok(())
     }
 
-    /// Returns the end of the current frame's registers. Registers at and
-    /// above it hold no objects.
+    /// Returns the end of the current frame's registers, where a callback
+    /// frame starts.
     fn top(&self) -> usize {
         self.frames.last().map_or(0, |f| f.base as usize + self.program.funcs[f.func as usize].regs as usize)
     }
@@ -471,7 +471,7 @@ impl Vm {
                             return Ok(Exit::Return(v));
                         }
                         let callee_top = frame.base as usize + program.funcs[frame.func as usize].regs as usize;
-                        release(&mut self.stack[frame.base as usize..callee_top]);
+                        clear_registers(&mut self.stack[frame.base as usize..callee_top]);
                         store(&mut self.stack[frame.ret as usize], v);
                         continue 'frame;
                     }
@@ -814,7 +814,7 @@ impl Vm {
 
 /// Drops the objects in `regs`, leaving immediates in place.
 #[inline(always)]
-fn release(regs: &mut [Value]) {
+fn clear_registers(regs: &mut [Value]) {
     for v in regs {
         if !v.is_immediate() {
             *v = Value::Unit;

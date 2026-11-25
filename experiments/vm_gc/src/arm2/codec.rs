@@ -16,18 +16,6 @@ use crate::shared::{BYTES_PER_FUEL, Fail, Result, text_fuel};
 use std::any::Any;
 use std::mem::size_of;
 
-/// The implementation of `method` for struct `ty`.
-#[inline(always)]
-fn struct_impl(p: &Program, ty: u16, method: u16) -> Option<u16> {
-    p.struct_methods[ty as usize][method as usize]
-}
-
-/// The implementation of `method` for enum `id`.
-#[inline(always)]
-fn enum_impl(p: &Program, id: u16, method: u16) -> Option<u16> {
-    p.enum_methods[id as usize][method as usize]
-}
-
 /// Reserves output capacity for `need` more bytes.
 #[inline]
 fn grow_output(vm: &mut Vm, out: &mut String, need: usize, gc: GcScope<'_, '_>) -> Result<()> {
@@ -112,7 +100,7 @@ fn encode_value<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program,
         RawValue::Int(i) => write(vm, cx, Event::Int(i), gc),
         RawValue::Float(f) => write(vm, cx, Event::Float(f), gc),
         RawValue::Short(s) => write(vm, cx, Event::Str(s.as_str()), gc),
-        RawValue::Tag(tag) => match enum_impl(p, p.tags[tag as usize].enum_id, ENCODE_METHOD) {
+        RawValue::Tag(tag) => match p.enum_method(p.tags[tag as usize].enum_id, ENCODE_METHOD) {
             Some(func) => encode_callback(vm, cx, func, v, gc),
             None => write(vm, cx, Event::Tag(&p.variant(tag).name), gc),
         },
@@ -120,14 +108,14 @@ fn encode_value<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program,
             Some(Obj::Str(_)) => write_heap_str(vm, cx, v, false, gc),
             Some(Obj::Struct { ty, .. }) => {
                 let ty = *ty;
-                match struct_impl(p, ty, ENCODE_METHOD) {
+                match p.struct_method(ty, ENCODE_METHOD) {
                     Some(func) => encode_callback(vm, cx, func, v, gc),
                     None => encode_struct(vm, cx, p, v, ty, gc),
                 }
             }
             Some(Obj::Variant { tag, .. }) => {
                 let tag = *tag;
-                match enum_impl(p, p.tags[tag as usize].enum_id, ENCODE_METHOD) {
+                match p.enum_method(p.tags[tag as usize].enum_id, ENCODE_METHOD) {
                     Some(func) => encode_callback(vm, cx, func, v, gc),
                     None => encode_variant(vm, cx, p, v, tag, gc),
                 }

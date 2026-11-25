@@ -1069,22 +1069,28 @@ impl Vm {
 
     /// Calls the function named `name` and converts its result.
     pub fn call_named(&mut self, name: &str, args: &[Arg]) -> Result<HostValue> {
-        let func = self.program.func(name).ok_or_else(|| Fail::error(format!("unknown function `{name}`")))?;
         self.stack_base = stack_address();
+        let v = self.with_named(name, args, |vm, func, values| vm.call_function(func, Value::Unit, values))?;
+        Ok(self.to_host(v))
+    }
+
+    /// Adds a fiber that runs the function named `name`.
+    pub fn spawn_named(&mut self, name: &str, args: &[Arg]) -> Result<()> {
+        self.with_named(name, args, |vm, func, values| vm.spawn(func, values))
+    }
+
+    /// Runs `f` on function `name` and `args` converted to rooted values.
+    fn with_named<T>(&mut self, name: &str, args: &[Arg], f: impl FnOnce(&mut Vm, u16, &[Value]) -> Result<T>) -> Result<T> {
+        let func = self.program.func(name).ok_or_else(|| Fail::error(format!("unknown function `{name}`")))?;
         let mark = self.roots.len();
         for a in args {
             let v = self.from_arg(a)?;
             self.push_root(v)?;
         }
         let values = self.roots[mark..].to_vec();
-        let result = self.call_function(func, Value::Unit, &values);
+        let result = f(self, func, &values);
         self.roots.truncate(mark);
-        Ok(self.to_host(result?))
-    }
-
-    /// Live object count.
-    pub fn live_objects(&self) -> usize {
-        self.heap.live_objects
+        result
     }
 }
 

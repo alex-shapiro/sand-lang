@@ -8,7 +8,7 @@ pub mod scope;
 use crate::arm1::vm::Vm;
 use crate::shared::isa::Program;
 use crate::shared::suite::{Arg, ArmEngine, HostConfig, HostValue, MemStats};
-use crate::shared::{Fail, Limits, Result};
+use crate::shared::{Limits, Result};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -45,16 +45,7 @@ impl ArmEngine for Engine {
     }
 
     fn spawn(&mut self, name: &str, args: &[Arg]) -> Result<()> {
-        let func = self.vm.program.func(name).ok_or_else(|| Fail::error(format!("unknown function `{name}`")))?;
-        let mark = self.vm.root_mark();
-        for a in args {
-            let v = self.vm.from_arg(a)?;
-            self.vm.push_root(v)?;
-        }
-        let values = self.vm.roots_from(mark).to_vec();
-        let result = self.vm.spawn(func, &values);
-        self.vm.truncate_roots(mark);
-        result
+        self.vm.spawn_named(name, args)
     }
 
     fn run_fibers(&mut self) -> impl Future<Output = Vec<Result<HostValue>>> + Send + '_ {

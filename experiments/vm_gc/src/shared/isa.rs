@@ -414,13 +414,13 @@ impl Program {
     }
 
     /// The implementation of `method` for struct `ty`.
-    #[inline]
+    #[inline(always)]
     pub fn struct_method(&self, ty: u16, method: u16) -> Option<u16> {
         self.struct_methods[ty as usize][method as usize]
     }
 
     /// The implementation of `method` for enum `id`.
-    #[inline]
+    #[inline(always)]
     pub fn enum_method(&self, id: u16, method: u16) -> Option<u16> {
         self.enum_methods[id as usize][method as usize]
     }

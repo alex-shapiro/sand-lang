@@ -33,11 +33,12 @@ groups = {
     "arm1 core (heap, vm, codec)": [
         "arm1/heap.rs",
         "arm1/vm.rs",
+        "arm1/codec_objects.rs",
         "arm1/codec.rs",
         "arm1/mod.rs",
     ],
     "arm1 host (B6, B8)": ["arm1/host.rs"],
-    "arm2 core (arm1 heap and vm + scope, codec)": ["arm1/heap.rs", "arm1/vm.rs"]
+    "arm2 core (arm1 heap, vm, and codec objects + scope, codec)": ["arm1/heap.rs", "arm1/vm.rs", "arm1/codec_objects.rs"]
     + [
         str(p.relative_to(src))
         for p in sorted((src / "arm2").glob("*.rs"))

@@ -327,8 +327,7 @@ struct DecodeCx<R: 'static> {
 
 /// Decodes `text` as `program.types[ty]` with `reader`.
 pub fn decode_with<R: FormatReader>(vm: &mut Vm, reader: &'static R, text: &Value, ty: u16) -> Result<Value> {
-    let input = text.clone();
-    let src = input.str().ok_or_else(|| type_error("str"))?;
+    let src = text.str().ok_or_else(|| type_error("str"))?;
     let program = vm.program.clone();
     let ty = program.types.get(ty as usize).ok_or_else(|| type_error("type id"))?;
     let mut cx = DecodeCx { reader, input: text.clone(), pos: 0, charged: 0, scratch: String::new(), decoder: None };

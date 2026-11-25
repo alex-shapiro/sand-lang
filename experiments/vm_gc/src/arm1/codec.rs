@@ -7,6 +7,7 @@
 //! a decode through its rooted string handle and a byte offset, and they
 //! root every container that they walk or build.
 
+pub use super::codec_objects::*;
 use super::heap::{Handle, Obj, Value};
 use super::vm::{Args, NativeModule, Vm, type_error};
 use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, absent_fields, all_fields, charge_input, find_field};
@@ -15,65 +16,6 @@ use crate::shared::json::{Json, JsonWriter};
 use crate::shared::{BYTES_PER_FUEL, Fail, Result, SHORT_STR_MAX, ShortStr, text_fuel};
 use std::any::Any;
 use std::mem::size_of;
-
-/// Runs a nested encode for an `Encoder` of one format.
-pub type EncodeWalk = fn(&mut Vm, Value, Value) -> Result<()>;
-/// Runs a nested decode of `program.types[ty]` for a `Decoder` of one format.
-pub type DecodeWalk = fn(&mut Vm, Value, u16) -> Result<Value>;
-
-/// Format state of an encode: the writer and its output.
-pub struct EncodeState<W> {
-    pub writer: W,
-    pub out: String,
-}
-
-/// The object-safe view of an [`EncodeState`] for Sand `Encoder` methods.
-pub trait DynEncodeState: Any + Send {
-    fn write(&mut self, event: Event<'_>);
-    fn max_len(&self, event: &Event<'_>, text_len: usize) -> usize;
-    fn out(&mut self) -> &mut String;
-}
-
-impl<W: FormatWriter> DynEncodeState for EncodeState<W> {
-    fn write(&mut self, event: Event<'_>) {
-        self.writer.write(&mut self.out, event)
-    }
-    fn max_len(&self, event: &Event<'_>, text_len: usize) -> usize {
-        self.writer.max_len(event, text_len)
-    }
-    fn out(&mut self) -> &mut String {
-        &mut self.out
-    }
-}
-
-/// The Sand `Encoder`: holds the format state while a callback runs.
-pub struct EncoderObj {
-    pub state: Option<Box<dyn DynEncodeState>>,
-    pub walk: EncodeWalk,
-}
-
-impl EncoderObj {
-    pub fn size(&self) -> usize {
-        size_of::<EncoderObj>()
-    }
-}
-
-/// The Sand `Decoder`: holds the input and position while a callback runs.
-pub struct DecoderObj {
-    pub input: Value,
-    pub pos: usize,
-    /// The input position up to which the decode has charged fuel.
-    pub charged: usize,
-    pub scratch: String,
-    pub reader: &'static dyn FormatReader,
-    pub walk: DecodeWalk,
-}
-
-impl DecoderObj {
-    pub fn size(&self) -> usize {
-        size_of::<DecoderObj>()
-    }
-}
 
 /// Reserves output capacity for `need` more bytes.
 #[inline]
@@ -128,7 +70,8 @@ fn write_heap_str<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, v: Value, 
     Ok(())
 }
 
-/// Encodes `v` with `writer` and returns the output as a Sand string.
+/// Encodes `v` with `writer` and returns the output as a Sand string. The
+/// caller must root `v`.
 pub fn encode_with<W: FormatWriter>(vm: &mut Vm, writer: W, v: Value) -> Result<Value> {
     vm.reserve(size_of::<EncodeState<W>>())?;
     // The root slot of the `Encoder` object that the first callback creates.
@@ -352,7 +295,7 @@ struct DecodeCx<R: 'static> {
     decoder: usize,
 }
 
-/// Decodes `text` as `program.types[ty]` with `reader`.
+/// Decodes `text` as `program.types[ty]` with `reader`. The caller must root `text`.
 pub fn decode_with<R: FormatReader>(vm: &mut Vm, reader: &'static R, text: Value, ty: u16) -> Result<Value> {
     vm.str(&text)?;
     let program = vm.program.clone();
@@ -541,9 +484,7 @@ fn decode_enum<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, p: &Program, 
             vm.insert(Obj::Variant { tag: variant.tag, fields })
         }
     };
-    let mark = vm.push_root(v)?;
     cx.reader.close_variant(src!(vm, cx), &mut cx.pos)?;
-    vm.truncate_roots(mark);
     Ok(v)
 }
 
