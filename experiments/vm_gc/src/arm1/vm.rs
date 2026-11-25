@@ -3,7 +3,7 @@
 use super::heap::{Heap, HostObject, Obj, SLOT_BYTES, Value};
 use crate::shared::isa::{Const, Op, Program};
 use crate::shared::suite::{Arg, HostValue};
-use crate::shared::{Fail, Limits, Result, ShortStr, check_stack, stack_address};
+use crate::shared::{Fail, Limits, Result, ShortStr, check_stack, stack_address, text_fuel};
 use std::future::Future;
 use std::mem::size_of;
 use std::pin::Pin;
@@ -619,7 +619,11 @@ impl Vm {
                             _ => return Err(type_error("numbers")),
                         })
                     }
-                    Op::Eq { dst, a, b } => reg!(dst) = Value::Bool(self.values_eq(&reg!(a), &reg!(b))),
+                    Op::Eq { dst, a, b } => {
+                        let (x, y) = (reg!(a), reg!(b));
+                        let eq = if matches!(x, Value::Obj(_)) || matches!(y, Value::Obj(_)) { self.objects_eq(x, y)? } else { x == y };
+                        reg!(dst) = Value::Bool(eq);
+                    }
                     Op::Not { dst, src } => {
                         reg!(dst) = match reg!(src) {
                             Value::Bool(b) => Value::Bool(!b),
@@ -800,6 +804,9 @@ impl Vm {
                     Op::MapGet { dst, map, key } => {
                         let key = reg!(key);
                         let Obj::Map(entries) = self.heap.get(handle!(map)) else { return Err(type_error("map")) };
+                        let scan = text_fuel(entries.len());
+                        self.charge(scan)?;
+                        let Obj::Map(entries) = self.heap.get(handle!(map)) else { unreachable!() };
                         reg!(dst) = entries.iter().find(|(k, _)| self.values_eq(k, &key)).map_or(Value::None, |(_, v)| *v);
                     }
                     Op::MapKey { dst, map, idx } | Op::MapValue { dst, map, idx } => {
@@ -819,6 +826,7 @@ impl Vm {
                     Op::Repeat { dst, s, n } => {
                         let count = usize::try_from(int!(n)).map_err(|_| type_error("count"))?;
                         let len = self.str(&reg!(s))?.len().saturating_mul(count);
+                        self.charge(text_fuel(len))?;
                         if len <= crate::shared::SHORT_STR_MAX {
                             let text = self.str(&reg!(s))?.repeat(count);
                             reg!(dst) = Value::Short(ShortStr::new(&text).expect("short"));
@@ -858,6 +866,7 @@ impl Vm {
             return Ok(Value::Short(short));
         }
         let len = self.str(&a)?.len() + self.str(&b)?.len();
+        self.charge(text_fuel(len))?;
         if let Some(short) = ShortStr::concat(self.str(&a)?, self.str(&b)?) {
             return Ok(Value::Short(short));
         }
@@ -878,9 +887,26 @@ impl Vm {
         self.stack[start..end].fill(Value::Unit);
     }
 
+    /// Compares two values of which one or both are heap handles, and charges
+    /// fuel for comparing long strings.
+    #[inline(never)]
+    fn objects_eq(&mut self, a: Value, b: Value) -> Result<bool> {
+        if a == b {
+            return Ok(true);
+        }
+        let (Some(x), Some(y)) = (self.heap.str(&a), self.heap.str(&b)) else { return Ok(false) };
+        let scan = text_fuel(x.len().min(y.len()));
+        let eq = x == y;
+        self.charge(scan)?;
+        Ok(eq)
+    }
+
     fn map_set(&mut self, map: Value, key: Value, value: Value) -> Result<()> {
         let Value::Obj(h) = map else { return Err(type_error("map")) };
         let Obj::Map(entries) = self.heap.get(h) else { return Err(type_error("map")) };
+        let scan = text_fuel(entries.len());
+        self.charge(scan)?;
+        let Obj::Map(entries) = self.heap.get(h) else { unreachable!() };
         if let Some(i) = entries.iter().position(|(k, _)| self.values_eq(k, &key)) {
             let Obj::Map(entries) = self.heap.get_mut(h) else { unreachable!() };
             entries[i].1 = value;

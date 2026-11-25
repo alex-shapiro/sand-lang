@@ -9,10 +9,10 @@
 use super::heap::Heap;
 use super::value::*;
 use super::vm::{Args, NativeModule, Vm, type_error};
-use crate::shared::format::{Event, FormatReader, FormatWriter, find_field};
+use crate::shared::format::{Event, FormatReader, FormatWriter, charge_input, find_field};
 use crate::shared::isa::{DECODE_METHOD, ENCODE_METHOD, Program, Ty};
 use crate::shared::json::{Json, JsonWriter};
-use crate::shared::{Fail, Result};
+use crate::shared::{BYTES_PER_FUEL, Fail, Result, text_fuel};
 use std::any::Any;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -57,6 +57,8 @@ pub struct EncoderObj {
 pub struct DecoderObj {
     input: Value,
     pos: usize,
+    /// The input position up to which the decode has charged fuel.
+    charged: usize,
     scratch: String,
     reader: &'static dyn FormatReader,
     walk: DecodeWalk,
@@ -82,6 +84,9 @@ struct EncodeCx<W> {
 
 #[inline(always)]
 fn write<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, event: Event<'_>) -> Result<()> {
+    if event.text_len() >= BYTES_PER_FUEL {
+        vm.charge(text_fuel(event.text_len()))?;
+    }
     let state = cx.state.as_deref_mut().expect("encode state");
     let need = state.writer.max_len(&event, event.text_len());
     grow_output(&mut vm.heap, &mut state.out, need)?;
@@ -279,6 +284,7 @@ fn encoder_text(vm: &mut Vm, args: Args, event: for<'a> fn(&'a str) -> Event<'a>
     let text = vm.arg(args, 1).clone();
     with_encoder(vm, args, |vm, state| {
         let text = text.str().ok_or_else(|| type_error("str"))?;
+        vm.charge(text_fuel(text.len()))?;
         let need = state.max_len(&event(""), text.len());
         grow_output(&mut vm.heap, state.out(), need)?;
         state.write(event(text));
@@ -302,6 +308,8 @@ struct DecodeCx<R: 'static> {
     /// The input string, which keeps `src` alive.
     input: Value,
     pos: usize,
+    /// The input position up to which the decode has charged fuel.
+    charged: usize,
     scratch: String,
     /// The `Decoder` object, once a callback needs one.
     decoder: Option<Value>,
@@ -313,44 +321,57 @@ pub fn decode_with<R: FormatReader>(vm: &mut Vm, reader: &'static R, text: &Valu
     let src = input.str().ok_or_else(|| type_error("str"))?;
     let program = vm.program.clone();
     let ty = program.types.get(ty as usize).ok_or_else(|| type_error("type id"))?;
-    let mut cx = DecodeCx { reader, input: text.clone(), pos: 0, scratch: String::new(), decoder: None };
-    decode_value(vm, &mut cx, src, &program, ty)
+    let mut cx = DecodeCx { reader, input: text.clone(), pos: 0, charged: 0, scratch: String::new(), decoder: None };
+    let v = decode_value(vm, &mut cx, src, &program, ty)?;
+    cx.reader.end(src, &mut cx.pos)?;
+    charge_input(&mut vm.fuel, &mut cx.charged, cx.pos)?;
+    Ok(v)
 }
 
 fn decode_value<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, src: &str, p: &Program, mut ty: &Ty) -> Result<Value> {
     vm.charge(1)?;
+    charge_input(&mut vm.fuel, &mut cx.charged, cx.pos)?;
     loop {
-        return Ok(match ty {
-            Ty::Int => Value::Int(cx.reader.int(src, &mut cx.pos)?),
-            Ty::Float => Value::Float(cx.reader.float(src, &mut cx.pos)?),
-            Ty::Bool => Value::Bool(cx.reader.bool(src, &mut cx.pos)?),
-            Ty::Str => {
-                let span = cx.reader.str(src, &mut cx.pos, &mut cx.scratch)?;
-                vm.heap.new_str(span.resolve(src, &cx.scratch))?
-            }
+        return match ty {
             Ty::Option(inner) => {
                 if cx.reader.null(src, &mut cx.pos)? {
-                    Value::None
+                    Ok(Value::None)
                 } else {
                     ty = inner;
                     continue;
                 }
             }
-            Ty::List(item) => decode_list(vm, cx, src, p, item)?,
-            Ty::Map(value) => decode_map(vm, cx, src, p, value)?,
+            Ty::List(item) => decode_list(vm, cx, src, p, item),
+            Ty::Map(value) => decode_map(vm, cx, src, p, value),
             Ty::Struct(id) => match p.struct_method(*id, DECODE_METHOD) {
-                Some(func) => decode_callback(vm, cx, func)?,
+                Some(func) => decode_callback(vm, cx, func),
                 None => {
                     let fields = &p.structs[*id as usize].fields;
-                    decode_record(vm, cx, src, p, fields.iter().map(|f| (f.name.as_str(), &f.ty)), Record::Struct(*id))?
+                    decode_record(vm, cx, src, p, fields.iter().map(|f| (f.name.as_str(), &f.ty)), Record::Struct(*id))
                 }
             },
             Ty::Enum(id) => match p.enum_method(*id, DECODE_METHOD) {
-                Some(func) => decode_callback(vm, cx, func)?,
-                None => decode_enum(vm, cx, src, p, *id)?,
+                Some(func) => decode_callback(vm, cx, func),
+                None => decode_enum(vm, cx, src, p, *id),
             },
-        });
+            _ => decode_scalar(vm, cx, src, ty),
+        };
     }
+}
+
+/// Decodes an `int`, `float`, `bool`, or `str`. A separate function keeps
+/// the recursive path of [`decode_value`] small on the stack.
+#[inline(never)]
+fn decode_scalar<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, src: &str, ty: &Ty) -> Result<Value> {
+    Ok(match ty {
+        Ty::Int => Value::Int(cx.reader.int(src, &mut cx.pos)?),
+        Ty::Float => Value::Float(cx.reader.float(src, &mut cx.pos)?),
+        Ty::Bool => Value::Bool(cx.reader.bool(src, &mut cx.pos)?),
+        _ => {
+            let span = cx.reader.str(src, &mut cx.pos, &mut cx.scratch)?;
+            vm.heap.new_str(span.resolve(src, &cx.scratch))?
+        }
+    })
 }
 
 /// Pushes `v` onto `items`, reserving tracked bytes when the buffer grows.
@@ -450,7 +471,10 @@ fn decode_record<'p, R: FormatReader>(
                     values[i] = decode_value(vm, cx, src, p, ty)?;
                     hint = i + 1;
                 }
-                None => cx.reader.skip(src, &mut cx.pos, &mut vm.fuel)?,
+                None => {
+                    cx.reader.skip(src, &mut cx.pos)?;
+                    charge_input(&mut vm.fuel, &mut cx.charged, cx.pos)?;
+                }
             }
         }
         for (value, (name, ty)) in values.iter_mut().zip(fields) {
@@ -527,7 +551,14 @@ fn decode_callback<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, func: u16
         None => {
             let bytes = Heap::shared_size::<DecoderObj>(0);
             vm.heap.reserve_container(bytes)?;
-            let obj = DecoderObj { input: cx.input.clone(), pos: 0, scratch: String::new(), reader: cx.reader, walk: decode_entry::<R> };
+            let obj = DecoderObj {
+                input: cx.input.clone(),
+                pos: 0,
+                charged: 0,
+                scratch: String::new(),
+                reader: cx.reader,
+                walk: decode_entry::<R>,
+            };
             let d = vm.heap.insert_decoder(obj, bytes);
             cx.decoder = Some(d.clone());
             d
@@ -535,12 +566,12 @@ fn decode_callback<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, func: u16
     };
     {
         let mut d = decoder_obj(&decoder)?.lock()?;
-        d.pos = cx.pos;
+        (d.pos, d.charged) = (cx.pos, cx.charged);
         d.scratch = std::mem::take(&mut cx.scratch);
     }
     let result = vm.call_function(func, Value::Unit, std::slice::from_ref(&decoder));
     let mut d = decoder_obj(&decoder)?.lock()?;
-    cx.pos = d.pos;
+    (cx.pos, cx.charged) = (d.pos, d.charged);
     cx.scratch = std::mem::take(&mut d.scratch);
     result
 }
@@ -554,18 +585,18 @@ fn decoder_obj(v: &Value) -> Result<&Arc<Shared<DecoderObj>>> {
 
 /// Decodes a nested value from a `Decoder` in Sand code.
 fn decode_entry<R: FormatReader>(vm: &mut Vm, decoder: &Value, ty: u16) -> Result<Value> {
-    let (input, reader, pos, scratch) = {
+    let (input, reader, pos, charged, scratch) = {
         let mut d = decoder_obj(decoder)?.lock()?;
-        (d.input.clone(), d.reader, d.pos, std::mem::take(&mut d.scratch))
+        (d.input.clone(), d.reader, d.pos, d.charged, std::mem::take(&mut d.scratch))
     };
     let reader: &'static R = (reader as &dyn Any).downcast_ref().ok_or_else(|| Fail::error("decoder format mismatch"))?;
     let src = input.str().ok_or_else(|| type_error("str"))?;
-    let mut cx = DecodeCx { reader, input: input.clone(), pos, scratch, decoder: Some(decoder.clone()) };
+    let mut cx = DecodeCx { reader, input: input.clone(), pos, charged, scratch, decoder: Some(decoder.clone()) };
     let program = vm.program.clone();
     let ty = program.types.get(ty as usize).ok_or_else(|| type_error("type id"))?;
     let result = decode_value(vm, &mut cx, src, &program, ty);
     let mut d = decoder_obj(decoder)?.lock()?;
-    d.pos = cx.pos;
+    (d.pos, d.charged) = (cx.pos, cx.charged);
     d.scratch = cx.scratch;
     result
 }
@@ -581,7 +612,9 @@ fn with_decoder<T>(
     let mut d = decoder_obj(&decoder)?.lock()?;
     let d = &mut *d;
     let src = d.input.str().ok_or_else(|| type_error("str"))?;
-    f(vm, d.reader, src, &mut d.pos, &mut d.scratch)
+    let result = f(vm, d.reader, src, &mut d.pos, &mut d.scratch);
+    charge_input(&mut vm.fuel, &mut d.charged, d.pos)?;
+    result
 }
 
 /// The `json`, `enc`, `dec`, and `vm` native modules.
@@ -663,7 +696,7 @@ pub fn core_module() -> NativeModule {
         })
     });
     m.function("dec.close_variant", |vm, args| with_decoder(vm, args, |_, r, src, pos, _| r.close_variant(src, pos)).map(|_| Value::Unit));
-    m.function("dec.skip", |vm, args| with_decoder(vm, args, |vm, r, src, pos, _| r.skip(src, pos, &mut vm.fuel)).map(|_| Value::Unit));
+    m.function("dec.skip", |vm, args| with_decoder(vm, args, |_, r, src, pos, _| r.skip(src, pos)).map(|_| Value::Unit));
     m.function("dec.value", |vm, args| {
         let decoder = vm.arg(args, 0).clone();
         let ty = int_arg(vm, args, 1)? as u16;

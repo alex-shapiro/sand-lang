@@ -153,6 +153,19 @@ pub fn b1_fuel<E: ArmEngine>() {
     assert_eq!(e.call("decode_small", &[Arg::Str(junk.clone())]), Err(Fail::OutOfFuel));
     let mut e: E = engine(Variant::Structural, Limits::default());
     assert_eq!(e.call("decode_small", &[Arg::Str(junk)]), Ok(HostValue::Int(7)));
+
+    // Native work costs fuel per input byte, not per value: many short
+    // unknown keys, long whitespace, and long strings all exhaust it.
+    let keys: String = (0..100_000).map(|i| format!("\"k{i}\":0,")).collect();
+    let spaces = format!("{}{{\"a\": 7}}", " ".repeat(2_000_000));
+    for input in [format!("{{{keys}\"a\": 7}}"), spaces] {
+        let mut e: E = engine(Variant::Structural, Limits { fuel: 10_000, ..Limits::default() });
+        assert_eq!(e.call("decode_small", &[Arg::Str(input.clone())]), Err(Fail::OutOfFuel));
+        let mut e: E = engine(Variant::Structural, Limits::default());
+        assert_eq!(e.call("decode_small", &[Arg::Str(input)]), Ok(HostValue::Int(7)));
+    }
+    let mut e: E = engine(Variant::Structural, Limits { fuel: 10_000, ..Limits::default() });
+    assert_eq!(e.call("huge_string", &[int(16 << 20)]), Err(Fail::OutOfFuel));
 }
 
 // -------------------------------------------------------------------------

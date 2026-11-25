@@ -3,7 +3,7 @@
 //! A format implements [`FormatWriter`] and [`FormatReader`]. Neither trait
 //! sees VM values, so a format works unchanged with every arm.
 
-use super::{Fail, Result};
+use super::{BYTES_PER_FUEL, Fail, Result, charge};
 
 /// One write to an `Encoder`.
 #[derive(Clone, Copy, Debug)]
@@ -88,8 +88,23 @@ pub trait FormatReader: std::any::Any + Send + Sync {
     fn open_variant(&self, src: &str, pos: &mut usize, scratch: &mut String) -> Result<(StrSpan, bool)>;
     /// Ends a variant that has a payload.
     fn close_variant(&self, src: &str, pos: &mut usize) -> Result<()>;
-    /// Skips one value and charges fuel for the scanned bytes.
-    fn skip(&self, src: &str, pos: &mut usize, fuel: &mut u64) -> Result<()>;
+    /// Skips one value.
+    fn skip(&self, src: &str, pos: &mut usize) -> Result<()>;
+    /// Fails unless only whitespace follows `pos`.
+    fn end(&self, src: &str, pos: &mut usize) -> Result<()>;
+}
+
+/// Charges fuel for the input bytes from `charged` to `pos`, then moves
+/// `charged` forward by the bytes it charged. A decode walker calls it as it
+/// moves through its input, so formats do not meter their own loops.
+#[inline(always)]
+pub fn charge_input(fuel: &mut u64, charged: &mut usize, pos: usize) -> Result<()> {
+    let units = (pos - *charged) / BYTES_PER_FUEL;
+    if units > 0 {
+        charge(fuel, units as u64)?;
+        *charged += units * BYTES_PER_FUEL;
+    }
+    Ok(())
 }
 
 #[cold]

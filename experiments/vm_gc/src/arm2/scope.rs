@@ -24,7 +24,7 @@
 use crate::arm1::codec::{DecoderObj, EncoderObj};
 use crate::arm1::heap::{HostObject, Obj, Value as RawValue};
 use crate::arm1::vm::{self as raw, Args, AsyncRoot};
-use crate::shared::format::{FormatReader, StrSpan};
+use crate::shared::format::{FormatReader, StrSpan, charge_input};
 use crate::shared::isa::Program;
 use crate::shared::{Fail, Result};
 use std::future::Future;
@@ -226,6 +226,12 @@ impl<'v> Vm<'v> {
     #[inline(always)]
     pub fn charge(&mut self, units: u64) -> Result<()> {
         self.raw.charge(units)
+    }
+
+    /// Charges fuel for the input bytes from `charged` to `pos`.
+    #[inline(always)]
+    pub fn charge_input(&mut self, charged: &mut usize, pos: usize) -> Result<()> {
+        charge_input(&mut self.raw.fuel, charged, pos)
     }
 
     #[inline(always)]
@@ -449,16 +455,11 @@ impl<'v> Vm<'v> {
         }
     }
 
-    /// Runs `f` on the text of the rooted string `input` and the engine fuel.
+    /// Runs `f` on the text of the rooted string `input`.
     #[inline(always)]
-    pub(super) fn with_input_and_fuel<'s, T>(
-        &mut self,
-        input: Scoped<'s>,
-        _gc: NoGcScope<'_, 's>,
-        f: impl FnOnce(&str, &mut u64) -> T,
-    ) -> Result<T> {
+    pub(super) fn with_input<'s, T>(&mut self, input: Scoped<'s>, _gc: NoGcScope<'_, 's>, f: impl FnOnce(&str) -> T) -> Result<T> {
         let src = self.raw.heap.str(&input.raw).ok_or_else(|| raw::type_error("str"))?;
-        Ok(f(src, &mut self.raw.fuel))
+        Ok(f(src))
     }
 
     /// Runs the nested-encode entry that `encoder` stores.
@@ -478,15 +479,19 @@ impl<'v> Vm<'v> {
         &mut self,
         decoder: Value<'_>,
         gc: NoGcScope<'_, '_>,
-        f: impl FnOnce(&dyn FormatReader, &str, &mut usize, &mut String, &mut u64) -> Result<T>,
+        f: impl FnOnce(&dyn FormatReader, &str, &mut usize, &mut String) -> Result<T>,
     ) -> Result<T> {
         let d = self.decoder_obj(decoder, gc)?;
         let (input, reader, mut pos, mut scratch) = (d.input, d.reader, d.pos, std::mem::take(&mut d.scratch));
         let src = self.raw.heap.str(&input).ok_or_else(|| raw::type_error("str"))?;
-        let result = f(reader, src, &mut pos, &mut scratch, &mut self.raw.fuel);
+        let result = f(reader, src, &mut pos, &mut scratch);
         let d = self.decoder_obj(decoder, gc)?;
         d.pos = pos;
         d.scratch = scratch;
+        let mut charged = d.charged;
+        let charge = charge_input(&mut self.raw.fuel, &mut charged, pos);
+        self.decoder_obj(decoder, gc)?.charged = charged;
+        charge?;
         result
     }
 

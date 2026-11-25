@@ -9,10 +9,10 @@
 
 use super::heap::{Handle, Obj, Value};
 use super::vm::{Args, NativeModule, Vm, type_error};
-use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, find_field};
+use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, charge_input, find_field};
 use crate::shared::isa::{DECODE_METHOD, ENCODE_METHOD, Program, Ty};
 use crate::shared::json::{Json, JsonWriter};
-use crate::shared::{Fail, Result, SHORT_STR_MAX, ShortStr};
+use crate::shared::{BYTES_PER_FUEL, Fail, Result, SHORT_STR_MAX, ShortStr, text_fuel};
 use std::any::Any;
 use std::mem::size_of;
 
@@ -62,6 +62,8 @@ impl EncoderObj {
 pub struct DecoderObj {
     pub input: Value,
     pub pos: usize,
+    /// The input position up to which the decode has charged fuel.
+    pub charged: usize,
     pub scratch: String,
     pub reader: &'static dyn FormatReader,
     pub walk: DecodeWalk,
@@ -100,6 +102,9 @@ impl<W: FormatWriter> EncodeCx<W> {
 
 #[inline(always)]
 fn write<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, event: Event<'_>) -> Result<()> {
+    if event.text_len() >= BYTES_PER_FUEL {
+        vm.charge(text_fuel(event.text_len()))?;
+    }
     let state = cx.state();
     let need = state.writer.max_len(&event, event.text_len());
     grow_output(vm, &mut state.out, need)?;
@@ -112,6 +117,7 @@ fn write<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, event: Event<'_>) -
 #[inline]
 fn write_heap_str<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, v: Value, key: bool) -> Result<()> {
     let len = vm.str(&v)?.len();
+    vm.charge(text_fuel(len))?;
     let probe = if key { Event::Key("") } else { Event::Str("") };
     let state = cx.state();
     let need = state.writer.max_len(&probe, len);
@@ -315,6 +321,7 @@ fn encoder_text(vm: &mut Vm, args: Args, event: for<'a> fn(&'a str) -> Event<'a>
     let (encoder, text) = (vm.arg(args, 0), vm.arg(args, 1));
     with_encoder(vm, encoder, |vm, state| {
         let len = vm.str(&text)?.len();
+        vm.charge(text_fuel(len))?;
         let need = state.max_len(&event(""), len);
         grow_output(vm, state.out(), need)?;
         state.write(event(vm.str(&text)?));
@@ -338,6 +345,8 @@ struct DecodeCx<R: 'static> {
     /// The rooted input string.
     input: Value,
     pos: usize,
+    /// The input position up to which the decode has charged fuel.
+    charged: usize,
     scratch: String,
     /// Root index of the `Decoder` object, or of `Unit` until a callback needs one.
     decoder: usize,
@@ -350,8 +359,11 @@ pub fn decode_with<R: FormatReader>(vm: &mut Vm, reader: &'static R, text: Value
     let ty = program.types.get(ty as usize).ok_or_else(|| type_error("type id"))?;
     // The root slot of the `Decoder` object that the first callback creates.
     let decoder = vm.push_root(Value::Unit)?;
-    let mut cx = DecodeCx { reader, input: text, pos: 0, scratch: String::new(), decoder };
-    decode_value(vm, &mut cx, &program, ty)
+    let mut cx = DecodeCx { reader, input: text, pos: 0, charged: 0, scratch: String::new(), decoder };
+    let v = decode_value(vm, &mut cx, &program, ty)?;
+    cx.reader.end(vm.heap.str(&cx.input).expect("decode input"), &mut cx.pos)?;
+    charge_input(&mut vm.fuel, &mut cx.charged, cx.pos)?;
+    Ok(v)
 }
 
 macro_rules! src {
@@ -362,38 +374,48 @@ macro_rules! src {
 
 fn decode_value<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, p: &Program, mut ty: &Ty) -> Result<Value> {
     vm.charge(1)?;
+    charge_input(&mut vm.fuel, &mut cx.charged, cx.pos)?;
     loop {
-        return Ok(match ty {
-            Ty::Int => Value::Int(cx.reader.int(src!(vm, cx), &mut cx.pos)?),
-            Ty::Float => Value::Float(cx.reader.float(src!(vm, cx), &mut cx.pos)?),
-            Ty::Bool => Value::Bool(cx.reader.bool(src!(vm, cx), &mut cx.pos)?),
-            Ty::Str => {
-                let span = cx.reader.str(src!(vm, cx), &mut cx.pos, &mut cx.scratch)?;
-                new_str_from_span(vm, cx, span)?
-            }
+        return match ty {
             Ty::Option(inner) => {
                 if cx.reader.null(src!(vm, cx), &mut cx.pos)? {
-                    Value::None
+                    Ok(Value::None)
                 } else {
                     ty = inner;
                     continue;
                 }
             }
-            Ty::List(item) => decode_list(vm, cx, p, item)?,
-            Ty::Map(value) => decode_map(vm, cx, p, value)?,
+            Ty::List(item) => decode_list(vm, cx, p, item),
+            Ty::Map(value) => decode_map(vm, cx, p, value),
             Ty::Struct(id) => match p.struct_method(*id, DECODE_METHOD) {
-                Some(func) => decode_callback(vm, cx, func)?,
+                Some(func) => decode_callback(vm, cx, func),
                 None => {
                     let fields = &p.structs[*id as usize].fields;
-                    decode_record(vm, cx, p, fields.iter().map(|f| (f.name.as_str(), &f.ty)), Record::Struct(*id))?
+                    decode_record(vm, cx, p, fields.iter().map(|f| (f.name.as_str(), &f.ty)), Record::Struct(*id))
                 }
             },
             Ty::Enum(id) => match p.enum_method(*id, DECODE_METHOD) {
-                Some(func) => decode_callback(vm, cx, func)?,
-                None => decode_enum(vm, cx, p, *id)?,
+                Some(func) => decode_callback(vm, cx, func),
+                None => decode_enum(vm, cx, p, *id),
             },
-        });
+            _ => decode_scalar(vm, cx, ty),
+        };
     }
+}
+
+/// Decodes an `int`, `float`, `bool`, or `str`. A separate function keeps
+/// the recursive path of [`decode_value`] small on the stack.
+#[inline(never)]
+fn decode_scalar<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, ty: &Ty) -> Result<Value> {
+    Ok(match ty {
+        Ty::Int => Value::Int(cx.reader.int(src!(vm, cx), &mut cx.pos)?),
+        Ty::Float => Value::Float(cx.reader.float(src!(vm, cx), &mut cx.pos)?),
+        Ty::Bool => Value::Bool(cx.reader.bool(src!(vm, cx), &mut cx.pos)?),
+        _ => {
+            let span = cx.reader.str(src!(vm, cx), &mut cx.pos, &mut cx.scratch)?;
+            new_str_from_span(vm, cx, span)?
+        }
+    })
 }
 
 #[inline(never)]
@@ -464,7 +486,10 @@ fn decode_record<'p, R: FormatReader>(
                 vm.set_root(mark + i, v);
                 hint = i + 1;
             }
-            None => cx.reader.skip(src!(vm, cx), &mut cx.pos, &mut vm.fuel)?,
+            None => {
+                cx.reader.skip(src!(vm, cx), &mut cx.pos)?;
+                charge_input(&mut vm.fuel, &mut cx.charged, cx.pos)?;
+            }
         }
     }
     for (i, (name, ty)) in fields.enumerate() {
@@ -546,16 +571,16 @@ fn decode_callback<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, func: u16
     let mut decoder = vm.root(cx.decoder);
     if decoder == Value::Unit {
         vm.reserve_object(size_of::<DecoderObj>())?;
-        let obj = DecoderObj { input: cx.input, pos: 0, scratch: String::new(), reader: cx.reader, walk: decode_entry::<R> };
+        let obj = DecoderObj { input: cx.input, pos: 0, charged: 0, scratch: String::new(), reader: cx.reader, walk: decode_entry::<R> };
         decoder = vm.insert(Obj::Decoder(Box::new(obj)));
         vm.set_root(cx.decoder, decoder);
     }
     let d = decoder_obj(vm, decoder)?;
-    d.pos = cx.pos;
+    (d.pos, d.charged) = (cx.pos, cx.charged);
     d.scratch = std::mem::take(&mut cx.scratch);
     let result = vm.call_function(func, Value::Unit, &[decoder]);
     let d = decoder_obj(vm, decoder)?;
-    cx.pos = d.pos;
+    (cx.pos, cx.charged) = (d.pos, d.charged);
     cx.scratch = std::mem::take(&mut d.scratch);
     result
 }
@@ -573,32 +598,32 @@ fn decode_entry<R: FormatReader>(vm: &mut Vm, decoder: Value, ty: u16) -> Result
     let d = decoder_obj(vm, decoder)?;
     let input = d.input;
     let reader: &'static R = (d.reader as &dyn Any).downcast_ref().ok_or_else(|| Fail::error("decoder format mismatch"))?;
-    let (pos, scratch) = (d.pos, std::mem::take(&mut d.scratch));
-    let mut cx = DecodeCx { reader, input, pos, scratch, decoder: vm.push_root(decoder)? };
+    let (pos, charged, scratch) = (d.pos, d.charged, std::mem::take(&mut d.scratch));
+    let mut cx = DecodeCx { reader, input, pos, charged, scratch, decoder: vm.push_root(decoder)? };
     let program = vm.program.clone();
     let ty = program.types.get(ty as usize).ok_or_else(|| type_error("type id"))?;
     let result = decode_value(vm, &mut cx, &program, ty);
     let d = decoder_obj(vm, decoder)?;
-    d.pos = cx.pos;
+    (d.pos, d.charged) = (cx.pos, cx.charged);
     d.scratch = cx.scratch;
     result
 }
 
 /// Runs `f` on the input of `decoder` for a Sand `Decoder` method, then
 /// converts a string span result to a Sand string.
-fn with_decoder<T>(
-    vm: &mut Vm,
-    args: Args,
-    f: impl FnOnce(&dyn FormatReader, &str, &mut usize, &mut String, &mut u64) -> Result<T>,
-) -> Result<T> {
+fn with_decoder<T>(vm: &mut Vm, args: Args, f: impl FnOnce(&dyn FormatReader, &str, &mut usize, &mut String) -> Result<T>) -> Result<T> {
     let decoder = vm.arg(args, 0);
     let d = decoder_obj(vm, decoder)?;
     let (input, reader, mut pos, mut scratch) = (d.input, d.reader, d.pos, std::mem::take(&mut d.scratch));
     let src = vm.heap.str(&input).ok_or_else(|| type_error("str"))?;
-    let result = f(reader, src, &mut pos, &mut scratch, &mut vm.fuel);
+    let result = f(reader, src, &mut pos, &mut scratch);
     let d = decoder_obj(vm, decoder)?;
     d.pos = pos;
     d.scratch = scratch;
+    let mut charged = d.charged;
+    let charge = charge_input(&mut vm.fuel, &mut charged, pos);
+    decoder_obj(vm, decoder)?.charged = charged;
+    charge?;
     result
 }
 
@@ -676,27 +701,27 @@ pub fn core_module() -> NativeModule {
         Ok(Value::Unit)
     });
 
-    m.function("dec.int", |vm, args| Ok(Value::Int(with_decoder(vm, args, |r, src, pos, _, _| r.int(src, pos))?)));
-    m.function("dec.float", |vm, args| Ok(Value::Float(with_decoder(vm, args, |r, src, pos, _, _| r.float(src, pos))?)));
-    m.function("dec.bool", |vm, args| Ok(Value::Bool(with_decoder(vm, args, |r, src, pos, _, _| r.bool(src, pos))?)));
-    m.function("dec.null", |vm, args| Ok(Value::Bool(with_decoder(vm, args, |r, src, pos, _, _| r.null(src, pos))?)));
+    m.function("dec.int", |vm, args| Ok(Value::Int(with_decoder(vm, args, |r, src, pos, _| r.int(src, pos))?)));
+    m.function("dec.float", |vm, args| Ok(Value::Float(with_decoder(vm, args, |r, src, pos, _| r.float(src, pos))?)));
+    m.function("dec.bool", |vm, args| Ok(Value::Bool(with_decoder(vm, args, |r, src, pos, _| r.bool(src, pos))?)));
+    m.function("dec.null", |vm, args| Ok(Value::Bool(with_decoder(vm, args, |r, src, pos, _| r.null(src, pos))?)));
     m.function("dec.str", |vm, args| {
-        let span = with_decoder(vm, args, |r, src, pos, scratch, _| r.str(src, pos, scratch))?;
+        let span = with_decoder(vm, args, |r, src, pos, scratch| r.str(src, pos, scratch))?;
         span_to_str(vm, args, span)
     });
-    m.function("dec.open_map", |vm, args| with_decoder(vm, args, |r, src, pos, _, _| r.open_map(src, pos)).map(|_| Value::Unit));
-    m.function("dec.open_list", |vm, args| with_decoder(vm, args, |r, src, pos, _, _| r.open_list(src, pos)).map(|_| Value::Unit));
-    m.function("dec.next_item", |vm, args| Ok(Value::Bool(with_decoder(vm, args, |r, src, pos, _, _| r.next_item(src, pos))?)));
-    m.function("dec.next_key", |vm, args| match with_decoder(vm, args, |r, src, pos, scratch, _| r.next_key(src, pos, scratch))? {
+    m.function("dec.open_map", |vm, args| with_decoder(vm, args, |r, src, pos, _| r.open_map(src, pos)).map(|_| Value::Unit));
+    m.function("dec.open_list", |vm, args| with_decoder(vm, args, |r, src, pos, _| r.open_list(src, pos)).map(|_| Value::Unit));
+    m.function("dec.next_item", |vm, args| Ok(Value::Bool(with_decoder(vm, args, |r, src, pos, _| r.next_item(src, pos))?)));
+    m.function("dec.next_key", |vm, args| match with_decoder(vm, args, |r, src, pos, scratch| r.next_key(src, pos, scratch))? {
         Some(span) => span_to_str(vm, args, span),
         None => Ok(Value::None),
     });
     m.function("dec.open_variant", |vm, args| {
-        let span = with_decoder(vm, args, |r, src, pos, scratch, _| r.open_variant(src, pos, scratch))?.0;
+        let span = with_decoder(vm, args, |r, src, pos, scratch| r.open_variant(src, pos, scratch))?.0;
         span_to_str(vm, args, span)
     });
-    m.function("dec.close_variant", |vm, args| with_decoder(vm, args, |r, src, pos, _, _| r.close_variant(src, pos)).map(|_| Value::Unit));
-    m.function("dec.skip", |vm, args| with_decoder(vm, args, |r, src, pos, _, fuel| r.skip(src, pos, fuel)).map(|_| Value::Unit));
+    m.function("dec.close_variant", |vm, args| with_decoder(vm, args, |r, src, pos, _| r.close_variant(src, pos)).map(|_| Value::Unit));
+    m.function("dec.skip", |vm, args| with_decoder(vm, args, |r, src, pos, _| r.skip(src, pos)).map(|_| Value::Unit));
     m.function("dec.value", |vm, args| {
         let decoder = vm.arg(args, 0);
         let ty = int_arg(vm, args, 1)? as u16;

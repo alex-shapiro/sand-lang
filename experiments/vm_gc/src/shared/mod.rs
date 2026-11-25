@@ -65,6 +65,12 @@ impl Default for Limits {
 /// Fuel units charged per input byte that a native loop scans.
 pub const BYTES_PER_FUEL: usize = 16;
 
+/// Fuel for work over `len` bytes of text.
+#[inline(always)]
+pub fn text_fuel(len: usize) -> u64 {
+    (len / BYTES_PER_FUEL) as u64
+}
+
 /// Charges `units` against `fuel`.
 #[inline(always)]
 pub fn charge(fuel: &mut u64, units: u64) -> Result<()> {

@@ -5,7 +5,7 @@
 //! `null`. Separators are lenient: the scanner accepts a missing comma.
 
 use super::format::{Event, FormatReader, FormatWriter, StrSpan, syntax_error};
-use super::{BYTES_PER_FUEL, Fail, Result, charge, push_int};
+use super::{Fail, Result, push_int};
 
 /// The JSON [`FormatWriter`].
 #[derive(Default)]
@@ -303,14 +303,10 @@ impl FormatReader for Json {
     fn bool(&self, src: &str, pos: &mut usize) -> Result<bool> {
         let bytes = src.as_bytes();
         ws(bytes, pos);
-        if bytes[*pos..].starts_with(b"true") {
-            *pos += 4;
-            Ok(true)
-        } else if bytes[*pos..].starts_with(b"false") {
-            *pos += 5;
-            Ok(false)
-        } else {
-            syntax_error("json", "a bool", *pos)
+        let at = *pos;
+        match word(bytes, pos) {
+            Ok(Some(b)) => Ok(b),
+            _ => syntax_error("json", "a bool", at),
         }
     }
 
@@ -318,9 +314,11 @@ impl FormatReader for Json {
     fn null(&self, src: &str, pos: &mut usize) -> Result<bool> {
         let bytes = src.as_bytes();
         ws(bytes, pos);
-        let null = bytes[*pos..].starts_with(b"null");
-        *pos += 4 * null as usize;
-        Ok(null)
+        if bytes[*pos..].starts_with(b"null") {
+            word(bytes, pos)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     #[inline]
@@ -337,17 +335,20 @@ impl FormatReader for Json {
     #[inline]
     fn next_item(&self, src: &str, pos: &mut usize) -> Result<bool> {
         let bytes = src.as_bytes();
-        match peek(bytes, pos) {
-            Some(b']') => {
+        let next = peek(bytes, pos);
+        let previous = previous_token(bytes, *pos);
+        match (next, previous) {
+            (Some(b']'), Some(b',')) | (Some(b','), Some(b'[')) | (None, _) => syntax_error("json", "an item", *pos),
+            (Some(b']'), _) => {
                 *pos += 1;
                 Ok(false)
             }
-            Some(b',') => {
+            (Some(b','), _) => {
                 *pos += 1;
                 Ok(true)
             }
-            Some(_) => Ok(true),
-            None => syntax_error("json", "`]`", *pos),
+            (Some(_), Some(b'[')) => Ok(true),
+            (Some(_), _) => syntax_error("json", "`,`", *pos),
         }
     }
 
@@ -359,16 +360,20 @@ impl FormatReader for Json {
     #[inline]
     fn next_key(&self, src: &str, pos: &mut usize, scratch: &mut String) -> Result<Option<StrSpan>> {
         let bytes = src.as_bytes();
-        match peek(bytes, pos) {
-            Some(b'}') => {
+        let next = peek(bytes, pos);
+        let previous = previous_token(bytes, *pos);
+        match (next, previous) {
+            (Some(b'}'), Some(b',')) | (Some(b','), Some(b'{')) => return syntax_error("json", "a key", *pos),
+            (Some(b'}'), _) => {
                 *pos += 1;
                 return Ok(None);
             }
-            Some(b',') => {
+            (Some(b','), _) => {
                 *pos += 1;
                 ws(bytes, pos);
             }
-            _ => {}
+            (_, Some(b'{')) => {}
+            _ => return syntax_error("json", "`,`", *pos),
         }
         let key = scan_str(src, pos, scratch)?;
         expect(bytes, pos, b':', "`:`")?;
@@ -394,17 +399,10 @@ impl FormatReader for Json {
         expect(src.as_bytes(), pos, b'}', "`}`")
     }
 
-    fn skip(&self, src: &str, pos: &mut usize, fuel: &mut u64) -> Result<()> {
+    fn skip(&self, src: &str, pos: &mut usize) -> Result<()> {
         let bytes = src.as_bytes();
-        let start = *pos;
-        let mut charged = start;
         let mut depth = 0usize;
-        let mut scratch = String::new();
         loop {
-            if *pos - charged >= 1024 {
-                charge(fuel, ((*pos - charged) / BYTES_PER_FUEL) as u64)?;
-                charged = *pos;
-            }
             match peek(bytes, pos) {
                 Some(b'[' | b'{') => {
                     depth += 1;
@@ -419,25 +417,67 @@ impl FormatReader for Json {
                     *pos += 1;
                     continue;
                 }
-                Some(b'"') => {
-                    scan_str(src, pos, &mut scratch)?;
-                }
+                Some(b'"') => skip_str(bytes, pos)?,
                 Some(b't' | b'f' | b'n') => {
-                    let word = if bytes[*pos] == b'f' { 5 } else { 4 };
-                    if !matches!(&bytes[*pos..(*pos + word).min(bytes.len())], b"true" | b"false" | b"null") {
-                        return syntax_error("json", "a value", *pos);
-                    }
-                    *pos += word;
+                    word(bytes, pos)?;
                 }
                 Some(b'0'..=b'9' | b'-') => *pos = number_end(bytes, *pos),
                 _ => return syntax_error("json", "a value", *pos),
             }
             if depth == 0 {
-                break;
+                return Ok(());
             }
         }
-        charge(fuel, ((*pos - charged) / BYTES_PER_FUEL) as u64)
     }
+
+    fn end(&self, src: &str, pos: &mut usize) -> Result<()> {
+        match peek(src.as_bytes(), pos) {
+            None => Ok(()),
+            Some(_) => syntax_error("json", "the end of the input", *pos),
+        }
+    }
+}
+
+/// Skips the string at `pos`, which must be the opening quote.
+fn skip_str(bytes: &[u8], pos: &mut usize) -> Result<()> {
+    let mut i = *pos + 1;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            b'"' => {
+                *pos = i + 1;
+                return Ok(());
+            }
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    syntax_error("json", "a closing quote", i)
+}
+
+/// Reads `true`, `false`, or `null` at `pos`, as `Some(bool)` or `None` for null.
+/// Fails if a letter or digit follows the word.
+fn word(bytes: &[u8], pos: &mut usize) -> Result<Option<bool>> {
+    let rest = &bytes[*pos..];
+    let (value, len) = if rest.starts_with(b"true") {
+        (Some(true), 4)
+    } else if rest.starts_with(b"false") {
+        (Some(false), 5)
+    } else if rest.starts_with(b"null") {
+        (None, 4)
+    } else {
+        return syntax_error("json", "a value", *pos);
+    };
+    if rest.get(len).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+        return syntax_error("json", "a value", *pos);
+    }
+    *pos += len;
+    Ok(value)
+}
+
+/// Returns the last byte before `pos` that is not whitespace.
+#[inline]
+fn previous_token(bytes: &[u8], pos: usize) -> Option<u8> {
+    bytes[..pos].iter().rev().copied().find(|b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t'))
 }
 
 #[cfg(test)]
@@ -495,8 +535,7 @@ mod tests {
         let v = j.str(src, &mut pos, &mut scratch).unwrap();
         assert_eq!(v.resolve(src, &scratch), "xé😀");
         j.next_key(src, &mut pos, &mut scratch).unwrap().unwrap();
-        let mut fuel = 100;
-        j.skip(src, &mut pos, &mut fuel).unwrap();
+        j.skip(src, &mut pos).unwrap();
         let k = j.next_key(src, &mut pos, &mut scratch).unwrap().unwrap();
         assert_eq!(k.resolve(src, &scratch), "c");
         assert_eq!(j.float(src, &mut pos).unwrap(), 2.5);
@@ -504,9 +543,26 @@ mod tests {
     }
 
     #[test]
-    fn skip_stops_at_the_fuel_limit() {
-        let src = format!("[{}0]", "1,".repeat(100_000));
-        let mut fuel = 1000;
-        assert_eq!(Json.skip(&src, &mut 0, &mut fuel), Err(Fail::OutOfFuel));
+    fn scanner_rejects_malformed_separators_and_words() {
+        let j = Json;
+        let items = |src: &str| -> Result<usize> {
+            let (mut pos, mut n) = (0, 0);
+            j.open_list(src, &mut pos)?;
+            while j.next_item(src, &mut pos)? {
+                j.int(src, &mut pos)?;
+                n += 1;
+            }
+            j.end(src, &mut pos)?;
+            Ok(n)
+        };
+        assert_eq!(items(" [ 1 , 2 ] "), Ok(2));
+        assert_eq!(items("[]"), Ok(0));
+        for bad in ["[1 2]", "[1,]", "[,1]", "[1] x", "[1"] {
+            assert!(items(bad).is_err(), "{bad}");
+        }
+        assert!(j.bool("truex", &mut 0).is_err());
+        assert!(j.null("nullx", &mut 0).is_err());
+        // Position 6 follows `"a":1`, and no comma separates the next key.
+        assert!(j.next_key(r#"{"a":1 "b":2}"#, &mut 6, &mut String::new()).is_err());
     }
 }

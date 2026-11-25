@@ -7,7 +7,7 @@ use super::heap::Heap;
 use super::value::*;
 use crate::shared::isa::{Const, Op, Program};
 use crate::shared::suite::{Arg, HostValue};
-use crate::shared::{Fail, Limits, Result, ShortStr, check_stack, stack_address};
+use crate::shared::{Fail, Limits, Result, ShortStr, check_stack, stack_address, text_fuel};
 use std::future::Future;
 use std::mem::size_of;
 use std::pin::Pin;
@@ -405,7 +405,13 @@ impl Vm {
                         };
                         set!(dst, Value::Bool(r))
                     }
-                    Op::Eq { dst, a, b } => set!(dst, Value::Bool(reg!(a).same(&reg!(b)))),
+                    Op::Eq { dst, a, b } => {
+                        if let (Value::Str(x), Value::Str(y)) = (&reg!(a), &reg!(b)) {
+                            let scan = text_fuel(x.text.len().min(y.text.len()));
+                            self.charge(scan)?;
+                        }
+                        set!(dst, Value::Bool(reg!(a).same(&reg!(b))))
+                    }
                     Op::Not { dst, src } => {
                         let r = match reg!(src) {
                             Value::Bool(b) => Value::Bool(!b),
@@ -593,14 +599,17 @@ impl Vm {
                     }
                     Op::MapSet { map, key, value } => {
                         let (k, v) = (reg!(key).dup(), reg!(value).dup());
-                        let Vm { stack, heap, .. } = self;
+                        let Vm { stack, heap, fuel, .. } = self;
                         let Value::Map(m) = &stack[base + map as usize] else { return Err(type_error("map")) };
-                        map_set(heap, m, k, v)?;
+                        map_set(heap, fuel, m, k, v)?;
                     }
                     Op::MapGet { dst, map, key } => {
                         let Value::Map(m) = &reg!(map) else { return Err(type_error("map")) };
                         let key = &reg!(key);
-                        let v = m.lock()?.0.iter().find(|(k, _)| k.same(key)).map_or(Value::None, |(_, v)| v.clone());
+                        let entries = m.lock()?;
+                        crate::shared::charge(&mut self.fuel, text_fuel(entries.0.len()))?;
+                        let v = entries.0.iter().find(|(k, _)| k.same(key)).map_or(Value::None, |(_, v)| v.clone());
+                        drop(entries);
                         set!(dst, v);
                     }
                     Op::MapKey { dst, map, idx } | Op::MapValue { dst, map, idx } => {
@@ -613,8 +622,8 @@ impl Vm {
                         set!(dst, v);
                     }
                     Op::Concat { dst, a, b } => {
-                        let Vm { stack, heap, .. } = self;
-                        let v = concat(heap, &stack[base + a as usize], &stack[base + b as usize])?;
+                        let Vm { stack, heap, fuel, .. } = self;
+                        let v = concat(heap, fuel, &stack[base + a as usize], &stack[base + b as usize])?;
                         set!(dst, v);
                     }
                     Op::IntToStr { dst, src } => {
@@ -623,9 +632,10 @@ impl Vm {
                     }
                     Op::Repeat { dst, s, n } => {
                         let count = usize::try_from(int!(n)).map_err(|_| type_error("count"))?;
-                        let Vm { stack, heap, .. } = self;
+                        let Vm { stack, heap, fuel, .. } = self;
                         let text = stack[base + s as usize].str().ok_or_else(|| type_error("str"))?;
                         let len = text.len().saturating_mul(count);
+                        crate::shared::charge(fuel, text_fuel(len))?;
                         let v = if len <= crate::shared::SHORT_STR_MAX {
                             Value::Short(ShortStr::new(&text.repeat(count)).expect("short"))
                         } else {
@@ -817,13 +827,14 @@ pub fn list_push(heap: &mut Heap, list: &Shared<ListObj>, v: Value) -> Result<()
 }
 
 #[inline(never)]
-fn concat(heap: &mut Heap, a: &Value, b: &Value) -> Result<Value> {
+fn concat(heap: &mut Heap, fuel: &mut u64, a: &Value, b: &Value) -> Result<Value> {
     if let (Value::Short(x), Value::Short(y)) = (a, b)
         && let Some(short) = ShortStr::concat_short(*x, *y)
     {
         return Ok(Value::Short(short));
     }
     let (Some(x), Some(y)) = (a.str(), b.str()) else { return Err(type_error("str")) };
+    crate::shared::charge(fuel, text_fuel(x.len() + y.len()))?;
     if let Some(short) = ShortStr::concat(x, y) {
         return Ok(Value::Short(short));
     }
@@ -834,8 +845,9 @@ fn concat(heap: &mut Heap, a: &Value, b: &Value) -> Result<Value> {
     Ok(Value::Str(Arc::new(LongStr::new(s.into_boxed_str(), heap.tracker.clone()))))
 }
 
-fn map_set(heap: &mut Heap, map: &Shared<MapObj>, key: Value, value: Value) -> Result<()> {
+fn map_set(heap: &mut Heap, fuel: &mut u64, map: &Shared<MapObj>, key: Value, value: Value) -> Result<()> {
     let mut entries = map.lock()?;
+    crate::shared::charge(fuel, text_fuel(entries.0.len()))?;
     if let Some(entry) = entries.0.iter_mut().find(|(k, _)| k.same(&key)) {
         let old = std::mem::replace(&mut entry.1, value);
         drop(entries);

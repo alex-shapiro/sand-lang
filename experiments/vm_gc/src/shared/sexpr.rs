@@ -5,7 +5,7 @@
 //! `nil` is `None`, and `#t` and `#f` are booleans.
 
 use super::format::{Event, FormatReader, FormatWriter, StrSpan, syntax_error};
-use super::{BYTES_PER_FUEL, Result, charge, push_int};
+use super::{Result, push_int};
 
 /// The S-expression [`FormatWriter`].
 #[derive(Default)]
@@ -222,9 +222,8 @@ impl FormatReader for SExpr {
         expect(src, pos, b')', "`)`")
     }
 
-    fn skip(&self, src: &str, pos: &mut usize, fuel: &mut u64) -> Result<()> {
+    fn skip(&self, src: &str, pos: &mut usize) -> Result<()> {
         let bytes = src.as_bytes();
-        let start = *pos;
         let mut depth = 0usize;
         let mut scratch = String::new();
         loop {
@@ -258,6 +257,13 @@ impl FormatReader for SExpr {
                 break;
             }
         }
-        charge(fuel, ((*pos - start) / BYTES_PER_FUEL) as u64)
+        Ok(())
+    }
+
+    fn end(&self, src: &str, pos: &mut usize) -> Result<()> {
+        match ws(src.as_bytes(), pos) {
+            None => Ok(()),
+            Some(_) => syntax_error("sexpr", "the end of the input", *pos),
+        }
     }
 }
