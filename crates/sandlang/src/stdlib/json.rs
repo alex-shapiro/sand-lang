@@ -6,7 +6,9 @@ use crate::native::context::CallContext;
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::{Param, TraitDict, VmVal};
 use crate::native::{NamedType, NativeModule, variant_index};
-use crate::stdlib::codec::{self, CodecResult, Container, Decoder, EncodeSink, Encoder, InputKind, MAX_NESTING_DEPTH, NODE_BYTES, Scalar};
+use crate::stdlib::codec::{
+    self, CodecResult, Container, Decoder, DynEncodeSink, EncodeSink, Encoder, InputKind, MAX_NESTING_DEPTH, NODE_BYTES, Scalar,
+};
 use crate::syntax::lexer::is_ident;
 use crate::types::traits;
 use crate::vm::bytecode::Program;
@@ -108,26 +110,43 @@ pub(crate) fn module() -> NativeModule {
     module.function(
         "encode",
         |context: &mut CallContext, dict: TraitDict<0, traits::Encode>, value: Param<0>, indent: i64| -> CodecResult<VmVal<String>> {
-            let sink = JsonSink::text(indent.clamp(0, 1 << 16) as usize, context.vm());
-            codec::encode(context, sink, value.raw(), dict.raw(), |context, mut sink| {
-                let (text, reservation, fuel) = sink.out.take_text();
+            let indent = indent.clamp(0, 1 << 16) as usize;
+            let finish = |context: &mut CallContext, mut sink: JsonSink| -> CodecResult<VmVal<String>> {
+                let (text, reservation, fuel) = sink.take_text();
                 drop(reservation);
                 context.vm().charge(fuel)?;
                 context.step(|vm| vm.check_memory(NODE_BYTES.saturating_add(text.len())))?;
                 Ok(VmVal::<String>::from_raw(context.vm_mut().new_str(text)))
-            })
+            };
+            if codec::dict_is_pure(context.vm(), dict.raw()) {
+                let value_root = context.root(value.raw());
+                if context.vm().heap.limit.is_some_and(|limit| context.vm().heap.object_bytes >= limit / 2) {
+                    context.collect_garbage();
+                }
+                let vm = context.vm();
+                let mut sink = JsonSink::new(indent, vm);
+                codec::encode_pure(&vm.prog, &vm.heap, &vm.meter, context.value(value_root), &mut sink)?;
+                return finish(context, sink);
+            }
+            let sink = JsonSink::new(indent, context.vm());
+            codec::encode(context, sink, value.raw(), dict.raw(), finish)
         },
     );
     module.function(
         "to_json",
         |context: &mut CallContext, dict: TraitDict<0, traits::Encode>, value: Param<0>| -> CodecResult<VmVal<Json>> {
-            let sink = JsonSink::tokens(context.vm());
-            codec::encode(context, sink, value.raw(), dict.raw(), |context, sink| {
-                let ids = JsonIds::new(&context.vm().prog)?;
-                let json = context.step(|vm| {
-                    let meter = &vm.meter;
-                    vm.heap.staged(|_, st| Builder::new(st, meter).build_tokens(ids, &sink.out.tokens, &sink.out.text))
-                })?;
+            if codec::dict_is_pure(context.vm(), dict.raw()) {
+                let value_root = context.root(value.raw());
+                let json = pure_to_json(context, value_root)?;
+                return Ok(VmVal::<Json>::from_raw(json));
+            }
+            let sink = JsonSink::new(0, context.vm());
+            codec::encode(context, sink, value.raw(), dict.raw(), |context, mut sink| {
+                let (text, reservation, fuel) = sink.take_text();
+                context.vm().charge(fuel)?;
+                let mut source = JsonSource::owned(text, reservation, context.vm().meter.worker_meter());
+                let json = decode_json(context, &mut source)?;
+                context.vm().charge(1 + (source.take_consumed_bytes() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
                 Ok(VmVal::<Json>::from_raw(json))
             })
         },
@@ -1110,66 +1129,22 @@ enum SinkFrame {
     Inline,
 }
 
-trait JsonOut: Send + 'static {
-    fn null(&mut self) -> CodecResult;
-    fn bool_(&mut self, v: bool, is_key: bool) -> CodecResult;
-    fn int(&mut self, v: i64, is_key: bool) -> CodecResult;
-    fn float(&mut self, v: f64) -> CodecResult;
-    fn str_(&mut self, s: &str, is_key: bool) -> CodecResult;
-    fn bytes(&mut self, b: &[u8]) -> CodecResult;
-    fn open_bracket(&mut self, is_array: bool) -> CodecResult;
-    fn close_bracket(&mut self) -> CodecResult;
-}
-
-/// [`EncodeSink`] that writes JSON to a [`JsonOut`] backend.
-struct JsonSink<O> {
-    out: O,
-    frames: Vec<SinkFrame>,
-}
-
-impl JsonSink<TextOut> {
-    fn text(indent: usize, vm: &Vm) -> Self {
-        let (reservation, meter) = (Reservation::new(&vm.heap.io_memory), vm.meter.worker_meter());
-        JsonSink {
-            out: TextOut { out: String::new(), reservation, meter, indent, brackets: Vec::new(), after_key: false },
-            frames: Vec::new(),
-        }
-    }
-}
-
-impl JsonSink<TokenOut> {
-    fn tokens(vm: &Vm) -> Self {
-        JsonSink {
-            out: TokenOut { tokens: Vec::new(), text: String::new(), depth: 0, reservation: Reservation::new(&vm.heap.io_memory) },
-            frames: Vec::new(),
-        }
-    }
-}
-
-impl<O: JsonOut> JsonSink<O> {
-    #[inline(always)]
-    fn next_is_key(&mut self) -> bool {
-        if let Some(SinkFrame::Map(k)) = self.frames.last_mut() { std::mem::replace(k, !*k) } else { false }
-    }
-    fn begin(&mut self, frame: SinkFrame, is_array: bool) -> CodecResult {
-        if self.next_is_key() {
-            return invalid_key_error();
-        }
-        self.frames.push(frame);
-        self.out.open_bracket(is_array)
-    }
-}
-
-struct TextOut {
+/// [`EncodeSink`] that writes JSON text directly into a memory-tracked buffer.
+struct JsonSink {
     out: String,
     reservation: Reservation,
     meter: WorkerMeter,
     indent: usize,
     brackets: Vec<(bool, bool)>,
     after_key: bool,
+    frames: Vec<SinkFrame>,
 }
 
-impl TextOut {
+impl JsonSink {
+    fn new(indent: usize, vm: &Vm) -> JsonSink {
+        let (reservation, meter) = (Reservation::new(&vm.heap.io_memory), vm.meter.worker_meter());
+        JsonSink { out: String::new(), reservation, meter, indent, brackets: Vec::new(), after_key: false, frames: Vec::new() }
+    }
     fn take_text(&mut self) -> (String, Reservation, u64) {
         let sibling = self.reservation.sibling();
         (std::mem::take(&mut self.out), std::mem::replace(&mut self.reservation, sibling), self.meter.fuel_used())
@@ -1223,6 +1198,24 @@ impl TextOut {
         }
         Ok(())
     }
+    fn open_bracket(&mut self, is_array: bool) -> CodecResult {
+        if self.brackets.len() >= MAX_NESTING_DEPTH {
+            return codec::nesting_limit_error();
+        }
+        self.separate(1)?;
+        self.out.push(if is_array { '[' } else { '{' });
+        self.brackets.push((is_array, true));
+        Ok(())
+    }
+    fn close_bracket(&mut self) -> CodecResult {
+        let Some((is_array, is_empty)) = self.brackets.pop() else { return Ok(()) };
+        if !is_empty {
+            self.start_line()?;
+        }
+        self.reserve(1)?;
+        self.out.push(if is_array { ']' } else { '}' });
+        Ok(())
+    }
     #[inline(always)]
     fn write_quoted(&mut self, text: &str, extra_reserve: usize) -> CodecResult {
         self.separate(quoted_len(text).saturating_add(extra_reserve))?;
@@ -1250,167 +1243,70 @@ impl TextOut {
         self.out.push_str(s);
         Ok(())
     }
-}
-
-impl JsonOut for TextOut {
-    fn null(&mut self) -> CodecResult {
-        self.write_atom("null", false)
-    }
-    fn bool_(&mut self, v: bool, is_key: bool) -> CodecResult {
-        self.write_atom(if v { "true" } else { "false" }, is_key)
-    }
-    fn int(&mut self, v: i64, is_key: bool) -> CodecResult {
-        self.write_atom(itoa::Buffer::new().format(v), is_key)
-    }
-    fn float(&mut self, v: f64) -> CodecResult {
+    #[inline(always)]
+    fn write_float(&mut self, v: f64) -> CodecResult {
         self.separate(MAX_SCALAR_BYTES)?;
         let _ = write!(self.out, "{v:?}");
         Ok(())
     }
-    fn str_(&mut self, s: &str, is_key: bool) -> CodecResult {
-        if is_key { self.write_key(s) } else { self.write_quoted(s, 0) }
-    }
-    fn bytes(&mut self, b: &[u8]) -> CodecResult {
+    #[inline(always)]
+    fn write_bytes(&mut self, b: &[u8]) -> CodecResult {
         self.separate(b.len().div_ceil(3) * 4 + 2)?;
         self.out.push('"');
         base64::encode_into(&mut self.out, b, false);
         self.out.push('"');
         Ok(())
     }
-    fn open_bracket(&mut self, is_array: bool) -> CodecResult {
-        if self.brackets.len() >= MAX_NESTING_DEPTH {
-            return codec::nesting_limit_error();
+    #[inline(always)]
+    fn next_is_key(&mut self) -> bool {
+        if let Some(SinkFrame::Map(k)) = self.frames.last_mut() { std::mem::replace(k, !*k) } else { false }
+    }
+    fn begin(&mut self, frame: SinkFrame, is_array: bool) -> CodecResult {
+        if self.next_is_key() {
+            return invalid_key_error();
         }
-        self.separate(1)?;
-        self.out.push(if is_array { '[' } else { '{' });
-        self.brackets.push((is_array, true));
-        Ok(())
-    }
-    fn close_bracket(&mut self) -> CodecResult {
-        let Some((is_array, is_empty)) = self.brackets.pop() else { return Ok(()) };
-        if !is_empty {
-            self.start_line()?;
-        }
-        self.reserve(1)?;
-        self.out.push(if is_array { ']' } else { '}' });
-        Ok(())
+        self.frames.push(frame);
+        self.open_bracket(is_array)
     }
 }
 
-enum JsonToken {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(u32, u32),
-    Arr,
-    Obj,
-    End,
-}
-
-struct TokenOut {
-    tokens: Vec<JsonToken>,
-    text: String,
-    depth: usize,
-    reservation: Reservation,
-}
-
-impl TokenOut {
-    fn reserve(&mut self, extra_tokens: usize, extra_bytes: usize) -> CodecResult {
-        let bytes = self
-            .tokens
-            .len()
-            .saturating_add(extra_tokens)
-            .saturating_mul(std::mem::size_of::<JsonToken>())
-            .saturating_add(self.text.len().saturating_add(extra_bytes));
-        if bytes > self.reservation.bytes()
-            && self.reservation.ensure(bytes.saturating_mul(2).max(256)).or_else(|_| self.reservation.ensure(bytes)).is_err()
-        {
-            return codec::memory_limit_error();
-        }
-        Ok(())
-    }
-    fn push(&mut self, tok: JsonToken) -> CodecResult {
-        self.reserve(1, 0)?;
-        self.tokens.push(tok);
-        Ok(())
-    }
-}
-
-impl JsonOut for TokenOut {
-    fn null(&mut self) -> CodecResult {
-        self.push(JsonToken::Null)
-    }
-    fn bool_(&mut self, v: bool, is_key: bool) -> CodecResult {
-        if is_key { self.str_(if v { "true" } else { "false" }, true) } else { self.push(JsonToken::Bool(v)) }
-    }
-    fn int(&mut self, v: i64, is_key: bool) -> CodecResult {
-        if is_key { self.str_(itoa::Buffer::new().format(v), true) } else { self.push(JsonToken::Int(v)) }
-    }
-    fn float(&mut self, v: f64) -> CodecResult {
-        self.push(JsonToken::Float(v))
-    }
-    fn str_(&mut self, s: &str, _is_key: bool) -> CodecResult {
-        self.reserve(1, s.len())?;
-        let start = u32::try_from(self.text.len()).map_err(|_| Fail::limit(crate::engine::LimitKind::Memory))?;
-        let len = u32::try_from(s.len()).map_err(|_| Fail::limit(crate::engine::LimitKind::Memory))?;
-        self.text.push_str(s);
-        self.tokens.push(JsonToken::Str(start, len));
-        Ok(())
-    }
-    fn bytes(&mut self, b: &[u8]) -> CodecResult {
-        self.reserve(1, b.len().div_ceil(3) * 4)?;
-        let start = u32::try_from(self.text.len()).map_err(|_| Fail::limit(crate::engine::LimitKind::Memory))?;
-        base64::encode_into(&mut self.text, b, false);
-        let len = (self.text.len() - start as usize) as u32;
-        self.tokens.push(JsonToken::Str(start, len));
-        Ok(())
-    }
-    fn open_bracket(&mut self, is_array: bool) -> CodecResult {
-        if self.depth >= MAX_NESTING_DEPTH {
-            return codec::nesting_limit_error();
-        }
-        self.depth += 1;
-        self.push(if is_array { JsonToken::Arr } else { JsonToken::Obj })
-    }
-    fn close_bracket(&mut self) -> CodecResult {
-        self.depth = self.depth.saturating_sub(1);
-        self.push(JsonToken::End)
-    }
-}
-
-impl<O: JsonOut> EncodeSink for JsonSink<O> {
+impl EncodeSink for JsonSink {
+    #[inline(always)]
     fn scalar(&mut self, value: Scalar<'_>) -> CodecResult {
         let is_key = self.next_is_key();
         match value {
-            Scalar::Unit | Scalar::None if !is_key => self.out.null(),
-            Scalar::Bool(v) => self.out.bool_(v, is_key),
-            Scalar::Int(v) | Scalar::Duration(v) => self.out.int(v, is_key),
+            Scalar::Unit | Scalar::None if !is_key => self.write_atom("null", false),
+            Scalar::Bool(v) => self.write_atom(if v { "true" } else { "false" }, is_key),
+            Scalar::Int(v) | Scalar::Duration(v) => self.write_atom(itoa::Buffer::new().format(v), is_key),
             Scalar::Float(v) if !v.is_finite() => Err(HostError::new("invalid", format!("JSON cannot represent the float {v}"))),
-            Scalar::Float(v) if !is_key => self.out.float(v),
-            Scalar::Str(s) | Scalar::Native(_, s) => self.out.str_(s, is_key),
-            Scalar::Variant(d) => self.out.str_(&d.name, is_key),
-            Scalar::Bytes(b) if !is_key => self.out.bytes(b),
+            Scalar::Float(v) if !is_key => self.write_float(v),
+            Scalar::Str(s) | Scalar::Native(_, s) if is_key => self.write_key(s),
+            Scalar::Str(s) | Scalar::Native(_, s) => self.write_quoted(s, 0),
+            Scalar::Variant(d) if is_key => self.write_key(&d.name),
+            Scalar::Variant(d) => self.write_quoted(&d.name, 0),
+            Scalar::Bytes(b) if !is_key => self.write_bytes(b),
             Scalar::Range(s, e, inc) if !is_key => {
-                self.out.open_bracket(false)?;
+                self.open_bracket(false)?;
                 for (name, b) in [("start", s), ("end", e)] {
-                    self.out.str_(name, true)?;
-                    self.out.int(b, false)?;
+                    self.write_key(name)?;
+                    self.write_atom(itoa::Buffer::new().format(b), false)?;
                 }
                 if inc {
-                    self.out.str_("inclusive", true)?;
-                    self.out.bool_(true, false)?;
+                    self.write_key("inclusive")?;
+                    self.write_atom("true", false)?;
                 }
-                self.out.close_bracket()
+                self.close_bracket()
             }
             _ => invalid_key_error(),
         }
     }
 
+    #[inline(always)]
     fn field(&mut self, name: &str) -> CodecResult {
-        self.out.str_(name, true)
+        self.write_key(name)
     }
 
+    #[inline(always)]
     fn begin(&mut self, kind: Container<'_>) -> CodecResult {
         match kind {
             Container::Some => {
@@ -1425,20 +1321,21 @@ impl<O: JsonOut> EncodeSink for JsonSink<O> {
             Container::Struct(_) => self.begin(SinkFrame::Plain, false),
             Container::Variant(d, _) => {
                 self.begin(SinkFrame::Variant, false)?;
-                self.out.str_(&d.name, true)?;
-                self.out.open_bracket(d.fields.is_none())
+                self.write_key(&d.name)?;
+                self.open_bracket(d.fields.is_none())
             }
         }
     }
 
+    #[inline(always)]
     fn end(&mut self) -> CodecResult {
         match self.frames.pop() {
             Some(SinkFrame::Inline) | None => Ok(()),
             Some(SinkFrame::Variant) => {
-                self.out.close_bracket()?;
-                self.out.close_bracket()
+                self.close_bracket()?;
+                self.close_bracket()
             }
-            Some(_) => self.out.close_bracket(),
+            Some(_) => self.close_bracket(),
         }
     }
 }
@@ -1510,7 +1407,7 @@ fn write_escaped(out: &mut String, s: &str) {
     out.push_str(&s[start..]);
 }
 
-fn encode_json(vm: &Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecResult {
+fn encode_json(vm: &Vm, value: VmValue, sink: &mut dyn DynEncodeSink) -> CodecResult {
     fn walk<S: EncodeSink + ?Sized>(vm: &Vm, ids: JsonIds, node: VmValue, sink: &mut S, depth: usize) -> CodecResult {
         vm.meter.charge(1)?;
         let id = vm.heap.variant_id(node);
@@ -1553,88 +1450,198 @@ fn encode_json(vm: &Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecResul
         }
     }
     let ids = JsonIds::new(&vm.prog)?;
-    if let Some(json_sink) = (sink as &mut dyn std::any::Any).downcast_mut::<JsonSink<TextOut>>() {
+    if let Some(json_sink) = (sink as &mut dyn std::any::Any).downcast_mut::<JsonSink>() {
         walk(vm, ids, value, json_sink, 0)
     } else {
         walk(vm, ids, value, sink, 0)
     }
 }
 
-impl Builder<'_, '_, '_> {
-    fn build_tokens(&mut self, ids: JsonIds, tokens: &[JsonToken], text: &str) -> Result<VmValue, Fail> {
-        enum Frame {
-            Arr(Vec<VmValue>),
-            Obj(usize, u64, VmValue),
+enum JsonBuildFrame {
+    Arr(Vec<VmValue>, bool),
+    Obj { base: usize, expect_key: bool, is_map: bool, hash: u64, key: VmValue, close_outer: bool },
+    Inline,
+}
+
+/// [`EncodeSink`] that builds a staged Sand `Json` value via [`Builder`].
+struct JsonBuilderSink<'a, 's, 'h> {
+    builder: Builder<'a, 's, 'h>,
+    ids: JsonIds,
+    root: Option<VmValue>,
+    frames: Vec<JsonBuildFrame>,
+    depth: usize,
+}
+
+impl<'a, 's, 'h> JsonBuilderSink<'a, 's, 'h> {
+    fn new(st: &'s mut Staging<'h>, meter: &'a VmMeter, ids: JsonIds) -> Self {
+        JsonBuilderSink { builder: Builder::new(st, meter), ids, root: None, frames: Vec::new(), depth: 0 }
+    }
+    #[inline(always)]
+    fn next_is_key(&mut self) -> bool {
+        if let Some(JsonBuildFrame::Obj { expect_key, is_map: true, .. }) = self.frames.last_mut() {
+            std::mem::replace(expect_key, !*expect_key)
+        } else {
+            false
         }
-        let mut stack = Vec::new();
-        let mut idx = 0usize;
-        loop {
-            self.reserve()?;
-            self.meter.charge(1)?;
-            let tok = tokens.get(idx).ok_or_else(missing_root_error)?;
-            idx += 1;
-            let mut value = match *tok {
-                JsonToken::Null => Some(VmValue::Tag(ids.null)),
-                JsonToken::Bool(v) => Some(self.st.new_variant(ids.bool_, &[VmValue::Bool(v)])),
-                JsonToken::Int(v) => Some(self.st.new_variant(ids.int, &[VmValue::Int(v)])),
-                JsonToken::Float(v) => Some(self.st.new_variant(ids.float, &[VmValue::Float(v)])),
-                JsonToken::Str(start, len) => {
-                    let s = &text[start as usize..(start + len) as usize];
-                    self.st.check_memory((NODE_BYTES + self.pending).saturating_add(s.len()))?;
-                    self.meter.charge_bytes(s.len())?;
-                    let sv = self.st.new_str(s);
-                    Some(self.st.new_variant(ids.str_, &[sv]))
+    }
+    #[inline(always)]
+    fn set_key(&mut self, key: &str) -> CodecResult {
+        let h = str_hash(key);
+        let k = self.builder.key(key, h)?;
+        if let Some(JsonBuildFrame::Obj { hash, key: slot, .. }) = self.frames.last_mut() {
+            *hash = h;
+            *slot = k;
+        }
+        Ok(())
+    }
+    #[inline(always)]
+    fn place(&mut self, val: VmValue) -> CodecResult {
+        for frame in self.frames.iter_mut().rev() {
+            match frame {
+                JsonBuildFrame::Inline => continue,
+                JsonBuildFrame::Arr(items, _) => {
+                    self.builder.push(items, val)?;
+                    return Ok(());
                 }
-                JsonToken::Arr => {
-                    stack.push(Frame::Arr(Vec::new()));
-                    None
+                JsonBuildFrame::Obj { base, hash, key, .. } => {
+                    self.builder.append(*base, *hash, *key, val)?;
+                    return Ok(());
                 }
-                JsonToken::Obj => {
-                    stack.push(Frame::Obj(self.entries.len(), 0, VmValue::Unit));
-                    None
+            }
+        }
+        self.root = Some(val);
+        Ok(())
+    }
+    fn open(&mut self, frame: JsonBuildFrame) -> CodecResult {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return codec::nesting_limit_error();
+        }
+        self.depth += 1;
+        self.frames.push(frame);
+        Ok(())
+    }
+    fn open_obj(&mut self, is_map: bool, close_outer: bool) -> CodecResult {
+        self.open(JsonBuildFrame::Obj {
+            base: self.builder.entries.len(),
+            expect_key: is_map,
+            is_map,
+            hash: 0,
+            key: VmValue::Unit,
+            close_outer,
+        })
+    }
+    fn finish_frame(&mut self) -> CodecResult {
+        let Some(frame) = self.frames.pop() else { return Ok(()) };
+        let (val, close_outer) = match frame {
+            JsonBuildFrame::Inline => return Ok(()),
+            JsonBuildFrame::Arr(items, close_outer) => {
+                self.depth -= 1;
+                let list = self.builder.list(items);
+                (self.builder.st.new_variant(self.ids.arr, &[list]), close_outer)
+            }
+            JsonBuildFrame::Obj { base, close_outer, .. } => {
+                self.depth -= 1;
+                let map = self.builder.map(base);
+                (self.builder.st.new_variant(self.ids.obj, &[map]), close_outer)
+            }
+        };
+        self.place(val)?;
+        if close_outer { self.finish_frame() } else { Ok(()) }
+    }
+}
+
+impl EncodeSink for JsonBuilderSink<'_, '_, '_> {
+    #[inline(always)]
+    fn scalar(&mut self, value: Scalar<'_>) -> CodecResult {
+        self.builder.reserve()?;
+        let is_key = self.next_is_key();
+        let val = match value {
+            Scalar::Unit | Scalar::None if !is_key => VmValue::Tag(self.ids.null),
+            Scalar::Bool(b) if is_key => return self.set_key(if b { "true" } else { "false" }),
+            Scalar::Bool(b) => self.builder.st.new_variant(self.ids.bool_, &[VmValue::Bool(b)]),
+            Scalar::Int(n) | Scalar::Duration(n) if is_key => return self.set_key(itoa::Buffer::new().format(n)),
+            Scalar::Int(n) | Scalar::Duration(n) => self.builder.st.new_variant(self.ids.int, &[VmValue::Int(n)]),
+            Scalar::Float(f) if !f.is_finite() => return Err(HostError::new("invalid", format!("JSON cannot represent the float {f}"))),
+            Scalar::Float(f) if !is_key => self.builder.st.new_variant(self.ids.float, &[VmValue::Float(f)]),
+            Scalar::Str(s) | Scalar::Native(_, s) if is_key => return self.set_key(s),
+            Scalar::Str(s) | Scalar::Native(_, s) => {
+                self.builder.st.check_memory((NODE_BYTES + self.builder.pending).saturating_add(s.len()))?;
+                let sv = self.builder.st.new_str(s);
+                self.builder.st.new_variant(self.ids.str_, &[sv])
+            }
+            Scalar::Variant(d) if is_key => return self.set_key(&d.name),
+            Scalar::Variant(d) => {
+                let sv = self.builder.key(&d.name, str_hash(&d.name))?;
+                self.builder.st.new_variant(self.ids.str_, &[sv])
+            }
+            Scalar::Bytes(b) if !is_key => {
+                let encoded = base64::encode(b, false);
+                self.builder.st.check_memory((NODE_BYTES + self.builder.pending).saturating_add(encoded.len()))?;
+                let sv = self.builder.st.new_str(encoded);
+                self.builder.st.new_variant(self.ids.str_, &[sv])
+            }
+            Scalar::Range(s, e, inc) if !is_key => {
+                self.open_obj(false, false)?;
+                for (name, bound) in [("start", s), ("end", e)] {
+                    self.set_key(name)?;
+                    let v = self.builder.st.new_variant(self.ids.int, &[VmValue::Int(bound)]);
+                    self.place(v)?;
                 }
-                JsonToken::End => return Err(missing_root_error()),
-            };
-            loop {
-                match stack.last_mut() {
-                    None => return value.ok_or_else(missing_root_error),
-                    Some(Frame::Arr(items)) => {
-                        if let Some(elem) = value.take() {
-                            self.push(items, elem)?;
-                        }
-                        if !matches!(tokens.get(idx), None | Some(JsonToken::End)) {
-                            break;
-                        }
-                    }
-                    Some(Frame::Obj(base, hash, key)) => {
-                        if let Some(elem) = value.take() {
-                            self.append(*base, *hash, *key, elem)?;
-                        }
-                        if let Some(&JsonToken::Str(start, len)) = tokens.get(idx) {
-                            idx += 1;
-                            let key_text = &text[start as usize..(start + len) as usize];
-                            let h = self.hash(key_text)?;
-                            *key = self.key(key_text, h)?;
-                            *hash = h;
-                            break;
-                        }
-                    }
+                if inc {
+                    self.set_key("inclusive")?;
+                    let v = self.builder.st.new_variant(self.ids.bool_, &[VmValue::Bool(true)]);
+                    self.place(v)?;
                 }
-                idx += 1;
-                value = Some(match stack.pop().expect("open") {
-                    Frame::Arr(items) => {
-                        let list = self.list(items);
-                        self.st.new_variant(ids.arr, &[list])
-                    }
-                    Frame::Obj(base, ..) => {
-                        let map = self.map(base);
-                        self.st.new_variant(ids.obj, &[map])
-                    }
-                });
+                return self.finish_frame();
+            }
+            _ => return invalid_key_error(),
+        };
+        self.place(val)
+    }
+
+    #[inline(always)]
+    fn vm_str(&mut self, value: VmValue, text: &str) -> CodecResult {
+        self.builder.reserve()?;
+        if self.next_is_key() {
+            return self.set_key(text);
+        }
+        let val = self.builder.st.new_variant(self.ids.str_, &[value]);
+        self.place(val)
+    }
+
+    #[inline(always)]
+    fn field(&mut self, name: &str) -> CodecResult {
+        self.set_key(name)
+    }
+
+    #[inline(always)]
+    fn begin(&mut self, kind: Container<'_>) -> CodecResult {
+        if self.next_is_key() {
+            return invalid_key_error();
+        }
+        match kind {
+            Container::Some => {
+                self.frames.push(JsonBuildFrame::Inline);
+                Ok(())
+            }
+            Container::List(_) | Container::Tuple(_) | Container::Set(_) => self.open(JsonBuildFrame::Arr(Vec::new(), false)),
+            Container::Map(_) => self.open_obj(true, false),
+            Container::Struct(_) => self.open_obj(false, false),
+            Container::Variant(d, _) => {
+                self.open_obj(false, false)?;
+                self.set_key(&d.name)?;
+                if d.fields.is_none() { self.open(JsonBuildFrame::Arr(Vec::new(), true)) } else { self.open_obj(false, true) }
             }
         }
     }
 
+    #[inline(always)]
+    fn end(&mut self) -> CodecResult {
+        self.finish_frame()
+    }
+}
+
+impl Builder<'_, '_, '_> {
     fn parse_json(&mut self, ids: JsonIds, source: &mut JsonSource) -> CodecResult<VmValue> {
         enum Frame {
             Arr(Vec<VmValue>),
@@ -1754,6 +1761,26 @@ impl Builder<'_, '_, '_> {
             }
         }
     }
+}
+
+fn pure_to_json(context: &mut CallContext, value_root: crate::native::context::RootedValue) -> CodecResult<VmValue> {
+    let ids = JsonIds::new(&context.vm().prog)?;
+    let root = context.value(value_root);
+    context.step(|vm| {
+        let (prog, meter) = (&vm.prog, &vm.meter);
+        let result: CodecResult<VmValue> = vm.heap.staged(|heap, st| {
+            let mut sink = JsonBuilderSink::new(st, meter, ids);
+            codec::encode_pure(prog, heap, meter, root, &mut sink)?;
+            sink.root.ok_or_else(|| missing_root_error().into())
+        });
+        match result {
+            Ok(value) => Ok(Ok(value)),
+            Err(error) => match error.into_abort() {
+                Ok(fail) => Err(fail),
+                Err(sand_err) => Ok(Err(sand_err)),
+            },
+        }
+    })?
 }
 
 fn decode_json(context: &mut CallContext, source: &mut JsonSource) -> CodecResult<VmValue> {

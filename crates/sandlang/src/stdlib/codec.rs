@@ -68,14 +68,21 @@ pub(crate) enum Container<'a> {
 }
 
 /// Target format written by the encode walker.
-pub(crate) trait EncodeSink: Any + Send {
+pub(crate) trait EncodeSink {
     fn scalar(&mut self, value: Scalar<'_>) -> CodecResult;
+    fn vm_str(&mut self, _value: VmValue, text: &str) -> CodecResult {
+        self.scalar(Scalar::Str(text))
+    }
     fn begin(&mut self, kind: Container<'_>) -> CodecResult;
     fn field(&mut self, _name: &str) -> CodecResult {
         Ok(())
     }
     fn end(&mut self) -> CodecResult;
 }
+
+/// Object-safe, `'static + Send` [`EncodeSink`] stored in codec sessions.
+pub(crate) trait DynEncodeSink: EncodeSink + Any + Send {}
+impl<T: EncodeSink + Any + Send> DynEncodeSink for T {}
 
 const ENCODER_MISUSE: [&str; 2] =
     ["an `Encoder` accepts a value only during its `encode` call", "an `encode` method wrote a second value to its `Encoder`"];
@@ -183,6 +190,52 @@ fn eval_part(context: &mut CallContext, outer_dict: VmValue, template: &PartTemp
     }
 }
 
+fn eval_static_template(consts: &[VmValue], heap: &crate::vm::heap::Heap, outer_dict: VmValue, template: &PartTemplate) -> Option<VmValue> {
+    match template {
+        PartTemplate::Const(const_idx, _) => Some(consts[*const_idx as usize]),
+        PartTemplate::Bound(slot) => heap.field(outer_dict, *slot as usize),
+        PartTemplate::Field(inner, slot) => heap.field(eval_static_template(consts, heap, outer_dict, inner)?, *slot as usize),
+        PartTemplate::Dict(_) => None,
+    }
+}
+
+/// Returns `true` if `dict` and every reachable child dictionary are structural
+/// with no custom callbacks.
+pub(crate) fn dict_is_pure(vm: &Vm, dict: VmValue) -> bool {
+    let mut visited = [0u32; 32];
+    let mut visited_len = 0usize;
+    let mut stack = [VmValue::Unit; 32];
+    let mut stack_len = 1usize;
+    stack[0] = dict;
+    while stack_len > 0 {
+        stack_len -= 1;
+        let current = stack[stack_len];
+        let VmValue::Obj(handle) = current else { return false };
+        if visited[..visited_len].contains(&handle) {
+            continue;
+        }
+        if visited_len == visited.len() {
+            return false;
+        }
+        visited[visited_len] = handle;
+        visited_len += 1;
+        let Some(shape_idx) = dict_shape(vm, current).ok().flatten() else { return false };
+        let Some(shape) = vm.prog.shapes.get(shape_idx as usize) else { return false };
+        if matches!(shape.kind, ShapeKind::Never) {
+            return false;
+        }
+        for part in &shape.parts {
+            let Some(child) = eval_static_template(&vm.consts, &vm.heap, current, part) else { return false };
+            if stack_len == stack.len() {
+                return false;
+            }
+            stack[stack_len] = child;
+            stack_len += 1;
+        }
+    }
+    true
+}
+
 /// Single-use destination passed to `Encode.encode`.
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
@@ -199,7 +252,7 @@ pub struct Decoder {
 }
 impl crate::native::NativeObject for Decoder {}
 
-fn sink_mut(sink: &mut Option<Box<dyn EncodeSink>>) -> CodecResult<&mut dyn EncodeSink> {
+fn sink_mut(sink: &mut Option<Box<dyn DynEncodeSink>>) -> CodecResult<&mut dyn DynEncodeSink> {
     sink.as_deref_mut().ok_or_else(|| Fail::internal("encode: missing sink").into())
 }
 
@@ -232,7 +285,7 @@ impl<IO> ActiveTurn<IO> {
 #[derive(Default)]
 struct CodecSessions {
     next_turn: u64,
-    encode: Vec<ActiveTurn<Box<dyn EncodeSink>>>,
+    encode: Vec<ActiveTurn<Box<dyn DynEncodeSink>>>,
     decode: Vec<ActiveTurn<JsonSource>>,
 }
 
@@ -255,7 +308,7 @@ trait CodecIo: Sized {
     }
 }
 
-impl CodecIo for Box<dyn EncodeSink> {
+impl CodecIo for Box<dyn DynEncodeSink> {
     const MISUSE: [&'static str; 2] = ENCODER_MISUSE;
     fn stack(sessions: &mut CodecSessions) -> &mut Vec<ActiveTurn<Self>> {
         &mut sessions.encode
@@ -305,10 +358,10 @@ impl Encoder {
     pub(crate) fn write<T>(
         context: &mut CallContext,
         encoder: VmVal<Encoder>,
-        write: impl FnOnce(&mut CallContext, &mut dyn EncodeSink) -> CodecResult<T>,
+        write: impl FnOnce(&mut CallContext, &mut dyn DynEncodeSink) -> CodecResult<T>,
     ) -> CodecResult<T> {
         let turn = encoder.get(&context.vm().heap)?.turn;
-        with_session(context, turn, |context, mut sink: Box<dyn EncodeSink>, _| {
+        with_session(context, turn, |context, mut sink: Box<dyn DynEncodeSink>, _| {
             let result = write(context, &mut *sink);
             (Some(sink), result)
         })
@@ -379,7 +432,7 @@ fn run_custom<IO: CodecIo>(
 struct EncodeWalk<'a, 'c> {
     context: &'a mut CallContext<'c>,
     prog: &'a Program,
-    sink: &'a mut Option<Box<dyn EncodeSink>>,
+    sink: &'a mut Option<Box<dyn DynEncodeSink>>,
     unchecked: u32,
 }
 
@@ -617,14 +670,175 @@ impl EncodeWalk<'_, '_> {
     }
 }
 
-pub(crate) fn encode<S: EncodeSink + 'static, R>(
+/// Iterative, monomorphized encoder for values whose `dict_is_pure` is `true`.
+pub(crate) fn encode_pure<S: EncodeSink>(
+    prog: &Program,
+    heap: &crate::vm::heap::Heap,
+    meter: &crate::vm::meter::VmMeter,
+    root: VmValue,
+    sink: &mut S,
+) -> CodecResult {
+    enum Frame<'h> {
+        Items(std::slice::Iter<'h, VmValue>),
+        One(Option<(Option<&'h str>, VmValue)>),
+        Set(std::slice::Iter<'h, Option<VmValue>>),
+        Map(std::slice::Iter<'h, Option<(VmValue, VmValue)>>, Option<VmValue>),
+        Fields(std::slice::Iter<'h, String>, std::slice::Iter<'h, VmValue>),
+        EndOnly,
+    }
+    let mut stack: Vec<Frame<'_>> = Vec::new();
+    let mut node = root;
+    loop {
+        meter.charge(1)?;
+        match node {
+            VmValue::Unit | VmValue::Uninit => sink.scalar(Scalar::Unit)?,
+            VmValue::Bool(b) => sink.scalar(Scalar::Bool(b))?,
+            VmValue::Int(n) => sink.scalar(Scalar::Int(n))?,
+            VmValue::Float(f) => sink.scalar(Scalar::Float(f))?,
+            VmValue::Dur(n) => sink.scalar(Scalar::Duration(n))?,
+            VmValue::Tag(id) if id == prog.ids.none => sink.scalar(Scalar::None)?,
+            VmValue::Tag(id) => {
+                let desc = prog.variant_desc(id).ok_or_else(|| Fail::internal("encode: unknown variant"))?;
+                sink.scalar(Scalar::Variant(desc))?;
+            }
+            VmValue::Pair(a, b) => {
+                sink.begin(Container::Tuple(2))?;
+                stack.push(Frame::One(Some((None, VmValue::Int(b)))));
+                node = VmValue::Int(a as i64);
+                continue;
+            }
+            VmValue::Obj(_) => match heap.get(node) {
+                Obj::Str(s) => {
+                    meter.charge_bytes(s.len())?;
+                    sink.vm_str(node, s)?;
+                }
+                Obj::StrBuf(s) => {
+                    meter.charge_bytes(s.len())?;
+                    sink.scalar(Scalar::Str(s))?;
+                }
+                Obj::Bytes(b) => {
+                    meter.charge_slow_bytes(b.len())?;
+                    sink.scalar(Scalar::Bytes(b))?;
+                }
+                Obj::Range(s, e, inc) => sink.scalar(Scalar::Range(*s, *e, *inc))?,
+                Obj::List(items) => {
+                    sink.begin(Container::List(items.len()))?;
+                    stack.push(Frame::Items(items.iter()));
+                }
+                Obj::Tuple(items) => {
+                    sink.begin(Container::Tuple(items.len()))?;
+                    stack.push(Frame::Items(items.iter()));
+                }
+                Obj::Set(set) => {
+                    sink.begin(Container::Set(set.live))?;
+                    stack.push(Frame::Set(set.entries.iter()));
+                }
+                Obj::Map(map) => {
+                    sink.begin(Container::Map(map.live))?;
+                    stack.push(Frame::Map(map.entries.iter(), None));
+                }
+                Obj::Struct(def, fields) => {
+                    let desc = prog.types[*def as usize].desc();
+                    sink.begin(Container::Struct(desc))?;
+                    stack.push(Frame::Fields(desc.fields.iter(), fields.iter()));
+                }
+                Obj::Variant(id, fields) => {
+                    if *id == prog.ids.some
+                        && let Some(&payload) = fields.first()
+                    {
+                        sink.begin(Container::Some)?;
+                        stack.push(Frame::EndOnly);
+                        node = payload;
+                        continue;
+                    }
+                    let desc = prog.variant_desc(*id).ok_or_else(|| Fail::internal("encode: unknown variant"))?;
+                    sink.begin(Container::Variant(desc, fields.len()))?;
+                    stack.push(match &desc.fields {
+                        Some(names) => Frame::Fields(names.iter(), fields.iter()),
+                        None => Frame::Items(fields.iter()),
+                    });
+                }
+                o @ (Obj::Value(_) | Obj::Packed(..)) => {
+                    let native = o.value().ok_or_else(|| Fail::internal("encode: missing native"))?;
+                    let text = native.text();
+                    meter.charge_bytes(text.len())?;
+                    let module = native.module_name();
+                    let short = native.type_name();
+                    let full = if module.is_empty() {
+                        std::borrow::Cow::Borrowed(short)
+                    } else {
+                        std::borrow::Cow::Owned(format!("{module}.{short}"))
+                    };
+                    sink.scalar(Scalar::Native(&full, &text))?;
+                }
+                _ => return shape_mismatch(),
+            },
+            _ => {
+                let Some((id, payload)) = node.as_inline_variant() else { return shape_mismatch() };
+                if id == prog.ids.some {
+                    sink.begin(Container::Some)?;
+                    stack.push(Frame::EndOnly);
+                    node = payload;
+                    continue;
+                }
+                let desc = prog.variant_desc(id).ok_or_else(|| Fail::internal("encode: unknown variant"))?;
+                sink.begin(Container::Variant(desc, 1))?;
+                let field_name = desc.fields.as_deref().and_then(|n| n.first()).map(String::as_str);
+                stack.push(Frame::One(Some((field_name, payload))));
+            }
+        }
+        node = loop {
+            match stack.last_mut() {
+                None => return Ok(()),
+                Some(Frame::Items(iter)) => {
+                    if let Some(&item) = iter.next() {
+                        break item;
+                    }
+                }
+                Some(Frame::One(slot)) => {
+                    if let Some((name, item)) = slot.take() {
+                        if let Some(name) = name {
+                            sink.field(name)?;
+                        }
+                        break item;
+                    }
+                }
+                Some(Frame::Set(iter)) => {
+                    if let Some(item) = iter.find_map(|entry| *entry) {
+                        break item;
+                    }
+                }
+                Some(Frame::Map(iter, pending_val)) => {
+                    if let Some(val) = pending_val.take() {
+                        break val;
+                    }
+                    if let Some((k, v)) = iter.find_map(|entry| *entry) {
+                        *pending_val = Some(v);
+                        break k;
+                    }
+                }
+                Some(Frame::Fields(names, values)) => {
+                    if let (Some(name), Some(&val)) = (names.next(), values.next()) {
+                        sink.field(name)?;
+                        break val;
+                    }
+                }
+                Some(Frame::EndOnly) => {}
+            }
+            stack.pop();
+            sink.end()?;
+        };
+    }
+}
+
+pub(crate) fn encode<S: EncodeSink + Send + 'static, R>(
     context: &mut CallContext,
     sink: S,
     value: VmValue,
     dict: VmValue,
     finish: impl FnOnce(&mut CallContext, S) -> CodecResult<R>,
 ) -> CodecResult<R> {
-    let mut slot: Option<Box<dyn EncodeSink>> = Some(Box::new(sink));
+    let mut slot: Option<Box<dyn DynEncodeSink>> = Some(Box::new(sink));
     encode_inner(context, &mut slot, true, 0, value, dict)?;
     let sink = (slot.take().ok_or_else(|| Fail::internal("encode: missing sink"))? as Box<dyn Any>)
         .downcast::<S>()
@@ -634,7 +848,7 @@ pub(crate) fn encode<S: EncodeSink + 'static, R>(
 
 fn encode_inner(
     context: &mut CallContext,
-    sink: &mut Option<Box<dyn EncodeSink>>,
+    sink: &mut Option<Box<dyn DynEncodeSink>>,
     top_level: bool,
     depth: usize,
     value: VmValue,
@@ -1082,17 +1296,31 @@ fn check_set_or_map_growth(vm: &mut Vm, table: VmValue, key: VmValue) -> Result<
     Ok(())
 }
 
-pub(crate) fn to_value(context: &mut CallContext, value: VmValue, dict: VmValue) -> CodecResult<Value> {
+fn to_value_with_reservation(
+    context: &mut CallContext,
+    value: VmValue,
+    dict: VmValue,
+) -> CodecResult<(Value, crate::vm::iomem::Reservation)> {
+    if dict_is_pure(context.vm(), dict) {
+        let vm = context.vm();
+        let mut sink = ValueSink::new(&vm.heap.io_memory);
+        encode_pure(&vm.prog, &vm.heap, &vm.meter, value, &mut sink)?;
+        return sink.take().ok_or_else(|| Fail::internal("to_value: no value").into());
+    }
     encode(context, ValueSink::new(&context.vm().heap.io_memory), value, dict, |_, mut sink| {
-        sink.take().map(|(value, _)| value).ok_or_else(|| Fail::internal("to_value: no value").into())
+        sink.take().ok_or_else(|| Fail::internal("to_value: no value").into())
     })
+}
+
+pub(crate) fn to_value(context: &mut CallContext, value: VmValue, dict: VmValue) -> CodecResult<Value> {
+    to_value_with_reservation(context, value, dict).map(|(value, _)| value)
 }
 
 pub(crate) fn register(module: &mut crate::native::NativeModule) {
     module.bind::<Encoder>().bind::<Decoder>().bind::<InputKind>().bind::<EncodedArg>();
     let encode_value = |context: &mut CallContext, dict: VmValue, value: VmValue, encoder: VmVal<Encoder>| -> CodecResult {
         let turn = encoder.get(&context.vm().heap)?.turn;
-        with_session(context, turn, |context, sink: Box<dyn EncodeSink>, depth| {
+        with_session(context, turn, |context, sink: Box<dyn DynEncodeSink>, depth| {
             let mut slot = Some(sink);
             let result = encode_inner(context, &mut slot, false, depth, value, dict);
             (slot, result)
@@ -1109,13 +1337,10 @@ pub(crate) fn register(module: &mut crate::native::NativeModule) {
     module.function(
         "encode_arg",
         |context: &mut CallContext, dict: TraitDict<0, traits::Encode>, value: Param<0>| -> Result<VmVal<EncodedArg>, Fail> {
-            encode(context, ValueSink::new(&context.vm().heap.io_memory), value.raw(), dict.raw(), |context, mut sink| {
-                let (value, _reservation) = sink.take().ok_or_else(|| Fail::internal("encode_arg: no value"))?;
-                context.step(|vm| vm.check_memory(NODE_BYTES))?;
-                let encoded = EncodedArg { value: Arc::new(value), _reservation }.into_vm_value(context.vm_mut())?;
-                Ok(VmVal::<EncodedArg>::from_raw(encoded))
-            })
-            .map_err(walk_error_to_fail)
+            let (val, reservation) = to_value_with_reservation(context, value.raw(), dict.raw()).map_err(walk_error_to_fail)?;
+            context.step(|vm| vm.check_memory(NODE_BYTES))?;
+            let encoded = EncodedArg { value: Arc::new(val), _reservation: reservation }.into_vm_value(context.vm_mut())?;
+            Ok(VmVal::<EncodedArg>::from_raw(encoded))
         },
     );
     module.function(

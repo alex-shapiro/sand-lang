@@ -485,6 +485,7 @@ impl ValueSink {
 }
 
 impl EncodeSink for ValueSink {
+    #[inline(always)]
     fn scalar(&mut self, value: Scalar<'_>) -> CodecResult {
         let v = match value {
             Scalar::Unit => Value::Unit,
@@ -524,6 +525,7 @@ impl EncodeSink for ValueSink {
         Ok(())
     }
 
+    #[inline(always)]
     fn begin(&mut self, kind: Container<'_>) -> CodecResult {
         match kind {
             Container::Some => self.open(1, PartialValue::Some),
@@ -536,6 +538,7 @@ impl EncodeSink for ValueSink {
         }
     }
 
+    #[inline(always)]
     fn end(&mut self) -> CodecResult {
         let value = match self.open.pop() {
             Some(PartialValue::List(v)) => Value::List(v),
