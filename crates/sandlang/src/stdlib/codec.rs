@@ -71,6 +71,9 @@ pub(crate) enum Container<'a> {
 pub(crate) trait EncodeSink: Any + Send {
     fn scalar(&mut self, value: Scalar<'_>) -> CodecResult;
     fn begin(&mut self, kind: Container<'_>) -> CodecResult;
+    fn field(&mut self, _name: &str) -> CodecResult {
+        Ok(())
+    }
     fn end(&mut self) -> CodecResult;
 }
 
@@ -98,6 +101,8 @@ fn check_depth(depth: usize) -> CodecResult {
     if depth >= MAX_NESTING_DEPTH { nesting_limit_error() } else { Ok(()) }
 }
 
+#[cold]
+#[inline(never)]
 fn parse_error<T>(source: &JsonSource, message: impl std::fmt::Display) -> CodecResult<T> {
     Err(HostError::new("parse", format!("{}: {message}", source.path())))
 }
@@ -448,7 +453,7 @@ impl EncodeWalk<'_, '_> {
                         return shape_mismatch();
                     }
                     sink_mut(self.sink)?.begin(Container::Tuple(len))?;
-                    self.visit_fields(value, dict, shape, 0, len, depth + 1)?;
+                    self.visit_fields(value, dict, &shape.parts, None, depth + 1)?;
                 }
                 (ShapeKind::Struct(def), _) => {
                     check_depth(depth)?;
@@ -456,9 +461,9 @@ impl EncodeWalk<'_, '_> {
                     if *actual_def != *def || fields.len() != shape.parts.len() {
                         return shape_mismatch();
                     }
-                    let len = fields.len();
-                    sink_mut(self.sink)?.begin(Container::Struct(self.prog.types[*def as usize].desc()))?;
-                    self.visit_fields(value, dict, shape, 0, len, depth + 1)?;
+                    let desc = self.prog.types[*def as usize].desc();
+                    sink_mut(self.sink)?.begin(Container::Struct(desc))?;
+                    self.visit_fields(value, dict, &shape.parts, Some(&desc.fields), depth + 1)?;
                 }
                 (ShapeKind::Enum { def, first_variant }, _) => {
                     let Some(variant_id) = self.context.vm().heap.variant(value).map(|variant| variant.id()) else {
@@ -475,8 +480,9 @@ impl EncodeWalk<'_, '_> {
                     } else {
                         check_depth(depth)?;
                         sink_mut(self.sink)?.begin(Container::Variant(desc, variant.arity))?;
-                        let part_base = (*first_variant..variant_id).map(|vid| self.prog.variants[vid as usize].arity).sum();
-                        self.visit_fields(value, dict, shape, part_base, variant.arity, depth + 1)?;
+                        let part_base: usize = (*first_variant..variant_id).map(|vid| self.prog.variants[vid as usize].arity).sum();
+                        let parts = &shape.parts[part_base..part_base + variant.arity];
+                        self.visit_fields(value, dict, parts, desc.fields.as_deref(), depth + 1)?;
                     }
                 }
                 _ => return shape_mismatch(),
@@ -563,16 +569,18 @@ impl EncodeWalk<'_, '_> {
         &mut self,
         value: VmValue,
         dict: VmValue,
-        shape: &Shape,
-        part_base: usize,
-        len: usize,
+        parts: &[PartTemplate],
+        names: Option<&[String]>,
         next_depth: usize,
     ) -> CodecResult {
-        if len > 0 {
+        if !parts.is_empty() {
             let base = self.context.root(value).0 as usize;
             self.context.root(dict);
-            for index in 0..len {
-                let child_dict = eval_template(self.context, self.context.root_at(base + 1), &shape.parts[part_base + index])?;
+            for (index, part) in parts.iter().enumerate() {
+                if let Some(names) = names {
+                    sink_mut(self.sink)?.field(&names[index])?;
+                }
+                let child_dict = eval_template(self.context, self.context.root_at(base + 1), part)?;
                 let field_val = self
                     .context
                     .vm()
@@ -598,7 +606,7 @@ pub(crate) fn encode<S: EncodeSink + 'static, R>(
     encode_inner(context, &mut slot, true, 0, value, dict)?;
     let sink = (slot.take().ok_or_else(|| Fail::internal("encode: missing sink"))? as Box<dyn Any>)
         .downcast::<S>()
-        .map_err(|_| Fail::internal("encode: sink type mismatch"))?;
+        .map_err(|_| Fail::internal("encode: sink type changed"))?;
     finish(context, *sink)
 }
 
@@ -617,7 +625,7 @@ fn encode_inner(
     }
     let prog = context.vm().prog.clone();
     let (value, dict) = (context.value(value_root), context.value(dict_root));
-    let result = EncodeWalk { context, prog: &prog, sink, unchecked: 0 }.visit(value, dict, depth);
+    let result = EncodeWalk { context, prog: &prog, sink, unchecked: CHECKED_VALUES }.visit(value, dict, depth);
     context.truncate_roots(mark);
     result
 }
@@ -626,7 +634,7 @@ enum SlotTarget {
     Tuple,
     Struct(u32),
     Init,
-    Variant { id: u32, part_base: usize },
+    Variant { id: u32, part_base: usize, enum_name: u32 },
 }
 
 struct DecodeWalk<'a, 'c> {
@@ -731,7 +739,7 @@ impl DecodeWalk<'_, '_> {
             };
         };
         for _ in 0..somes {
-            source_mut(self.source)?.end()?;
+            source_mut(self.source)?.end(None)?;
             self.context.set_root(self.scratch, value);
             self.context.step(|vm| vm.check_memory(NODE_BYTES))?;
             let inner = self.context.root_at(self.scratch);
@@ -767,7 +775,7 @@ impl DecodeWalk<'_, '_> {
                 self.context.vm_mut().heap.list_push(collection, item).map_err(Fail::limit)?;
             }
         }
-        source_mut(self.source)?.end()?;
+        source_mut(self.source)?.end(None)?;
         let out = self.context.root_at(base);
         self.context.truncate_roots(base);
         Ok(out)
@@ -795,7 +803,7 @@ impl DecodeWalk<'_, '_> {
             let value = self.context.root_at(self.scratch);
             self.context.vm_mut().map_insert(map, key, value)?;
         }
-        source_mut(self.source)?.end()?;
+        source_mut(self.source)?.end(None)?;
         let out = self.context.root_at(base);
         self.context.truncate_roots(base);
         Ok(out)
@@ -804,20 +812,20 @@ impl DecodeWalk<'_, '_> {
     #[inline(never)]
     fn visit_enum(&mut self, dict: VmValue, shape: &Shape, def: u32, first_variant: u32, depth: usize) -> CodecResult<VmValue> {
         let type_rt = &self.prog.types[def as usize];
-        let variant_name = source_mut(self.source)?.begin_variant(&type_rt.desc().type_name)?;
+        let variant_name = source_mut(self.source)?.begin_variant(&type_rt.name)?;
         let Some(offset) =
             self.prog.variants[first_variant as usize..].iter().take_while(|v| v.def == def).position(|v| v.name == variant_name)
         else {
-            let name = crate::stdlib::truncate(&variant_name, 64).to_string();
+            let name = crate::stdlib::truncate(variant_name, 64).to_string();
             return parse_error(source_mut(self.source)?, format!("unknown variant `{name}` of {}", type_rt.name));
         };
         self.context.vm().charge((offset / 16) as u64)?;
         let variant_id = first_variant + offset as u32;
         let variant = &self.prog.variants[variant_id as usize];
         let named = variant.field_names.is_some();
-        source_mut(self.source)?.begin_payload(variant.arity, named)?;
+        source_mut(self.source)?.begin_payload(&type_rt.name, variant.arity, named)?;
         if variant.arity == 0 {
-            source_mut(self.source)?.end()?;
+            source_mut(self.source)?.end(None)?;
             return Ok(VmValue::Tag(variant_id));
         }
         check_depth(depth)?;
@@ -825,7 +833,7 @@ impl DecodeWalk<'_, '_> {
         self.visit_slots(
             dict,
             shape,
-            SlotTarget::Variant { id: variant_id, part_base },
+            SlotTarget::Variant { id: variant_id, part_base, enum_name: def },
             variant.field_names.as_deref(),
             variant.arity,
             depth + 1,
@@ -852,6 +860,7 @@ impl DecodeWalk<'_, '_> {
         Ok(value)
     }
 
+    #[inline(always)]
     fn read_slot(&mut self, dict_root: usize, base: usize, part: &PartTemplate, slot: usize, depth: usize) -> CodecResult {
         let part_dict = eval_template(self.context, self.context.root_at(dict_root), part)?;
         let value = self.visit(part_dict, depth)?;
@@ -878,15 +887,15 @@ impl DecodeWalk<'_, '_> {
         if let Some(names) = names {
             let mut next_guess = 0usize;
             while let Some(name) = source_mut(self.source)?.next_field()? {
-                let found = match &shape.slot_index {
-                    Some(index) if !matches!(target, SlotTarget::Variant { .. }) => index.get(name).map(|&slot| slot as usize),
-                    _ if names.get(next_guess).is_some_and(|field| field == name) => Some(next_guess),
-                    _ => {
-                        if names.len() > MAX_SCANNED_SLOTS {
-                            self.context.vm().charge((names.len() / 16) as u64)?;
-                        }
-                        names.iter().position(|field| field == name)
+                let found = if names.get(next_guess).is_some_and(|field| field == name) {
+                    Some(next_guess)
+                } else if let Some(index) = shape.slot_index.as_ref().filter(|_| !matches!(target, SlotTarget::Variant { .. })) {
+                    index.get(name).map(|&slot| slot as usize)
+                } else {
+                    if names.len() > MAX_SCANNED_SLOTS {
+                        self.context.vm().charge((names.len() / 16) as u64)?;
                     }
+                    names.iter().position(|field| field == name)
                 };
                 match found {
                     Some(slot) if !matches!(self.context.root_at(base + slot), VmValue::Uninit) => {
@@ -921,8 +930,8 @@ impl DecodeWalk<'_, '_> {
                 self.context.truncate_roots(dict_root);
                 return parse_error(source_mut(self.source)?, format!("expected array of length {count}, found {slot}"));
             }
-            let fill_val = match shape.fills.get(slot).cloned().unwrap_or(PartFill::Required) {
-                PartFill::Required => {
+            let fill_val = match shape.fills.get(slot) {
+                None | Some(PartFill::Required) => {
                     let part_dict = eval_template(self.context, self.context.root_at(dict_root), &shape.parts[part_base + slot])?;
                     if dict_shape(self.context.vm(), part_dict)?
                         .is_some_and(|shape_idx| matches!(self.prog.shapes[shape_idx as usize].kind, ShapeKind::Option))
@@ -935,14 +944,18 @@ impl DecodeWalk<'_, '_> {
                         return parse_error(source_mut(self.source)?, message);
                     }
                 }
-                PartFill::Call(helper_const, dicts) => {
+                Some(PartFill::Call(helper_const, dicts)) => {
                     let extra_roots = if matches!(target, SlotTarget::Init) { base..base + slot } else { base..base };
-                    self.call_with_dicts(dict_root, helper_const, &dicts, extra_roots)?
+                    self.call_with_dicts(dict_root, *helper_const, dicts, extra_roots)?
                 }
             };
             self.context.set_root(base + slot, fill_val);
         }
-        source_mut(self.source)?.end()?;
+        let enum_name = match target {
+            SlotTarget::Variant { enum_name, .. } => Some(self.prog.types[enum_name as usize].name.as_str()),
+            _ => None,
+        };
+        source_mut(self.source)?.end(enum_name)?;
         let result = match target {
             SlotTarget::Init => {
                 let init = shape.init.as_ref().ok_or_else(|| Fail::internal("decode: missing init descriptor"))?;
@@ -997,7 +1010,7 @@ fn decode_inner(context: &mut CallContext, source: &mut Option<JsonSource>, dept
     let scratch = context.root(VmValue::Unit).0 as usize;
     let prog = context.vm().prog.clone();
     let dict = context.value(dict_root);
-    let result = DecodeWalk { context, prog: &prog, source, scratch, unchecked: 0 }.visit(dict, depth);
+    let result = DecodeWalk { context, prog: &prog, source, scratch, unchecked: CHECKED_VALUES }.visit(dict, depth);
     if let Some(source) = source.as_mut() {
         context.vm().charge((source.take_consumed_bytes() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
     }
@@ -1005,7 +1018,7 @@ fn decode_inner(context: &mut CallContext, source: &mut Option<JsonSource>, dept
     result
 }
 
-pub(crate) fn check_list_growth(context: &mut CallContext, list: VmValue) -> Result<(), Fail> {
+fn check_list_growth(context: &mut CallContext, list: VmValue) -> Result<(), Fail> {
     context.step(|vm| {
         if let Obj::List(items) = vm.heap.get(list)
             && items.len() == items.capacity()
@@ -1016,7 +1029,7 @@ pub(crate) fn check_list_growth(context: &mut CallContext, list: VmValue) -> Res
     })
 }
 
-pub(crate) fn check_set_or_map_growth(vm: &mut Vm, table: VmValue, key: VmValue) -> Result<(), Fail> {
+fn check_set_or_map_growth(vm: &mut Vm, table: VmValue, key: VmValue) -> Result<(), Fail> {
     let (len, cap, elem_size, index_growth) = match vm.heap.get(table) {
         Obj::Set(set) => (set.entries.len(), set.entries.capacity(), SET_ENTRY_SIZE, set.index_growth(key)),
         Obj::Map(map) => (map.entries.len(), map.entries.capacity(), MAP_ENTRY_SIZE, map.index_growth(key)),

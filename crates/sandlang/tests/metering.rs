@@ -1215,7 +1215,7 @@ map with variant keys: {"Right":1.5,"Left":2.5}
 map with date keys: {"2024-03-10":1}
     encode 5, indent 5 for 21 bytes, to_json 9, Json parameter 3, to_value 4
 map with a key of 3000 bytes: 3006 bytes
-    encode 51, indent 51 for 3011 bytes, to_json 521, Json parameter 49, to_value 50
+    encode 51, indent 51 for 3011 bytes, to_json 475, Json parameter 49, to_value 50
 range: {"start":0,"end":3}
     encode 2, indent 2 for 28 bytes, to_json 8, Json parameter 5, to_value 1
 inclusive range: {"start":-1,"end":1,"inclusive":true}
