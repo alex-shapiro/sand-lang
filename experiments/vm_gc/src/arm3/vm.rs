@@ -7,7 +7,7 @@ use super::heap::Heap;
 use super::value::*;
 use crate::shared::isa::{Const, Op, Program};
 use crate::shared::suite::{Arg, HostValue};
-use crate::shared::{Fail, Limits, Result, ShortStr, check_stack, stack_address, text_fuel};
+use crate::shared::{Fail, Limits, Result, ShortStr, check_stack, compare_fuel, stack_address, text_fuel};
 use std::future::Future;
 use std::mem::size_of;
 use std::pin::Pin;
@@ -420,7 +420,7 @@ impl Vm {
                     }
                     Op::Eq { dst, a, b } => {
                         if let (Value::Str(x), Value::Str(y)) = (&reg!(a), &reg!(b)) {
-                            let scan = text_fuel(x.text.len().min(y.text.len()));
+                            let scan = compare_fuel(&x.text, &y.text);
                             self.charge(scan)?;
                         }
                         set!(dst, Value::Bool(reg!(a).same(&reg!(b))))
@@ -625,7 +625,7 @@ impl Vm {
                         let Value::Map(m) = &reg!(map) else { return Err(type_error("map")) };
                         let key = &reg!(key);
                         let entries = m.lock()?;
-                        crate::shared::charge(&mut self.fuel, text_fuel(entries.0.len()))?;
+                        crate::shared::charge(&mut self.fuel, key_scan_fuel(&entries.0, key))?;
                         let v = entries.0.iter().find(|(k, _)| k.same(key)).map_or(Value::None, |(_, v)| v.clone());
                         drop(entries);
                         set!(dst, v);
@@ -835,11 +835,26 @@ fn clear_registers(regs: &mut [Value]) {
     }
 }
 
+impl Drop for Vm {
+    /// Drops the engine's values, then collects the garbage cycles among
+    /// them, which reference counts alone never free.
+    fn drop(&mut self) {
+        self.stack.clear();
+        self.frames.clear();
+        self.fibers.clear();
+        self.awaiting = None;
+        self.globals.clear();
+        self.consts.clear();
+        self.heap.collect();
+    }
+}
+
 /// Appends `v` to `list`, reserving tracked bytes when the buffer grows.
 /// Holding the lock while a collection runs is safe: the collector treats
 /// a locked container as a root.
 #[inline]
 pub fn list_push(heap: &mut Heap, list: &Shared<ListObj>, v: Value) -> Result<()> {
+    heap.check_own(list.header)?;
     let mut items = list.lock()?;
     let (len, capacity) = (items.0.len(), items.0.capacity());
     if len == capacity {
@@ -851,6 +866,16 @@ pub fn list_push(heap: &mut Heap, list: &Shared<ListObj>, v: Value) -> Result<()
     }
     items.0.push(v);
     Ok(())
+}
+
+/// Fuel for scanning `entries` for `key`: one unit per 16 entries, plus the
+/// cost of comparing `key` with each string key.
+fn key_scan_fuel(entries: &[(Value, Value)], key: &Value) -> u64 {
+    let compares = match key.str() {
+        Some(key) => entries.iter().filter_map(|(k, _)| k.str()).map(|k| compare_fuel(k, key)).sum(),
+        None => 0,
+    };
+    text_fuel(entries.len()) + compares
 }
 
 #[inline(never)]
@@ -873,8 +898,9 @@ fn concat(heap: &mut Heap, fuel: &mut u64, a: &Value, b: &Value) -> Result<Value
 }
 
 fn map_set(heap: &mut Heap, fuel: &mut u64, map: &Shared<MapObj>, key: Value, value: Value) -> Result<()> {
+    heap.check_own(map.header)?;
     let mut entries = map.lock()?;
-    crate::shared::charge(fuel, text_fuel(entries.0.len()))?;
+    crate::shared::charge(fuel, key_scan_fuel(&entries.0, &key))?;
     if let Some(entry) = entries.0.iter_mut().find(|(k, _)| k.same(&key)) {
         let old = std::mem::replace(&mut entry.1, value);
         drop(entries);

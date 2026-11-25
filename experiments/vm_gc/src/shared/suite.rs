@@ -168,6 +168,11 @@ pub fn b1_fuel<E: ArmEngine>() {
     }
     let mut e: E = engine(Variant::Structural, Limits { fuel: 10_000, ..Limits::default() });
     assert_eq!(e.call("huge_string", &[int(16 << 20)]), Err(Fail::OutOfFuel));
+    // 1,000 lookups compare 100 MB of key text.
+    let mut e: E = engine(Variant::Structural, Limits { fuel: 100_000, ..Limits::default() });
+    assert_eq!(e.call("map_long_keys", &[int(1000)]), Err(Fail::OutOfFuel));
+    let mut e: E = engine(Variant::Structural, Limits::default());
+    assert_eq!(e.call("map_long_keys", &[int(1000)]), Ok(HostValue::Int(1000)));
 }
 
 /// Engines reject a native call with the wrong argument count when they
@@ -488,6 +493,13 @@ pub fn b8_host_cycle<E: ArmEngine>() {
     call_ok(&mut e, "host_release", &[]);
     e.collect();
     assert_eq!(host.host_drops.load(Ordering::Relaxed), 1, "{}: the host object and its callback form a garbage cycle", E::NAME);
+
+    // Dropping an engine frees the garbage cycles that it holds.
+    let mut e = E::new(program(Variant::Structural), Limits::default(), &host).unwrap();
+    call_ok(&mut e, "host_setup", &[]);
+    call_ok(&mut e, "host_release", &[]);
+    drop(e);
+    assert_eq!(host.host_drops.load(Ordering::Relaxed), 2, "{}: dropping the engine must free the cycle", E::NAME);
 }
 
 pub fn b8_two_engines<E: ArmEngine>() {

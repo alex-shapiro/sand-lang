@@ -180,6 +180,13 @@ impl Heap {
         if mutable { Value::MutStruct(self.insert_shared(data, bytes)) } else { Value::Struct(self.insert_frozen(data, bytes)) }
     }
 
+    /// Fails unless this engine's table holds the container in `header`.
+    /// A container can grow only in the engine that tracks its bytes.
+    #[inline]
+    pub fn check_own(&self, header: Header) -> Result<()> {
+        if header.engine == self.engine { Ok(()) } else { Err(Fail::error("value belongs to another engine")) }
+    }
+
     /// Adds `bytes` to the tracked size of the container in `header` after its buffer grew.
     #[inline]
     pub fn add_container_bytes(&mut self, header: Header, bytes: usize) {

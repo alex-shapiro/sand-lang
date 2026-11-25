@@ -22,6 +22,8 @@ fn a_foreign_container_in_a_garbage_cycle_keeps_live_data_intact() {
     b.collect();
     let Value::List(items) = &live else { panic!() };
     assert!(matches!(items.lock().unwrap().0[..], [Value::Int(1)]), "the collector must not count a foreign reference against slot 0");
+    // A container grows only in the engine that tracks its bytes.
+    assert!(b.list_push(&foreign, Value::Int(2)).is_err());
     a.collect();
     drop(foreign);
 }

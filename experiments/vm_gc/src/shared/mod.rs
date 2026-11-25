@@ -71,6 +71,13 @@ pub fn text_fuel(len: usize) -> u64 {
     (len / BYTES_PER_FUEL) as u64
 }
 
+/// Fuel for comparing two strings. Strings of different lengths compare in
+/// constant time.
+#[inline]
+pub fn compare_fuel(a: &str, b: &str) -> u64 {
+    if a.len() == b.len() { text_fuel(a.len()) } else { 0 }
+}
+
 /// Charges `units` against `fuel`.
 #[inline(always)]
 pub fn charge(fuel: &mut u64, units: u64) -> Result<()> {

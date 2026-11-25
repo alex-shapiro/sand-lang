@@ -3,7 +3,7 @@
 use super::heap::{Heap, HostObject, Obj, SLOT_BYTES, Value};
 use crate::shared::isa::{Const, Op, Program};
 use crate::shared::suite::{Arg, HostValue};
-use crate::shared::{Fail, Limits, Result, ShortStr, check_stack, stack_address, text_fuel};
+use crate::shared::{Fail, Limits, Result, ShortStr, check_stack, compare_fuel, stack_address, text_fuel};
 use std::future::Future;
 use std::mem::size_of;
 use std::pin::Pin;
@@ -826,7 +826,7 @@ impl Vm {
                     Op::MapGet { dst, map, key } => {
                         let key = reg!(key);
                         let Obj::Map(entries) = self.heap.get(handle!(map)) else { return Err(type_error("map")) };
-                        let scan = text_fuel(entries.len());
+                        let scan = self.key_scan_fuel(entries, &key);
                         self.charge(scan)?;
                         let Obj::Map(entries) = self.heap.get(handle!(map)) else { unreachable!() };
                         reg!(dst) = entries.iter().find(|(k, _)| self.values_eq(k, &key)).map_or(Value::None, |(_, v)| *v);
@@ -917,16 +917,26 @@ impl Vm {
             return Ok(true);
         }
         let (Some(x), Some(y)) = (self.heap.str(&a), self.heap.str(&b)) else { return Ok(false) };
-        let scan = text_fuel(x.len().min(y.len()));
+        let scan = compare_fuel(x, y);
         let eq = x == y;
         self.charge(scan)?;
         Ok(eq)
     }
 
+    /// Fuel for scanning `entries` for `key`: one unit per 16 entries, plus
+    /// the cost of comparing `key` with each string key.
+    fn key_scan_fuel(&self, entries: &[(Value, Value)], key: &Value) -> u64 {
+        let compares = match self.heap.str(key) {
+            Some(key) => entries.iter().filter_map(|(k, _)| self.heap.str(k)).map(|k| compare_fuel(k, key)).sum(),
+            None => 0,
+        };
+        text_fuel(entries.len()) + compares
+    }
+
     fn map_set(&mut self, map: Value, key: Value, value: Value) -> Result<()> {
         let Value::Obj(h) = map else { return Err(type_error("map")) };
         let Obj::Map(entries) = self.heap.get(h) else { return Err(type_error("map")) };
-        let scan = text_fuel(entries.len());
+        let scan = self.key_scan_fuel(entries, &key);
         self.charge(scan)?;
         let Obj::Map(entries) = self.heap.get(h) else { unreachable!() };
         if let Some(i) = entries.iter().position(|(k, _)| self.values_eq(k, &key)) {
