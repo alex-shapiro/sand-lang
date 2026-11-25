@@ -64,11 +64,11 @@ This arm tests one unified codec walker that handles both structural types and c
 
 `Copy` branded pointers allocated through a shared `&Mutation<'gc>` token. Safe VM, stdlib, and host code; `unsafe` stays inside `gc-arena`. `Arena` is `Send` outside a turn.
 
-Code reads `&'gc str` and allocates at the same time, without `Staging`. Callbacks run synchronously on the Rust stack inside one turn. Collection stays paused until that outer turn returns, so temporary callback garbage accumulates until then.
+Code reads `&'gc str` and allocates at the same time, without `Staging`. Turns exit on async yields and pure-VM checkpoints, but synchronous native calls and callbacks stay inside one turn. Collection stays paused until that outer turn returns, so temporary callback garbage accumulates until then.
 
 ### Arm 3: `gc-arena` with Yielding Turns
 
-Same `gc-arena` heap as Arm 2, but exits the turn on custom callbacks, fuel or GC checkpoints, and async yields. Safe VM, stdlib, and host code; `Arena` is `Send` between turns.
+Same `gc-arena` heap as Arm 2, except native callbacks and mid-native GC checkpoints also exit the turn. Safe VM, stdlib, and host code; `Arena` is `Send` between turns.
 
 Values kept across a turn boundary are stashed as roots across `.await` or stored in a `Collect` state machine. Collection runs between turns without rolling back finished work.
 
@@ -84,7 +84,7 @@ Each immutable heap object lives behind `Arc<T>`, strings use `EcoString` (inlin
 
 Cloning a string handle takes constant time without copying bytes. Natives hold an owned `EcoString` across allocations, callbacks, and `.await`, and borrow `&str` from it with zero manual rooting and without `Staging`.
 
-For cycles, every container that can hold child objects registers a `Weak` pointer in a per-engine list. On memory pressure, the VM runs a Python-style cycle sweep: it copies each container's `Weak::strong_count` into a scratch map, subtracts internal links between tracked containers, marks containers with remaining count above zero (and everything reachable from them) as live, clears the inner elements of any live unmarked mutable container to break unreachable loops, and prunes dead `Weak` entries. Implement iterative `Drop` on linked values so deep drops fit on a 512 KB stack.
+For cycles, Arms 5 and 6 use a Python-style reference-count cycle detector over containers that can hold child objects, leaving externally held native values untouched and requiring no new memory allocation at `max_memory`. Implement iterative `Drop` on linked values so deep drops fit on a 512 KB stack.
 
 ### Arm 6: `Rc` with Cycle Collector
 
@@ -104,7 +104,7 @@ Keep measurements fair across all six arms:
 - Let Arm 3 suspend and resume bytecode execution across turn boundaries without forcing state-machine overhead onto other arms.
 - Share one strict byte tracker checked before every allocation. Count object headers, inner container buffers, root stacks, and cycle-collector tables. Wrap `Gc::new` in Arms 2 and 3 so allocations fail cleanly at `max_memory`.
 - Do not build a second structural-only fast-path codec beside the general callback codec in any arm. Give every arm one equal review and tuning pass before recording final numbers.
-- Use the same GC trigger policy across Arms 1 to 4 (collecting if allocated bytes reach the larger of 2x the last post-GC live set or a shared minimum threshold, plus emergency collection at `max_memory`) so B1 to B3 compare equal collection cadence without thrashing on small workloads.
+- Use the same GC trigger policy across Arms 1 to 4 (collecting if allocated bytes reach the larger of 2x the last post-GC live set or a shared minimum threshold, plus emergency collection at `max_memory`). In B2 and B3, set that minimum threshold above a single decode's working set so B2 and B3 isolate steady-state codec speed while B4 tests GC under pressure.
 - In B1, B2, and B3, report operation time, post-run cleanup time (one full collection for Arms 1 to 4; dropping the output and pruning dead `Weak` entries for Arms 5 and 6), and total combined time so deferred GC (such as Arm 2) is compared fairly.
 
 ### Dataset and Baseline
