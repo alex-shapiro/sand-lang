@@ -152,7 +152,7 @@ fn dict_shape(vm: &Vm, dict: VmValue) -> Result<Option<u32>, Fail> {
 
 fn eval_template(context: &mut CallContext, outer_dict: VmValue, template: &PartTemplate) -> Result<VmValue, Fail> {
     match template {
-        PartTemplate::Const(const_idx) => Ok(context.vm().consts[*const_idx as usize]),
+        PartTemplate::Const(const_idx, _) => Ok(context.vm().consts[*const_idx as usize]),
         PartTemplate::Bound(slot) => {
             context.vm().heap.field(outer_dict, *slot as usize).ok_or_else(|| Fail::internal("codec: bound slot out of bounds"))
         }
@@ -173,6 +173,13 @@ fn eval_template(context: &mut CallContext, outer_dict: VmValue, template: &Part
             context.truncate_roots(outer_root);
             Ok(dict)
         }
+    }
+}
+
+fn eval_part(context: &mut CallContext, outer_dict: VmValue, template: &PartTemplate) -> Result<(VmValue, Option<u32>), Fail> {
+    match template {
+        PartTemplate::Const(const_idx, shape) => Ok((context.vm().consts[*const_idx as usize], *shape)),
+        _ => Ok((eval_template(context, outer_dict, template)?, None)),
     }
 }
 
@@ -377,7 +384,7 @@ struct EncodeWalk<'a, 'c> {
 }
 
 impl EncodeWalk<'_, '_> {
-    fn visit(&mut self, mut value: VmValue, mut dict: VmValue, depth: usize) -> CodecResult {
+    fn visit(&mut self, mut value: VmValue, mut dict: VmValue, mut known_shape: Option<u32>, depth: usize) -> CodecResult {
         let mut somes = 0usize;
         loop {
             if self.unchecked == 0 {
@@ -390,12 +397,18 @@ impl EncodeWalk<'_, '_> {
             }
             self.unchecked -= 1;
             self.context.vm().charge(1)?;
-            let Some(shape_idx) = dict_shape(self.context.vm(), dict)? else {
-                let (_, unused) = run_custom(self.context, dict, Some(value), self.sink, depth)?;
-                if unused {
-                    return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
-                }
-                break;
+            let shape_idx = match known_shape.take() {
+                Some(idx) => idx,
+                None => match dict_shape(self.context.vm(), dict)? {
+                    Some(idx) => idx,
+                    None => {
+                        let (_, unused) = run_custom(self.context, dict, Some(value), self.sink, depth)?;
+                        if unused {
+                            return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
+                        }
+                        break;
+                    }
+                },
             };
             let shape = self.prog.shapes.get(shape_idx as usize).ok_or_else(|| Fail::internal("unknown codec shape"))?;
             match (&shape.kind, value) {
@@ -432,7 +445,7 @@ impl EncodeWalk<'_, '_> {
                         let mark = self.context.root_mark();
                         let inner = self.context.vm().heap.field(value, 0).ok_or_else(|| Fail::internal("encode: empty Some"))?;
                         let inner_root = self.context.root(inner);
-                        dict = eval_template(self.context, dict, &shape.parts[0])?;
+                        (dict, known_shape) = eval_part(self.context, dict, &shape.parts[0])?;
                         value = self.context.value(inner_root);
                         self.context.truncate_roots(mark);
                         sink_mut(self.sink)?.begin(Container::Some)?;
@@ -506,7 +519,11 @@ impl EncodeWalk<'_, '_> {
         sink_mut(self.sink)?.begin(if is_set { Container::Set(len) } else { Container::List(len) })?;
         if len > 0 {
             let base = self.context.root(value).0 as usize;
-            let elem_dict = eval_template(self.context, dict, &shape.parts[0])?;
+            let (elem_dict, elem_shape) = eval_part(self.context, dict, &shape.parts[0])?;
+            let elem_shape = match elem_shape {
+                Some(idx) => Some(idx),
+                None => dict_shape(self.context.vm(), elem_dict)?,
+            };
             self.context.root(elem_dict);
             if is_set {
                 self.context.step(|vm| vm.check_memory(NODE_BYTES))?;
@@ -519,12 +536,12 @@ impl EncodeWalk<'_, '_> {
                     if !self.context.vm_mut().set_step(iter, &mut elem) {
                         break;
                     }
-                    self.visit(elem, self.context.root_at(base + 1), depth + 1)?;
+                    self.visit(elem, self.context.root_at(base + 1), elem_shape, depth + 1)?;
                 }
             } else {
                 for index in 0..len {
                     let Some(&item) = self.context.vm().heap.list(self.context.root_at(base)).get(index) else { break };
-                    self.visit(item, self.context.root_at(base + 1), depth + 1)?;
+                    self.visit(item, self.context.root_at(base + 1), elem_shape, depth + 1)?;
                 }
             }
             self.context.truncate_roots(base);
@@ -541,8 +558,13 @@ impl EncodeWalk<'_, '_> {
         if live > 0 {
             let base = self.context.root(value).0 as usize;
             self.context.root(dict);
-            for part in &shape.parts[..2] {
-                let part_dict = eval_template(self.context, self.context.root_at(base + 1), part)?;
+            let mut part_shapes = [None; 2];
+            for (slot, part) in shape.parts[..2].iter().enumerate() {
+                let (part_dict, shape_idx) = eval_part(self.context, self.context.root_at(base + 1), part)?;
+                part_shapes[slot] = match shape_idx {
+                    Some(idx) => Some(idx),
+                    None => dict_shape(self.context.vm(), part_dict)?,
+                };
                 self.context.root(part_dict);
             }
             self.context.step(|vm| vm.check_memory(NODE_BYTES))?;
@@ -556,8 +578,8 @@ impl EncodeWalk<'_, '_> {
                     break;
                 }
                 self.context.set_root(base + 1, pair[1]);
-                self.visit(pair[0], self.context.root_at(base + 2), depth + 1)?;
-                self.visit(self.context.root_at(base + 1), self.context.root_at(base + 3), depth + 1)?;
+                self.visit(pair[0], self.context.root_at(base + 2), part_shapes[0], depth + 1)?;
+                self.visit(self.context.root_at(base + 1), self.context.root_at(base + 3), part_shapes[1], depth + 1)?;
             }
             self.context.truncate_roots(base);
         }
@@ -580,14 +602,14 @@ impl EncodeWalk<'_, '_> {
                 if let Some(names) = names {
                     sink_mut(self.sink)?.field(&names[index])?;
                 }
-                let child_dict = eval_template(self.context, self.context.root_at(base + 1), part)?;
+                let (child_dict, child_shape) = eval_part(self.context, self.context.root_at(base + 1), part)?;
                 let field_val = self
                     .context
                     .vm()
                     .heap
                     .field(self.context.root_at(base), index)
                     .ok_or_else(|| Fail::internal("encode: field out of bounds"))?;
-                self.visit(field_val, child_dict, next_depth)?;
+                self.visit(field_val, child_dict, child_shape, next_depth)?;
             }
             self.context.truncate_roots(base);
         }
@@ -625,7 +647,7 @@ fn encode_inner(
     }
     let prog = context.vm().prog.clone();
     let (value, dict) = (context.value(value_root), context.value(dict_root));
-    let result = EncodeWalk { context, prog: &prog, sink, unchecked: CHECKED_VALUES }.visit(value, dict, depth);
+    let result = EncodeWalk { context, prog: &prog, sink, unchecked: CHECKED_VALUES }.visit(value, dict, None, depth);
     context.truncate_roots(mark);
     result
 }
@@ -646,7 +668,7 @@ struct DecodeWalk<'a, 'c> {
 }
 
 impl DecodeWalk<'_, '_> {
-    fn visit(&mut self, mut dict: VmValue, depth: usize) -> CodecResult<VmValue> {
+    fn visit(&mut self, mut dict: VmValue, mut known_shape: Option<u32>, depth: usize) -> CodecResult<VmValue> {
         let mut somes = 0usize;
         let mut value = loop {
             if self.unchecked == 0 {
@@ -660,12 +682,18 @@ impl DecodeWalk<'_, '_> {
             self.unchecked -= 1;
             let consumed = source_mut(self.source)?.take_consumed_bytes();
             self.context.vm().charge(1 + (consumed / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
-            let Some(shape_idx) = dict_shape(self.context.vm(), dict)? else {
-                let (decoded, unread) = run_custom(self.context, dict, None, self.source, depth)?;
-                if unread {
-                    source_mut(self.source)?.skip()?;
-                }
-                break decoded;
+            let shape_idx = match known_shape.take() {
+                Some(idx) => idx,
+                None => match dict_shape(self.context.vm(), dict)? {
+                    Some(idx) => idx,
+                    None => {
+                        let (decoded, unread) = run_custom(self.context, dict, None, self.source, depth)?;
+                        if unread {
+                            source_mut(self.source)?.skip()?;
+                        }
+                        break decoded;
+                    }
+                },
             };
             let shape = self.prog.shapes.get(shape_idx as usize).ok_or_else(|| Fail::internal("unknown codec shape"))?;
             break match &shape.kind {
@@ -712,7 +740,7 @@ impl DecodeWalk<'_, '_> {
                 ShapeKind::Option => match source_mut(self.source)?.option()? {
                     false => VmValue::Tag(self.prog.ids.none),
                     true => {
-                        dict = eval_template(self.context, dict, &shape.parts[0])?;
+                        (dict, known_shape) = eval_part(self.context, dict, &shape.parts[0])?;
                         somes += 1;
                         continue;
                     }
@@ -753,7 +781,11 @@ impl DecodeWalk<'_, '_> {
         check_depth(depth)?;
         source_mut(self.source)?.open_seq(None)?;
         let base = self.context.root(VmValue::Unit).0 as usize;
-        let elem_dict = eval_template(self.context, dict, &shape.parts[0])?;
+        let (elem_dict, elem_shape) = eval_part(self.context, dict, &shape.parts[0])?;
+        let elem_shape = match elem_shape {
+            Some(idx) => Some(idx),
+            None => dict_shape(self.context.vm(), elem_dict)?,
+        };
         self.context.root(elem_dict);
         let collection = if is_set {
             self.context.vm_mut().heap.alloc(Obj::Set(Box::<SetObj>::default()))
@@ -762,7 +794,7 @@ impl DecodeWalk<'_, '_> {
         };
         self.context.set_root(base, collection);
         while source_mut(self.source)?.next()? {
-            let item = self.visit(self.context.root_at(base + 1), depth + 1)?;
+            let item = self.visit(self.context.root_at(base + 1), elem_shape, depth + 1)?;
             self.context.set_root(self.scratch, item);
             let collection = self.context.root_at(base);
             if is_set {
@@ -787,16 +819,21 @@ impl DecodeWalk<'_, '_> {
         source_mut(self.source)?.open_map(false)?;
         let base = self.context.root(VmValue::Unit).0 as usize;
         self.context.root(dict);
-        for part in &shape.parts[..2] {
-            let part_dict = eval_template(self.context, self.context.root_at(base + 1), part)?;
+        let mut part_shapes = [None; 2];
+        for (slot, part) in shape.parts[..2].iter().enumerate() {
+            let (part_dict, shape_idx) = eval_part(self.context, self.context.root_at(base + 1), part)?;
+            part_shapes[slot] = match shape_idx {
+                Some(idx) => Some(idx),
+                None => dict_shape(self.context.vm(), part_dict)?,
+            };
             self.context.root(part_dict);
         }
         let map = self.context.vm_mut().heap.alloc(Obj::Map(Box::<MapObj>::default()));
         self.context.set_root(base, map);
         while source_mut(self.source)?.next()? {
-            let key = self.visit(self.context.root_at(base + 2), depth + 1)?;
+            let key = self.visit(self.context.root_at(base + 2), part_shapes[0], depth + 1)?;
             self.context.set_root(base + 1, key);
-            let value = self.visit(self.context.root_at(base + 3), depth + 1)?;
+            let value = self.visit(self.context.root_at(base + 3), part_shapes[1], depth + 1)?;
             self.context.set_root(self.scratch, value);
             let (map, key) = (self.context.root_at(base), self.context.root_at(base + 1));
             self.context.step(|vm| check_set_or_map_growth(vm, map, key))?;
@@ -862,8 +899,8 @@ impl DecodeWalk<'_, '_> {
 
     #[inline(always)]
     fn read_slot(&mut self, dict_root: usize, base: usize, part: &PartTemplate, slot: usize, depth: usize) -> CodecResult {
-        let part_dict = eval_template(self.context, self.context.root_at(dict_root), part)?;
-        let value = self.visit(part_dict, depth)?;
+        let (part_dict, part_shape) = eval_part(self.context, self.context.root_at(dict_root), part)?;
+        let value = self.visit(part_dict, part_shape, depth)?;
         self.context.set_root(base + slot, value);
         Ok(())
     }
@@ -1010,7 +1047,7 @@ fn decode_inner(context: &mut CallContext, source: &mut Option<JsonSource>, dept
     let scratch = context.root(VmValue::Unit).0 as usize;
     let prog = context.vm().prog.clone();
     let dict = context.value(dict_root);
-    let result = DecodeWalk { context, prog: &prog, source, scratch, unchecked: CHECKED_VALUES }.visit(dict, depth);
+    let result = DecodeWalk { context, prog: &prog, source, scratch, unchecked: CHECKED_VALUES }.visit(dict, None, depth);
     if let Some(source) = source.as_mut() {
         context.vm().charge((source.take_consumed_bytes() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
     }

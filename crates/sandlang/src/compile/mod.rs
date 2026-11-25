@@ -2809,11 +2809,16 @@ impl<'a> Compiler<'a> {
 
     fn part_template(&mut self, dict_expr: &'a HExpr) -> PartTemplate {
         if let Some(k) = self.const_dict(dict_expr) {
-            return PartTemplate::Const(k);
+            let shape = match &dict_expr.kind {
+                HKind::Dict { impl_id, .. } if self.cp.is_structural_impl(*impl_id) => Some(self.shape_idx_of(*impl_id)),
+                _ => None,
+            };
+            return PartTemplate::Const(k, shape);
         }
         match &dict_expr.kind {
             HKind::Dict { impl_id, args } => {
-                let mut items: Vec<PartTemplate> = self.dict_header_consts(*impl_id).into_iter().map(PartTemplate::Const).collect();
+                let mut items: Vec<PartTemplate> =
+                    self.dict_header_consts(*impl_id).into_iter().map(|k| PartTemplate::Const(k, None)).collect();
                 items.extend(args.iter().map(|a| self.part_template(a)));
                 PartTemplate::Dict(items)
             }
@@ -2823,7 +2828,7 @@ impl<'a> Compiler<'a> {
             },
             _ => {
                 self.errors.push(Diag::error(dict_expr.span, "internal error: a structural part has no dictionary"));
-                PartTemplate::Const(0)
+                PartTemplate::Const(0, None)
             }
         }
     }

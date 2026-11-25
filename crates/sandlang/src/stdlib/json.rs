@@ -108,9 +108,9 @@ pub(crate) fn module() -> NativeModule {
     module.function(
         "encode",
         |context: &mut CallContext, dict: TraitDict<0, traits::Encode>, value: Param<0>, indent: i64| -> CodecResult<VmVal<String>> {
-            let sink = JsonSink::new(indent.clamp(0, 1 << 16) as usize, context.vm());
+            let sink = JsonSink::text(indent.clamp(0, 1 << 16) as usize, context.vm());
             codec::encode(context, sink, value.raw(), dict.raw(), |context, mut sink| {
-                let (text, reservation, fuel) = sink.take_text();
+                let (text, reservation, fuel) = sink.out.take_text();
                 drop(reservation);
                 context.vm().charge(fuel)?;
                 context.step(|vm| vm.check_memory(NODE_BYTES.saturating_add(text.len())))?;
@@ -121,13 +121,13 @@ pub(crate) fn module() -> NativeModule {
     module.function(
         "to_json",
         |context: &mut CallContext, dict: TraitDict<0, traits::Encode>, value: Param<0>| -> CodecResult<VmVal<Json>> {
-            let sink = JsonSink::new(0, context.vm());
-            codec::encode(context, sink, value.raw(), dict.raw(), |context, mut sink| {
-                let (text, reservation, fuel) = sink.take_text();
-                context.vm().charge(fuel)?;
-                let mut source = JsonSource::owned(text, reservation, context.vm().meter.worker_meter());
-                let json = decode_json(context, &mut source)?;
-                context.vm().charge(1 + (source.take_consumed_bytes() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
+            let sink = JsonSink::tokens(context.vm());
+            codec::encode(context, sink, value.raw(), dict.raw(), |context, sink| {
+                let ids = JsonIds::new(&context.vm().prog)?;
+                let json = context.step(|vm| {
+                    let meter = &vm.meter;
+                    vm.heap.staged(|_, st| Builder::new(st, meter).build_tokens(ids, &sink.out.tokens, &sink.out.text))
+                })?;
                 Ok(VmVal::<Json>::from_raw(json))
             })
         },
@@ -1110,22 +1110,66 @@ enum SinkFrame {
     Inline,
 }
 
-/// [`EncodeSink`] that writes JSON text directly into a memory-tracked buffer.
-struct JsonSink {
+trait JsonOut: Send + 'static {
+    fn null(&mut self) -> CodecResult;
+    fn bool_(&mut self, v: bool, is_key: bool) -> CodecResult;
+    fn int(&mut self, v: i64, is_key: bool) -> CodecResult;
+    fn float(&mut self, v: f64) -> CodecResult;
+    fn str_(&mut self, s: &str, is_key: bool) -> CodecResult;
+    fn bytes(&mut self, b: &[u8]) -> CodecResult;
+    fn open_bracket(&mut self, is_array: bool) -> CodecResult;
+    fn close_bracket(&mut self) -> CodecResult;
+}
+
+/// [`EncodeSink`] that writes JSON to a [`JsonOut`] backend.
+struct JsonSink<O> {
+    out: O,
+    frames: Vec<SinkFrame>,
+}
+
+impl JsonSink<TextOut> {
+    fn text(indent: usize, vm: &Vm) -> Self {
+        let (reservation, meter) = (Reservation::new(&vm.heap.io_memory), vm.meter.worker_meter());
+        JsonSink {
+            out: TextOut { out: String::new(), reservation, meter, indent, brackets: Vec::new(), after_key: false },
+            frames: Vec::new(),
+        }
+    }
+}
+
+impl JsonSink<TokenOut> {
+    fn tokens(vm: &Vm) -> Self {
+        JsonSink {
+            out: TokenOut { tokens: Vec::new(), text: String::new(), depth: 0, reservation: Reservation::new(&vm.heap.io_memory) },
+            frames: Vec::new(),
+        }
+    }
+}
+
+impl<O: JsonOut> JsonSink<O> {
+    #[inline(always)]
+    fn next_is_key(&mut self) -> bool {
+        if let Some(SinkFrame::Map(k)) = self.frames.last_mut() { std::mem::replace(k, !*k) } else { false }
+    }
+    fn begin(&mut self, frame: SinkFrame, is_array: bool) -> CodecResult {
+        if self.next_is_key() {
+            return invalid_key_error();
+        }
+        self.frames.push(frame);
+        self.out.open_bracket(is_array)
+    }
+}
+
+struct TextOut {
     out: String,
     reservation: Reservation,
     meter: WorkerMeter,
     indent: usize,
     brackets: Vec<(bool, bool)>,
     after_key: bool,
-    frames: Vec<SinkFrame>,
 }
 
-impl JsonSink {
-    fn new(indent: usize, vm: &Vm) -> JsonSink {
-        let (reservation, meter) = (Reservation::new(&vm.heap.io_memory), vm.meter.worker_meter());
-        JsonSink { out: String::new(), reservation, meter, indent, brackets: Vec::new(), after_key: false, frames: Vec::new() }
-    }
+impl TextOut {
     fn take_text(&mut self) -> (String, Reservation, u64) {
         let sibling = self.reservation.sibling();
         (std::mem::take(&mut self.out), std::mem::replace(&mut self.reservation, sibling), self.meter.fuel_used())
@@ -1179,24 +1223,6 @@ impl JsonSink {
         }
         Ok(())
     }
-    fn open_bracket(&mut self, is_array: bool) -> CodecResult {
-        if self.brackets.len() >= MAX_NESTING_DEPTH {
-            return codec::nesting_limit_error();
-        }
-        self.separate(1)?;
-        self.out.push(if is_array { '[' } else { '{' });
-        self.brackets.push((is_array, true));
-        Ok(())
-    }
-    fn close_bracket(&mut self) -> CodecResult {
-        let Some((is_array, is_empty)) = self.brackets.pop() else { return Ok(()) };
-        if !is_empty {
-            self.start_line()?;
-        }
-        self.reserve(1)?;
-        self.out.push(if is_array { ']' } else { '}' });
-        Ok(())
-    }
     #[inline(always)]
     fn write_quoted(&mut self, text: &str, extra_reserve: usize) -> CodecResult {
         self.separate(quoted_len(text).saturating_add(extra_reserve))?;
@@ -1224,61 +1250,165 @@ impl JsonSink {
         self.out.push_str(s);
         Ok(())
     }
-    #[inline(always)]
-    fn next_is_key(&mut self) -> bool {
-        if let Some(SinkFrame::Map(k)) = self.frames.last_mut() { std::mem::replace(k, !*k) } else { false }
+}
+
+impl JsonOut for TextOut {
+    fn null(&mut self) -> CodecResult {
+        self.write_atom("null", false)
     }
-    fn begin(&mut self, frame: SinkFrame, is_array: bool) -> CodecResult {
-        if self.next_is_key() {
-            return invalid_key_error();
+    fn bool_(&mut self, v: bool, is_key: bool) -> CodecResult {
+        self.write_atom(if v { "true" } else { "false" }, is_key)
+    }
+    fn int(&mut self, v: i64, is_key: bool) -> CodecResult {
+        self.write_atom(itoa::Buffer::new().format(v), is_key)
+    }
+    fn float(&mut self, v: f64) -> CodecResult {
+        self.separate(MAX_SCALAR_BYTES)?;
+        let _ = write!(self.out, "{v:?}");
+        Ok(())
+    }
+    fn str_(&mut self, s: &str, is_key: bool) -> CodecResult {
+        if is_key { self.write_key(s) } else { self.write_quoted(s, 0) }
+    }
+    fn bytes(&mut self, b: &[u8]) -> CodecResult {
+        self.separate(b.len().div_ceil(3) * 4 + 2)?;
+        self.out.push('"');
+        base64::encode_into(&mut self.out, b, false);
+        self.out.push('"');
+        Ok(())
+    }
+    fn open_bracket(&mut self, is_array: bool) -> CodecResult {
+        if self.brackets.len() >= MAX_NESTING_DEPTH {
+            return codec::nesting_limit_error();
         }
-        self.frames.push(frame);
-        self.open_bracket(is_array)
+        self.separate(1)?;
+        self.out.push(if is_array { '[' } else { '{' });
+        self.brackets.push((is_array, true));
+        Ok(())
+    }
+    fn close_bracket(&mut self) -> CodecResult {
+        let Some((is_array, is_empty)) = self.brackets.pop() else { return Ok(()) };
+        if !is_empty {
+            self.start_line()?;
+        }
+        self.reserve(1)?;
+        self.out.push(if is_array { ']' } else { '}' });
+        Ok(())
     }
 }
 
-impl EncodeSink for JsonSink {
+enum JsonToken {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(u32, u32),
+    Arr,
+    Obj,
+    End,
+}
+
+struct TokenOut {
+    tokens: Vec<JsonToken>,
+    text: String,
+    depth: usize,
+    reservation: Reservation,
+}
+
+impl TokenOut {
+    fn reserve(&mut self, extra_tokens: usize, extra_bytes: usize) -> CodecResult {
+        let bytes = self
+            .tokens
+            .len()
+            .saturating_add(extra_tokens)
+            .saturating_mul(std::mem::size_of::<JsonToken>())
+            .saturating_add(self.text.len().saturating_add(extra_bytes));
+        if bytes > self.reservation.bytes()
+            && self.reservation.ensure(bytes.saturating_mul(2).max(256)).or_else(|_| self.reservation.ensure(bytes)).is_err()
+        {
+            return codec::memory_limit_error();
+        }
+        Ok(())
+    }
+    fn push(&mut self, tok: JsonToken) -> CodecResult {
+        self.reserve(1, 0)?;
+        self.tokens.push(tok);
+        Ok(())
+    }
+}
+
+impl JsonOut for TokenOut {
+    fn null(&mut self) -> CodecResult {
+        self.push(JsonToken::Null)
+    }
+    fn bool_(&mut self, v: bool, is_key: bool) -> CodecResult {
+        if is_key { self.str_(if v { "true" } else { "false" }, true) } else { self.push(JsonToken::Bool(v)) }
+    }
+    fn int(&mut self, v: i64, is_key: bool) -> CodecResult {
+        if is_key { self.str_(itoa::Buffer::new().format(v), true) } else { self.push(JsonToken::Int(v)) }
+    }
+    fn float(&mut self, v: f64) -> CodecResult {
+        self.push(JsonToken::Float(v))
+    }
+    fn str_(&mut self, s: &str, _is_key: bool) -> CodecResult {
+        self.reserve(1, s.len())?;
+        let start = u32::try_from(self.text.len()).map_err(|_| Fail::limit(crate::engine::LimitKind::Memory))?;
+        let len = u32::try_from(s.len()).map_err(|_| Fail::limit(crate::engine::LimitKind::Memory))?;
+        self.text.push_str(s);
+        self.tokens.push(JsonToken::Str(start, len));
+        Ok(())
+    }
+    fn bytes(&mut self, b: &[u8]) -> CodecResult {
+        self.reserve(1, b.len().div_ceil(3) * 4)?;
+        let start = u32::try_from(self.text.len()).map_err(|_| Fail::limit(crate::engine::LimitKind::Memory))?;
+        base64::encode_into(&mut self.text, b, false);
+        let len = (self.text.len() - start as usize) as u32;
+        self.tokens.push(JsonToken::Str(start, len));
+        Ok(())
+    }
+    fn open_bracket(&mut self, is_array: bool) -> CodecResult {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return codec::nesting_limit_error();
+        }
+        self.depth += 1;
+        self.push(if is_array { JsonToken::Arr } else { JsonToken::Obj })
+    }
+    fn close_bracket(&mut self) -> CodecResult {
+        self.depth = self.depth.saturating_sub(1);
+        self.push(JsonToken::End)
+    }
+}
+
+impl<O: JsonOut> EncodeSink for JsonSink<O> {
     fn scalar(&mut self, value: Scalar<'_>) -> CodecResult {
         let is_key = self.next_is_key();
         match value {
-            Scalar::Unit | Scalar::None if !is_key => self.write_atom("null", false),
-            Scalar::Bool(v) => self.write_atom(if v { "true" } else { "false" }, is_key),
-            Scalar::Int(v) | Scalar::Duration(v) => self.write_atom(itoa::Buffer::new().format(v), is_key),
+            Scalar::Unit | Scalar::None if !is_key => self.out.null(),
+            Scalar::Bool(v) => self.out.bool_(v, is_key),
+            Scalar::Int(v) | Scalar::Duration(v) => self.out.int(v, is_key),
             Scalar::Float(v) if !v.is_finite() => Err(HostError::new("invalid", format!("JSON cannot represent the float {v}"))),
-            Scalar::Float(v) if !is_key => {
-                self.separate(MAX_SCALAR_BYTES)?;
-                let _ = write!(self.out, "{v:?}");
-                Ok(())
-            }
-            Scalar::Str(s) | Scalar::Native(_, s) if is_key => self.write_key(s),
-            Scalar::Str(s) | Scalar::Native(_, s) => self.write_quoted(s, 0),
-            Scalar::Variant(d) if is_key => self.write_key(&d.name),
-            Scalar::Variant(d) => self.write_quoted(&d.name, 0),
-            Scalar::Bytes(b) if !is_key => {
-                self.separate(b.len().div_ceil(3) * 4 + 2)?;
-                self.out.push('"');
-                base64::encode_into(&mut self.out, b, false);
-                self.out.push('"');
-                Ok(())
-            }
+            Scalar::Float(v) if !is_key => self.out.float(v),
+            Scalar::Str(s) | Scalar::Native(_, s) => self.out.str_(s, is_key),
+            Scalar::Variant(d) => self.out.str_(&d.name, is_key),
+            Scalar::Bytes(b) if !is_key => self.out.bytes(b),
             Scalar::Range(s, e, inc) if !is_key => {
-                self.open_bracket(false)?;
+                self.out.open_bracket(false)?;
                 for (name, b) in [("start", s), ("end", e)] {
-                    self.write_key(name)?;
-                    self.write_atom(itoa::Buffer::new().format(b), false)?;
+                    self.out.str_(name, true)?;
+                    self.out.int(b, false)?;
                 }
                 if inc {
-                    self.write_key("inclusive")?;
-                    self.write_atom("true", false)?;
+                    self.out.str_("inclusive", true)?;
+                    self.out.bool_(true, false)?;
                 }
-                self.close_bracket()
+                self.out.close_bracket()
             }
             _ => invalid_key_error(),
         }
     }
 
     fn field(&mut self, name: &str) -> CodecResult {
-        self.write_key(name)
+        self.out.str_(name, true)
     }
 
     fn begin(&mut self, kind: Container<'_>) -> CodecResult {
@@ -1295,8 +1425,8 @@ impl EncodeSink for JsonSink {
             Container::Struct(_) => self.begin(SinkFrame::Plain, false),
             Container::Variant(d, _) => {
                 self.begin(SinkFrame::Variant, false)?;
-                self.write_key(&d.name)?;
-                self.open_bracket(d.fields.is_none())
+                self.out.str_(&d.name, true)?;
+                self.out.open_bracket(d.fields.is_none())
             }
         }
     }
@@ -1305,10 +1435,10 @@ impl EncodeSink for JsonSink {
         match self.frames.pop() {
             Some(SinkFrame::Inline) | None => Ok(()),
             Some(SinkFrame::Variant) => {
-                self.close_bracket()?;
-                self.close_bracket()
+                self.out.close_bracket()?;
+                self.out.close_bracket()
             }
-            Some(_) => self.close_bracket(),
+            Some(_) => self.out.close_bracket(),
         }
     }
 }
@@ -1381,7 +1511,7 @@ fn write_escaped(out: &mut String, s: &str) {
 }
 
 fn encode_json(vm: &Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecResult {
-    fn walk(vm: &Vm, ids: JsonIds, node: VmValue, sink: &mut dyn EncodeSink, depth: usize) -> CodecResult {
+    fn walk<S: EncodeSink + ?Sized>(vm: &Vm, ids: JsonIds, node: VmValue, sink: &mut S, depth: usize) -> CodecResult {
         vm.meter.charge(1)?;
         let id = vm.heap.variant_id(node);
         match vm.heap.field(node, 0) {
@@ -1422,15 +1552,95 @@ fn encode_json(vm: &Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecResul
             _ => Err(mismatch::<Json>().into()),
         }
     }
-    walk(vm, JsonIds::new(&vm.prog)?, value, sink, 0)
+    let ids = JsonIds::new(&vm.prog)?;
+    if let Some(json_sink) = (sink as &mut dyn std::any::Any).downcast_mut::<JsonSink<TextOut>>() {
+        walk(vm, ids, value, json_sink, 0)
+    } else {
+        walk(vm, ids, value, sink, 0)
+    }
 }
 
 impl Builder<'_, '_, '_> {
+    fn build_tokens(&mut self, ids: JsonIds, tokens: &[JsonToken], text: &str) -> Result<VmValue, Fail> {
+        enum Frame {
+            Arr(Vec<VmValue>),
+            Obj(usize, u64, VmValue),
+        }
+        let mut stack = Vec::new();
+        let mut idx = 0usize;
+        loop {
+            self.reserve()?;
+            self.meter.charge(1)?;
+            let tok = tokens.get(idx).ok_or_else(missing_root_error)?;
+            idx += 1;
+            let mut value = match *tok {
+                JsonToken::Null => Some(VmValue::Tag(ids.null)),
+                JsonToken::Bool(v) => Some(self.st.new_variant(ids.bool_, &[VmValue::Bool(v)])),
+                JsonToken::Int(v) => Some(self.st.new_variant(ids.int, &[VmValue::Int(v)])),
+                JsonToken::Float(v) => Some(self.st.new_variant(ids.float, &[VmValue::Float(v)])),
+                JsonToken::Str(start, len) => {
+                    let s = &text[start as usize..(start + len) as usize];
+                    self.st.check_memory((NODE_BYTES + self.pending).saturating_add(s.len()))?;
+                    self.meter.charge_bytes(s.len())?;
+                    let sv = self.st.new_str(s);
+                    Some(self.st.new_variant(ids.str_, &[sv]))
+                }
+                JsonToken::Arr => {
+                    stack.push(Frame::Arr(Vec::new()));
+                    None
+                }
+                JsonToken::Obj => {
+                    stack.push(Frame::Obj(self.entries.len(), 0, VmValue::Unit));
+                    None
+                }
+                JsonToken::End => return Err(missing_root_error()),
+            };
+            loop {
+                match stack.last_mut() {
+                    None => return value.ok_or_else(missing_root_error),
+                    Some(Frame::Arr(items)) => {
+                        if let Some(elem) = value.take() {
+                            self.push(items, elem)?;
+                        }
+                        if !matches!(tokens.get(idx), None | Some(JsonToken::End)) {
+                            break;
+                        }
+                    }
+                    Some(Frame::Obj(base, hash, key)) => {
+                        if let Some(elem) = value.take() {
+                            self.append(*base, *hash, *key, elem)?;
+                        }
+                        if let Some(&JsonToken::Str(start, len)) = tokens.get(idx) {
+                            idx += 1;
+                            let key_text = &text[start as usize..(start + len) as usize];
+                            let h = self.hash(key_text)?;
+                            *key = self.key(key_text, h)?;
+                            *hash = h;
+                            break;
+                        }
+                    }
+                }
+                idx += 1;
+                value = Some(match stack.pop().expect("open") {
+                    Frame::Arr(items) => {
+                        let list = self.list(items);
+                        self.st.new_variant(ids.arr, &[list])
+                    }
+                    Frame::Obj(base, ..) => {
+                        let map = self.map(base);
+                        self.st.new_variant(ids.obj, &[map])
+                    }
+                });
+            }
+        }
+    }
+
     fn parse_json(&mut self, ids: JsonIds, source: &mut JsonSource) -> CodecResult<VmValue> {
         enum Frame {
             Arr(Vec<VmValue>),
             Obj(usize, u64, VmValue),
         }
+        let base_depth = source.frames.len() - source.some_depth;
         let mut stack = Vec::new();
         loop {
             self.reserve()?;
@@ -1474,14 +1684,13 @@ impl Builder<'_, '_, '_> {
                             self.st.new_variant(ids.float, &[VmValue::Float(text.parse().unwrap_or(f64::NAN))])
                         })
                     }
-                    Some(b'[') => {
-                        source.open_seq(None)?;
-                        stack.push(Frame::Arr(Vec::new()));
-                        None
-                    }
-                    Some(b'{') => {
-                        source.open_map(true)?;
-                        stack.push(Frame::Obj(self.entries.len(), 0, VmValue::Unit));
+                    Some(b'[' | b'{') => {
+                        if base_depth + stack.len() >= MAX_NESTING_DEPTH {
+                            return Err(source.err_at(source.pos, "nesting too deep"));
+                        }
+                        let is_arr = source.peek() == Some(b'[');
+                        source.pos += 1;
+                        stack.push(if is_arr { Frame::Arr(Vec::new()) } else { Frame::Obj(self.entries.len(), 0, VmValue::Unit) });
                         None
                     }
                     _ => return Err(source.unexpected()),
@@ -1491,26 +1700,47 @@ impl Builder<'_, '_, '_> {
                 match stack.last_mut() {
                     None => return Ok(value.ok_or_else(missing_root_error)?),
                     Some(Frame::Arr(items)) => {
+                        let first = items.is_empty() && value.is_none();
                         if let Some(elem) = value.take() {
                             self.push(items, elem)?;
                         }
-                        if source.next()? {
+                        source.ws();
+                        if !source.eat(b']') {
+                            if !first && !source.eat(b',') {
+                                return Err(source.unexpected());
+                            }
                             break;
                         }
                     }
                     Some(Frame::Obj(base, hash, key)) => {
+                        let first = self.entries.len() == *base && value.is_none();
                         if let Some(elem) = value.take() {
                             self.append(*base, *hash, *key, elem)?;
                         }
-                        if let Some(key_text) = source.next_field()? {
+                        source.ws();
+                        if !source.eat(b'}') {
+                            if !first {
+                                if !source.eat(b',') {
+                                    return Err(source.unexpected());
+                                }
+                                source.ws();
+                            }
+                            if source.peek() != Some(b'"') {
+                                return Err(source.unexpected());
+                            }
+                            let span = source.string(true)?;
+                            let key_text = source.str_of(span);
                             let h = self.hash(key_text)?;
                             *key = self.key(key_text, h)?;
                             *hash = h;
+                            source.ws();
+                            if !source.eat(b':') {
+                                return Err(source.unexpected());
+                            }
                             break;
                         }
                     }
                 }
-                source.end(None)?;
                 value = Some(match stack.pop().expect("open") {
                     Frame::Arr(items) => {
                         let list = self.list(items);

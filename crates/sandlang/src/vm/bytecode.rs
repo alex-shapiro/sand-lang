@@ -1343,8 +1343,8 @@ pub enum ShapeKind {
 /// Template that builds a part dictionary from the outer dictionary.
 #[derive(Clone, Debug)]
 pub enum PartTemplate {
-    /// Constant pool index of a static dictionary.
-    Const(u32),
+    /// Constant pool index of a static dictionary, plus its structural shape index when static.
+    Const(u32, Option<u32>),
     /// Tuple slot of the outer dictionary.
     Bound(u32),
     /// Tuple slot of the dictionary built by the inner template.
