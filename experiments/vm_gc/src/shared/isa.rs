@@ -4,6 +4,10 @@
 pub type Reg = u16;
 
 /// One register-machine instruction. Every instruction costs one unit of fuel.
+///
+/// Operands named `base..base + count` are in the argument area above a
+/// frame's named registers, where the assembler copies them. An
+/// instruction may move them out, so they hold no value afterward.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Op {
     /// `dst = consts[idx]`.
