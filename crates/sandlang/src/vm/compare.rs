@@ -233,12 +233,6 @@ fn hash_small(heap: &Heap, v: VmValue, depth: u32, w: &mut Small) -> Option<u64>
     Some(h.finish())
 }
 
-/// Deep structural equality. Floats at the top level use IEEE semantics;
-/// inside composites NaN equals NaN.
-pub fn values_eq(heap: &Heap, a: VmValue, b: VmValue) -> bool {
-    values_eq_metered(heap, &UnlimitedMeter, a, b).unwrap_or(false)
-}
-
 /// Pending work of an equality check.
 enum EqWork {
     Pair(VmValue, VmValue),
@@ -248,7 +242,8 @@ enum EqWork {
     Map(VmValue, VmValue, usize),
 }
 
-/// [`values_eq`], charging the meter for the work.
+/// Deep structural equality, charging the meter for the work.
+/// Floats at the top level use IEEE semantics; inside composites NaN equals NaN.
 pub fn values_eq_metered(heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => return Ok(x == y),
@@ -459,7 +454,7 @@ pub fn map_slot_tuple(heap: &Heap, meter: &impl Meter, m: &MapObj, items: &[VmVa
         h.write_u64(hash_key(heap, meter, x)?);
     }
     meter.charge(1)?;
-    find_metered(meter, &m.index, VmValue::Unit, h.finish(), |slot| {
+    find_metered(&m.index, VmValue::Unit, h.finish(), |slot| {
         let Some((VmValue::Obj(tuple_handle), _)) = m.entries[slot] else { return Ok(false) };
         let Obj::Tuple(tuple) = heap.obj(tuple_handle) else { return Ok(false) };
         if tuple.len() != items.len() {
@@ -504,32 +499,18 @@ pub fn find_key(
     k: VmValue,
     key_at: impl Fn(usize) -> Option<VmValue>,
 ) -> Result<Option<usize>, Fail> {
-    find_metered(meter, table, k, hash, |slot| match key_at(slot) {
+    find_metered(table, k, hash, |slot| match key_at(slot) {
         Some(stored_key) => keys_eq(heap, meter, stored_key, k),
         None => Ok(false),
     })
 }
 
 /// Finds the slot in `table` for `key` with `hash` that satisfies `is_match`.
-///
-/// Refunds the fuel of each failed comparison. Only the matching comparison
-/// charges the meter.
 #[inline]
-fn find_metered(
-    meter: &impl Meter,
-    table: &KeyIndex,
-    key: VmValue,
-    hash: u64,
-    is_match: impl Fn(usize) -> Result<bool, Fail>,
-) -> Result<Option<usize>, Fail> {
-    let mark = meter.fuel_mark();
+fn find_metered(table: &KeyIndex, key: VmValue, hash: u64, is_match: impl Fn(usize) -> Result<bool, Fail>) -> Result<Option<usize>, Fail> {
     let mut failure = None;
     let slot = table.find(key, hash, |slot| match is_match(slot) {
-        Ok(true) => true,
-        Ok(false) => {
-            meter.refund_to(mark);
-            false
-        }
+        Ok(matched) => matched,
         Err(fail) => {
             failure.get_or_insert(fail);
             false
@@ -560,7 +541,7 @@ pub fn keys_eq(heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Resul
 }
 
 /// Computes the hash of map key or set element `v`, consistent with
-/// [`values_eq`] for all types that implement `Hash`.
+/// [`values_eq_metered`] for all types that implement `Hash`.
 ///
 /// Charges one unit per visited node plus the number of hashed bytes. For large
 /// keys, container hashes are memoized by handle so that keys with shared
@@ -831,11 +812,6 @@ fn variant_index(prog: &Program, id: u32) -> u32 {
     prog.variants.get(id as usize).map(|r| r.index).unwrap_or(0)
 }
 
-/// Total ordering used by `sort` and comparisons of composite values.
-pub fn values_cmp(prog: &Program, heap: &Heap, a: VmValue, b: VmValue) -> Ordering {
-    values_cmp_metered(prog, heap, &UnlimitedMeter, a, b).unwrap_or(Ordering::Equal)
-}
-
 /// Pending work of an ordering comparison.
 enum CmpWork {
     Pair(VmValue, VmValue),
@@ -848,8 +824,9 @@ enum CmpWork {
     },
 }
 
-/// [`values_cmp`], charging the meter for the work. Comparisons are
-/// lexicographic and stop at the first difference.
+/// Total ordering used by `sort` and comparisons of composite values, charging
+/// the meter for the work. Comparisons are lexicographic and stop at the first
+/// difference.
 pub fn values_cmp_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<Ordering, Fail> {
     // Fast paths for the common element types of sorted lists.
     match (a, b) {
@@ -983,22 +960,8 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: Vm
     Ok(Ordering::Equal)
 }
 
-/// `a < b` for generic values (IEEE semantics for top-level floats).
-pub fn values_lt(prog: &Program, heap: &Heap, a: VmValue, b: VmValue) -> bool {
-    match (a, b) {
-        (VmValue::Float(x), VmValue::Float(y)) => x < y,
-        _ => values_cmp(prog, heap, a, b) == Ordering::Less,
-    }
-}
-
-pub fn values_le(prog: &Program, heap: &Heap, a: VmValue, b: VmValue) -> bool {
-    match (a, b) {
-        (VmValue::Float(x), VmValue::Float(y)) => x <= y,
-        _ => values_cmp(prog, heap, a, b) != Ordering::Greater,
-    }
-}
-
-/// [`values_lt`], charging the meter.
+/// `a < b` for generic values (IEEE semantics for top-level floats), charging
+/// the meter.
 pub fn values_lt_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => x < y,
@@ -1006,7 +969,8 @@ pub fn values_lt_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmV
     })
 }
 
-/// [`values_le`], charging the meter.
+/// `a <= b` for generic values (IEEE semantics for top-level floats), charging
+/// the meter.
 pub fn values_le_metered(prog: &Program, heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (VmValue::Float(x), VmValue::Float(y)) => x <= y,
@@ -1265,26 +1229,18 @@ mod tests {
 
     #[derive(Default)]
     struct CountingMeter {
-        units: std::cell::Cell<i64>,
+        units: std::cell::Cell<u64>,
     }
 
     impl Meter for CountingMeter {
         fn charge(&self, units: u64) -> Result<(), Fail> {
-            self.units.set(self.units.get() + units as i64);
+            self.units.set(self.units.get() + units);
             Ok(())
-        }
-
-        fn fuel_mark(&self) -> i64 {
-            self.units.get()
-        }
-
-        fn refund_to(&self, mark: i64) {
-            self.units.set(mark);
         }
     }
 
     #[test]
-    fn find_key_charges_only_for_the_matching_comparison() {
+    fn find_key_charges_for_comparisons() {
         let mut heap = Heap::new(None, usize::MAX);
         let key = heap.new_str("a".repeat(6400));
         let equal = heap.new_str("a".repeat(6400));
@@ -1295,9 +1251,9 @@ mod tests {
 
         let budget = CountingMeter::default();
         assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(other)).unwrap(), None);
-        assert_eq!(budget.units.get(), 0, "hash-tag collision refunded");
+        assert_eq!(budget.units.get(), 100, "colliding comparison charged");
         assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(equal)).unwrap(), Some(0));
-        assert_eq!(budget.units.get(), 100, "6400 bytes compared");
+        assert_eq!(budget.units.get(), 200, "matching comparison charged");
     }
 
     #[test]

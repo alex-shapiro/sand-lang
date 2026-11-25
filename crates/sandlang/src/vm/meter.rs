@@ -1,43 +1,16 @@
-//! Enforces execution limits and cancellation.
+//! Enforces execution limits and cancellation through a fuel counter.
 //!
-//! Checking system clocks and atomic flags on every bytecode instruction is
-//! expensive. [`VmMeter`] amortizes checks through a single fuel counter that
-//! enforces instruction, CPU-time, and wall-clock limits.
-//!
-//! ## How Fuel Works
-//!
-//! - At the start of a fiber's turn, the scheduler grants it a fuel slice.
-//! - The interpreter keeps the active fiber's slice fuel in a local counter.
-//!   It deducts fuel at calls and loop iterations. Before a native call, the
-//!   interpreter commits its bytecode spending. After the call, it reloads its
-//!   counter.
-//! - Native functions and runtime helpers charge fuel through a shared meter.
-//! - Once a slice is exhausted, the meter checks the interrupt flag, instruction
-//!   budget, and CPU and wall-clock deadlines at regular intervals. It returns
-//!   an interrupt or limit failure if a limit is exceeded.
+//! [`VmMeter`] checks for interrupts and execution limits at fixed fuel intervals.
 //!
 //! ## Cost Model
 //!
-//! A fuel unit corresponds to a simple bytecode loop iteration. Native
-//! functions and runtime helpers must charge fuel in proportion to their work
-//! so they cannot bypass execution limits.
+//! A fuel unit equals a bytecode loop iteration. Native functions and
+//! runtime helpers must charge fuel in proportion to their work.
 //!
-//! - [`VmMeter::charge`] charges a unit for each logical item processed, such as
-//!   a container element, traversal node, or match.
-//! - [`VmMeter::charge_bytes`] charges a unit per [`BYTES_PER_FUEL_UNIT`] bytes
-//!   for bulk memory work such as copying, comparing, or scanning.
-//! - [`VmMeter::charge_slow_bytes`] charges a unit per
-//!   [`SLOW_BYTES_PER_FUEL_UNIT`] bytes for per-byte algorithms such as
-//!   hashing, regex search, and encoding.
-//!
-//! Charge the estimated cost of an uninterruptible operation before starting
-//! it. The operation then stops immediately if the remaining budget is too
-//! small. If you cannot estimate cost in advance, meter the operation by
-//! elapsed time. See `stdlib/regex.rs` for an example.
-//!
-//! Shared substructure can cause formatting, encoding, or comparison to expand
-//! a small heap graph exponentially. Charge fuel as you traverse nodes or emit
-//! output rather than by the input's heap size.
+//! - Charge uninterruptible work before it starts. If you cannot estimate cost
+//!   up front, meter by elapsed time. See `stdlib/regex.rs`.
+//! - Charge while traversing nodes or emitting output. Shared heap values can
+//!   expand exponentially.
 
 use super::Fail;
 use crate::engine::LimitKind;
@@ -57,27 +30,18 @@ pub trait Meter {
     fn charge_bytes(&self, byte_count: usize) -> Result<(), Fail> {
         self.charge((byte_count / BYTES_PER_FUEL_UNIT) as u64)
     }
-
-    /// Returns the current fuel position.
-    fn fuel_mark(&self) -> i64;
-
-    /// Restores fuel to `mark` so the VM does not charge for aborted retries or
-    /// discarded probes.
-    fn refund_to(&self, mark: i64);
 }
 
 /// Tracks fuel and enforces limits inside the VM.
 pub struct VmMeter {
-    /// Remaining fuel in the current slice. Negative if the slice is overspent.
-    remaining_slice_fuel: Cell<i64>,
-    /// Interpreter fuel counter recorded at the last sync boundary.
+    /// Fuel spent in the current run.
+    spent_fuel: Cell<u64>,
+    /// Fuel at which the next limit check runs.
+    next_check_fuel: Cell<u64>,
+    /// Fuel at which the current fiber slice ends.
+    slice_fuel: Cell<u64>,
+    /// Starting countdown handed to the interpreter at the last sync boundary.
     interpreter_fuel_baseline: Cell<i64>,
-    /// Threshold below which the next charge triggers a limit checkpoint.
-    next_limit_check_fuel: Cell<i64>,
-    /// Fuel granted at the start of the current slice.
-    slice_initial_fuel: Cell<i64>,
-    /// Total fuel spent across earlier slices in the current run.
-    prior_slices_fuel: Cell<u64>,
     max_instructions: Option<u64>,
     cpu_deadline: Cell<Option<Duration>>,
     wall_deadline: Cell<Option<Instant>>,
@@ -89,11 +53,10 @@ impl VmMeter {
     /// Creates a meter.
     pub fn new(max_instructions: Option<u64>, interrupt_flag: Arc<AtomicBool>, clock: Arc<dyn Clock>) -> VmMeter {
         VmMeter {
-            remaining_slice_fuel: Cell::new(0),
+            spent_fuel: Cell::new(0),
+            next_check_fuel: Cell::new(0),
+            slice_fuel: Cell::new(0),
             interpreter_fuel_baseline: Cell::new(0),
-            next_limit_check_fuel: Cell::new(0),
-            slice_initial_fuel: Cell::new(0),
-            prior_slices_fuel: Cell::new(0),
             max_instructions,
             cpu_deadline: Cell::new(None),
             wall_deadline: Cell::new(None),
@@ -102,17 +65,12 @@ impl VmMeter {
         }
     }
 
-    /// Charges fuel for native or runtime work and enforces execution limits at
-    /// periodic checkpoints.
-    ///
-    /// Returns immediately if remaining fuel is at or above the next
-    /// checkpoint. Runs a full limit check if remaining fuel is below the
-    /// checkpoint.
+    /// Charges fuel for work and enforces execution limits.
     #[inline]
     pub fn charge(&self, units: u64) -> Result<(), Fail> {
-        let remaining = self.remaining_slice_fuel.get().saturating_sub(units.min(i64::MAX as u64) as i64);
-        self.remaining_slice_fuel.set(remaining);
-        if remaining < self.next_limit_check_fuel.get() { self.run_limit_checkpoint() } else { Ok(()) }
+        let used = self.spent_fuel.get().saturating_add(units);
+        self.spent_fuel.set(used);
+        if used > self.next_check_fuel.get() { self.advance_limit_check() } else { Ok(()) }
     }
 
     /// Charges fuel for bulk memory work like copying, comparing, or scanning.
@@ -127,41 +85,40 @@ impl VmMeter {
         self.charge((byte_count / SLOW_BYTES_PER_FUEL_UNIT) as u64)
     }
 
-    /// Verifies immediately whether execution must stop due to cancellation,
+    /// Fails if execution must stop due to cancellation,
     /// `max_instructions`, CPU time, or wall-clock time.
     pub fn check_limits(&self) -> Result<(), Fail> {
         if self.interrupt_flag.load(Ordering::Relaxed) {
             return Err(Fail::interrupted());
         }
         if let Some(max) = self.max_instructions
-            && self.total_fuel_used() > max
+            && self.spent_fuel.get() > max
         {
             return Err(Fail::limit(LimitKind::Instructions));
         }
-        if self.cpu_deadline.get().is_some_and(|deadline| self.clock.cpu_time() >= deadline) {
+        if let Some(deadline) = self.cpu_deadline.get()
+            && deadline <= self.clock.cpu_time()
+        {
             return Err(Fail::limit(LimitKind::CpuTime));
         }
-        if self.wall_deadline.get().is_some_and(|deadline| self.clock.now() >= deadline) {
+        if let Some(deadline) = self.wall_deadline.get()
+            && deadline <= self.clock.now()
+        {
             return Err(Fail::limit(LimitKind::WallTime));
         }
         Ok(())
     }
 
-    /// Returns the remaining fuel in the current slice.
-    /// A negative value indicates an overspent slice.
+    /// Returns `true` if the current fiber slice has spent its fuel allowance.
     #[inline]
-    pub fn remaining_slice_fuel(&self) -> i64 {
-        self.remaining_slice_fuel.get()
-    }
-
-    /// Returns fuel spent in the current slice.
-    pub fn slice_fuel_spent(&self) -> u64 {
-        self.slice_initial_fuel.get().saturating_sub(self.remaining_slice_fuel.get()).max(0) as u64
+    pub fn is_slice_exhausted(&self) -> bool {
+        self.spent_fuel.get() >= self.slice_fuel.get()
     }
 
     /// Returns fuel spent across the current run.
+    #[inline]
     pub fn total_fuel_used(&self) -> u64 {
-        self.prior_slices_fuel.get().saturating_add(self.slice_fuel_spent())
+        self.spent_fuel.get()
     }
 
     /// Begins a scheduling slice with a fuel allowance and time deadline.
@@ -170,19 +127,18 @@ impl VmMeter {
     /// after `SLICE_FUEL` units or stops at `max_instructions`. Returns the
     /// starting fuel for the interpreter's local counter.
     pub(crate) fn start_slice(&self, cpu_deadline: Option<Duration>, wall_deadline: Option<Instant>) -> i64 {
-        let used = self.total_fuel_used();
-        let slice_fuel = match self.max_instructions {
-            Some(max) => max.saturating_sub(used).min(super::SLICE_FUEL as u64) as i64,
-            None => super::SLICE_FUEL,
-        };
-        self.prior_slices_fuel.set(used);
-        self.slice_initial_fuel.set(slice_fuel);
-        self.remaining_slice_fuel.set(slice_fuel);
-        self.interpreter_fuel_baseline.set(slice_fuel);
-        self.next_limit_check_fuel.set(0);
+        let end = self.cap_target(self.spent_fuel.get().saturating_add(super::SLICE_FUEL as u64));
+        self.slice_fuel.set(end);
+        self.next_check_fuel.set(end);
         self.cpu_deadline.set(cpu_deadline);
         self.wall_deadline.set(wall_deadline);
-        slice_fuel
+        self.reload_interpreter_fuel()
+    }
+
+    /// Checks limits and sets the next check window.
+    pub(crate) fn refill_after_limit_check(&self) -> Result<i64, Fail> {
+        self.advance_limit_check()?;
+        Ok(self.reload_interpreter_fuel())
     }
 
     /// Commits bytecode fuel spent in the interpreter's local counter back into
@@ -193,35 +149,26 @@ impl VmMeter {
     /// Pass the interpreter's current `interpreter_fuel` counter.
     #[inline]
     pub(crate) fn flush_interpreter_fuel(&self, interpreter_fuel: i64) {
-        let bytecode_spent = self.interpreter_fuel_baseline.get() - interpreter_fuel;
-        self.remaining_slice_fuel.set(self.remaining_slice_fuel.get() - bytecode_spent);
+        let spent = self.interpreter_fuel_baseline.get().saturating_sub(interpreter_fuel).max(0) as u64;
+        self.spent_fuel.set(self.spent_fuel.get().saturating_add(spent));
     }
 
-    /// Synchronizes the interpreter's local counter with fuel spent during a
-    /// native call.
-    ///
-    /// Call this after a native call returns. The returned value becomes the
-    /// interpreter's remaining slice fuel and the new sync baseline.
+    /// Returns fuel remaining until `next_check_fuel` and records it as the
+    /// new interpreter sync baseline.
     #[inline]
     pub(crate) fn reload_interpreter_fuel(&self) -> i64 {
-        let remaining = self.remaining_slice_fuel.get();
+        let remaining = self.next_check_fuel.get().saturating_sub(self.spent_fuel.get()).min(i64::MAX as u64) as i64;
         self.interpreter_fuel_baseline.set(remaining);
         remaining
-    }
-
-    /// Restores remaining slice fuel so the VM does not charge twice for
-    /// retried operations.
-    #[inline]
-    pub(crate) fn refund_to(&self, mark: i64) {
-        self.remaining_slice_fuel.set(mark);
-        self.next_limit_check_fuel.set(self.next_limit_check_fuel.get().max(mark.saturating_sub(LIMIT_CHECK_FUEL_INTERVAL)));
     }
 
     /// Clears accumulated run fuel and installs a fresh interrupt flag to begin
     /// a new session run.
     pub(crate) fn reset_for_run(&mut self, interrupt_flag: Arc<AtomicBool>) {
-        self.prior_slices_fuel.set(0);
-        self.slice_initial_fuel.set(self.remaining_slice_fuel.get());
+        self.spent_fuel.set(0);
+        self.next_check_fuel.set(0);
+        self.slice_fuel.set(0);
+        self.interpreter_fuel_baseline.set(0);
         self.interrupt_flag = interrupt_flag;
     }
 
@@ -232,28 +179,26 @@ impl VmMeter {
             interrupt_flag: self.interrupt_flag.clone(),
             abandoned_flag: Arc::new(AtomicBool::new(false)),
             wall_deadline: self.wall_deadline.get().map(|at| Deadline { at, clock: self.clock.clone() }),
-            fuel_limit: self.max_instructions.map_or(u64::MAX, |max| max.saturating_sub(self.total_fuel_used())),
+            fuel_limit: self.max_instructions.map_or(u64::MAX, |max| max.saturating_sub(self.spent_fuel.get())),
             fuel_used: 0,
             next_deadline_check_fuel: 0,
             stopped: false,
         }
     }
 
-    /// Advances the limit checkpoint and verifies execution limits.
+    /// Caps `target` at `max_instructions`, if set.
+    #[inline]
+    fn cap_target(&self, target: u64) -> u64 {
+        self.max_instructions.map_or(target, |max| target.min(max))
+    }
+
+    /// Checks execution limits and advances `next_check_fuel` by one interval.
     #[cold]
     #[inline(never)]
-    fn run_limit_checkpoint(&self) -> Result<(), Fail> {
-        // Remaining slice fuel is below `instruction_limit_fuel` once total
-        // fuel exceeds `max_instructions`. Clamping to this bound ensures that
-        // the meter runs a limit check right at the budget boundary.
-        let instruction_limit_fuel = match self.max_instructions {
-            Some(max) => (i128::from(self.prior_slices_fuel.get()) + i128::from(self.slice_initial_fuel.get()) - i128::from(max))
-                .clamp(i64::MIN.into(), i64::MAX.into()) as i64,
-            None => i64::MIN,
-        };
-        self.next_limit_check_fuel
-            .set(self.remaining_slice_fuel.get().saturating_sub(LIMIT_CHECK_FUEL_INTERVAL).max(instruction_limit_fuel));
-        self.check_limits()
+    fn advance_limit_check(&self) -> Result<(), Fail> {
+        self.check_limits()?;
+        self.next_check_fuel.set(self.cap_target(self.spent_fuel.get().saturating_add(LIMIT_CHECK_FUEL_INTERVAL as u64)));
+        Ok(())
     }
 }
 
@@ -261,16 +206,6 @@ impl Meter for VmMeter {
     #[inline]
     fn charge(&self, units: u64) -> Result<(), Fail> {
         VmMeter::charge(self, units)
-    }
-
-    #[inline]
-    fn fuel_mark(&self) -> i64 {
-        self.remaining_slice_fuel()
-    }
-
-    #[inline]
-    fn refund_to(&self, mark: i64) {
-        VmMeter::refund_to(self, mark);
     }
 }
 
@@ -282,14 +217,6 @@ impl Meter for UnlimitedMeter {
     fn charge(&self, _: u64) -> Result<(), Fail> {
         Ok(())
     }
-
-    #[inline(always)]
-    fn fuel_mark(&self) -> i64 {
-        0
-    }
-
-    #[inline(always)]
-    fn refund_to(&self, _: i64) {}
 }
 
 /// Computes extra fuel needed to execute bytecode between safe points.
@@ -404,8 +331,10 @@ mod tests {
         let meter = VmMeter::new(Some(100_000), Arc::new(AtomicBool::new(false)), system_clock());
         assert_eq!(meter.start_slice(None, None), SLICE_FUEL);
         assert!(meter.charge(50).is_ok());
-        assert_eq!((meter.remaining_slice_fuel(), meter.total_fuel_used()), (SLICE_FUEL - 50, 50));
+        assert!(!meter.is_slice_exhausted());
+        assert_eq!((meter.reload_interpreter_fuel(), meter.total_fuel_used()), (SLICE_FUEL - 50, 50));
         assert!(meter.charge(SLICE_FUEL as u64).is_ok());
+        assert!(meter.is_slice_exhausted());
         assert_eq!(meter.total_fuel_used(), SLICE_FUEL as u64 + 50);
         assert!(matches!(meter.charge(100_000).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
     }
@@ -418,11 +347,11 @@ mod tests {
         assert_eq!(meter.total_fuel_used(), 300);
         assert!(meter.charge(700).is_ok(), "1000 units used");
         assert!(matches!(meter.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
-        assert_eq!(meter.reload_interpreter_fuel(), -1);
+        assert_eq!(meter.reload_interpreter_fuel(), 0);
         let meter = VmMeter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)), system_clock());
         meter.start_slice(None, None);
         assert!(meter.charge(SLICE_FUEL as u64 + 1).is_ok());
-        assert_eq!(meter.next_limit_check_fuel.get(), -1 - LIMIT_CHECK_FUEL_INTERVAL);
+        assert_eq!(meter.next_check_fuel.get(), SLICE_FUEL as u64 + 1 + LIMIT_CHECK_FUEL_INTERVAL as u64);
         assert!(meter.charge(1_000_000 - SLICE_FUEL as u64 - 1).is_ok(), "1,000,000 units used");
         assert!(matches!(meter.charge(1).map_err(Fail::into_kind), Err(FailKind::Limit(LimitKind::Instructions))));
         let mut meter = VmMeter::new(Some(100), Arc::new(AtomicBool::new(false)), system_clock());
@@ -433,15 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn refund_to_restores_checkpoint_interval() {
-        let interrupt_flag = Arc::new(AtomicBool::new(false));
-        let meter = VmMeter::new(None, interrupt_flag.clone(), system_clock());
-        meter.start_slice(None, None);
-        let mark = meter.remaining_slice_fuel();
-        assert!(meter.charge(SLICE_FUEL as u64 + 1).is_ok(), "checkpoint advances next_limit_check_fuel");
-        meter.refund_to(mark);
-        interrupt_flag.store(true, Ordering::SeqCst);
-        assert!(matches!(meter.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Interrupted)));
+    fn refill_after_limit_check_preserves_slice_exhaustion() {
+        let meter = VmMeter::new(None, Arc::new(AtomicBool::new(false)), system_clock());
+        assert_eq!(meter.start_slice(None, None), SLICE_FUEL);
+        meter.flush_interpreter_fuel(0);
+        assert!(meter.is_slice_exhausted());
+        let next = meter.refill_after_limit_check().unwrap();
+        assert_eq!(next, LIMIT_CHECK_FUEL_INTERVAL);
+        assert!(meter.is_slice_exhausted());
+        meter.flush_interpreter_fuel(next - 3_000);
+        assert_eq!(meter.total_fuel_used(), SLICE_FUEL as u64 + 3_000);
     }
 
     #[test]

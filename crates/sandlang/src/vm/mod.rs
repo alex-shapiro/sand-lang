@@ -25,20 +25,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use value::*;
 
+/// Type-erased native function that reads script arguments from a slice.
 pub type NativeFn = dyn Fn(&mut Vm, &[VmValue]) -> Result<VmValue, Ctl> + Send + Sync;
+
+/// Type-erased native function that receives the calling [`Fiber`] and argument range.
+pub type ContextNativeFn = dyn Fn(&mut Vm, &mut Fiber, std::ops::Range<usize>) -> Result<VmValue, Ctl> + Send + Sync;
 
 #[derive(Clone)]
 pub enum HostFn {
     Static(&'static NativeFn),
     Shared(Arc<NativeFn>),
+    StaticContext(&'static ContextNativeFn),
+    SharedContext(Arc<ContextNativeFn>),
 }
+
+const _: () = assert!(std::mem::size_of::<HostFn>() == 3 * std::mem::size_of::<usize>());
 
 impl HostFn {
     #[inline(always)]
-    pub fn call(&self, vm: &mut Vm, args: &[VmValue]) -> Result<VmValue, Ctl> {
+    pub fn call(&self, vm: &mut Vm, fiber: &mut Fiber, args: std::ops::Range<usize>) -> Result<VmValue, Ctl> {
         match self {
-            HostFn::Static(f) => f(vm, args),
-            HostFn::Shared(f) => f(vm, args),
+            HostFn::Static(native_fn) => native_fn(vm, &fiber.stack[args]),
+            HostFn::Shared(native_fn) => native_fn(vm, &fiber.stack[args]),
+            HostFn::StaticContext(native_fn) => native_fn(vm, fiber, args),
+            HostFn::SharedContext(native_fn) => native_fn(vm, fiber, args),
         }
     }
 }
@@ -129,6 +139,9 @@ pub(crate) enum FailKind {
     /// Host interrupt (see `VmMeter::check_limits`).
     Interrupted,
     Exit(i32),
+    /// Terminal run ending from a
+    /// [`CallContext`](crate::native::context::CallContext) call.
+    Ended(RunEnding),
 }
 
 impl Fail {
@@ -145,12 +158,14 @@ impl Fail {
         Fail(Box::new(FailKind::Internal(msg.into())))
     }
 
-    /// Reports that the run exceeded limit `k`. If a native call returns
-    /// [`LimitKind::Memory`], the engine collects garbage and retries the call
-    /// once.
+    /// Reports that the run exceeded `kind`.
+    ///
+    /// On [`LimitKind::Memory`], plain, `&mut Vm`, and `step` calls retry once
+    /// after garbage collection. [`CallContext`](crate::native::context::CallContext)
+    /// functions and native futures end the run immediately.
     #[cold]
-    pub fn limit(k: LimitKind) -> Fail {
-        Fail(Box::new(FailKind::Limit(k)))
+    pub fn limit(kind: LimitKind) -> Fail {
+        Fail(Box::new(FailKind::Limit(kind)))
     }
 
     /// Reports that the host interrupted the engine.
@@ -206,6 +221,12 @@ impl Ctl {
     }
 }
 
+impl From<RunEnding> for Fail {
+    fn from(ending: RunEnding) -> Fail {
+        Fail(Box::new(FailKind::Ended(ending)))
+    }
+}
+
 impl From<Fail> for Ctl {
     #[cold]
     #[inline(never)]
@@ -234,6 +255,7 @@ impl std::fmt::Debug for Fail {
             FailKind::Limit(k) => write!(f, "Limit({k:?})"),
             FailKind::Interrupted => write!(f, "Interrupted"),
             FailKind::Exit(c) => write!(f, "Exit({c})"),
+            FailKind::Ended(ending) => write!(f, "Ended({ending:?})"),
         }
     }
 }
@@ -350,6 +372,8 @@ pub struct Fiber {
     pub waiters_prune_at: usize,
     /// Active async native calls on this fiber, ordered from outermost to innermost.
     pub(crate) native_calls: Vec<sched::ActiveNativeCall>,
+    /// Garbage-collection roots for [`CallContext`](crate::native::context::CallContext) calls and callback setup on this fiber.
+    pub(crate) native_roots: Vec<VmValue>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
     /// Whether the fiber stopped in or just after a native call. Its
@@ -365,7 +389,7 @@ pub struct TraceFrame {
     pub line: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Trap {
     /// The script failed with an error, `kind: message`.
     Error {
@@ -382,7 +406,7 @@ pub enum Trap {
 }
 
 /// An early exit or trap that stops a VM run.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum RunEnding {
     /// A task exited with this status code.
     Exit(i32),
@@ -626,6 +650,8 @@ pub struct Vm {
     pub(crate) instruction_retried: bool,
     /// Struct nesting depth during conversion to Sand (see [`struct_into_vm_value`](crate::native::struct_into_vm_value)).
     pub(crate) struct_depth: usize,
+    /// Address on the Rust stack at the start of the current fiber turn.
+    turn_stack_address: usize,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -681,6 +707,7 @@ impl Fiber {
             + self.waiters.capacity() * std::mem::size_of::<(u32, u64)>()
             + self.native_calls.capacity() * std::mem::size_of::<sched::ActiveNativeCall>()
             + self.native_calls.iter().map(|active_call| active_call.tracked_bytes).sum::<usize>()
+            + self.native_roots.capacity() * std::mem::size_of::<VmValue>()
     }
 }
 
@@ -717,6 +744,7 @@ impl Vm {
             retry_stress: false,
             instruction_retried: false,
             struct_depth: 0,
+            turn_stack_address: 0,
         };
         vm.load_program();
         vm
@@ -1395,6 +1423,7 @@ impl Vm {
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
                     native_calls: Vec::new(),
+                    native_roots: Vec::new(),
                     pending_error: None,
                     stopped_in_native_call: false,
                 });
@@ -1616,6 +1645,7 @@ impl Vm {
     pub(crate) fn run_ending_of(&mut self, fail: Fail, trace: impl FnOnce(&Vm) -> Vec<TraceFrame>) -> RunEnding {
         match fail.into_kind() {
             FailKind::Exit(code) => RunEnding::Exit(code),
+            FailKind::Ended(ending) => ending,
             FailKind::RuntimeError(message) => Trap::Error { message, trace: trace(self) }.into(),
             FailKind::Limit(kind) => Trap::Limit(kind).into(),
             FailKind::Interrupted => Trap::Interrupted.into(),
@@ -1669,6 +1699,7 @@ impl Vm {
             for active_call in &f.native_calls {
                 active_call.trace(roots);
             }
+            roots.extend(f.native_roots.iter().copied());
             fiber_bytes += f.footprint();
         };
         for f in self.fibers.iter_mut().flatten() {

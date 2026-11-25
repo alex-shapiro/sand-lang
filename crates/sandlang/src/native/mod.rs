@@ -12,9 +12,9 @@ use crate::types::ValueTypeInfo;
 use crate::value::{StructDesc, StructValue, Value, VariantDesc, VariantValue, qualified_name, qualified_name_module};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
-use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
+use crate::vm::{Ctl, Fail, HostFn, Vm};
 use convert::{Conversion, FromVmValue, mismatch};
-use func::{NativeFunction, Signature};
+use func::{BoxedNativeFn, NativeFunction, Signature};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
@@ -590,24 +590,29 @@ impl<const N: u8> Reflect<N> {
 pub(crate) const NUM_METHODS: [&str; 2] = ["zero", "one"];
 
 impl<const N: u8> Num<N> {
-    /// Returns the additive identity (`0` or `0.0`) for type parameter `N`.
+    /// Returns the additive identity `0` or `0.0` for type parameter `N`.
     pub fn zero(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
         self.call_method(vm, 0)
     }
 
-    /// Returns the multiplicative identity (`1` or `1.0`) for type parameter `N`.
+    /// Returns the multiplicative identity `1` or `1.0` for type parameter `N`.
     pub fn one(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
         self.call_method(vm, 1)
     }
 
     fn call_method(self, vm: &mut Vm, slot: usize) -> Result<Param<N>, Ctl> {
-        let f = match vm.heap.get(self.raw()) {
-            Obj::Tuple(slots) => slots.get(slot).map(|&f| vm.heap.get(f)),
+        let method = match vm.heap.get(self.raw()) {
+            Obj::Tuple(slots) => slots.get(slot).map(|&method| vm.heap.get(method)),
             _ => None,
         };
-        let Some(&Obj::NativeFn(n)) = f else { return Err(Fail::internal("a native function expected `Num` evidence").into()) };
-        let f = vm.natives[n as usize].f.clone();
-        f.call(vm, &[]).map(Param::from_raw)
+        let Some(&Obj::NativeFn(native_index)) = method else {
+            return Err(Fail::internal("a native function expected `Num` evidence").into());
+        };
+        match vm.natives[native_index as usize].f.clone() {
+            HostFn::Static(f) => f(vm, &[]).map(Param::from_raw),
+            HostFn::Shared(f) => f(vm, &[]).map(Param::from_raw),
+            _ => Err(Fail::internal("unexpected `CallContext` function in `Num` evidence").into()),
+        }
     }
 }
 
@@ -755,26 +760,20 @@ struct FnDef {
     doc: Option<Arc<str>>,
 }
 
-/// A module of Rust functions and types that scripts can import with
-/// `import <name>`.
+/// A module of Rust functions and types that scripts import with `import <name>`.
 ///
-/// The engine infers the Sand signature of each registered function from its
-/// Rust parameter and return types. It exports functions that are absent from
-/// [`NativeModule::source`] as `pub native fn`. [`NativeModule::params`] sets
-/// their parameter names, which default to `arg1`, `arg2`, and so on.
-/// Registering a function as `"Type.name"` defines a method on `Type`. The
-/// method takes `self` if its first parameter has type `Type`. Use `native fn`
-/// declarations in [`NativeModule::source`] to specify default parameter
-/// values or generic type parameters.
-/// [`HostModules::new`](crate::engine::HostModules::new) checks all
-/// declarations against the registered Rust signatures.
+/// Registered functions default to `pub native fn` with inferred Sand
+/// signatures and default parameter names. Use [`NativeModule::params`] to
+/// rename parameters, `"Type.name"` to define a method, and
+/// [`NativeModule::source`] to add default arguments or generics.
+/// [`HostModules::new`](crate::engine::HostModules::new) verifies
+/// each declaration against its Rust signature.
 ///
-/// The VM re-runs a registered function from the start after a permission
-/// prompt or after a garbage collection triggered by a memory or resource
-/// limit. Check permissions with [`Vm::require`], reserve memory, and acquire
-/// resource slots before performing any side effect. Avoid panicking on script
-/// input. The engine catches panics and aborts the run with
-/// [`Error::Internal`](crate::engine::Error::Internal).
+/// Plain and `&mut Vm` functions rerun after a permission prompt or GC retry,
+/// so check capabilities with [`Vm::require`] and limits before side effects.
+/// [`CallContext`](context::CallContext) functions run once per call and retry
+/// limits via [`CallContext::step`](context::CallContext::step). Rust panics
+/// abort the run with [`Error::Internal`](crate::engine::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {
     name: String,
@@ -812,12 +811,17 @@ impl NativeModule {
         &self.name
     }
 
-    fn add(&mut self, name: &str, sig: Signature, f: Box<NativeFn>) -> &mut Self {
+    fn add(&mut self, name: &str, sig: Signature, f: BoxedNativeFn) -> &mut Self {
         let parts: Vec<&str> = name.split('.').collect();
         let valid = parts.len() <= 2 && parts.iter().all(|p| is_ident(p)) && parts.last() != Some(&"self");
         assert!(valid, "function name `{name}` is not `name` or `Type.name`");
         assert!(!self.functions.iter().any(|d| d.name == name), "function `{name}` is registered twice in module `{}`", self.name);
-        let f = if self.kind == ModKind::Host { HostFn::Shared(f.into()) } else { HostFn::Static(Box::leak(f)) };
+        let f = match (self.kind == ModKind::Host, f) {
+            (true, BoxedNativeFn::Plain(f)) => HostFn::Shared(f.into()),
+            (false, BoxedNativeFn::Plain(f)) => HostFn::Static(Box::leak(f)),
+            (true, BoxedNativeFn::Context(f)) => HostFn::SharedContext(f.into()),
+            (false, BoxedNativeFn::Context(f)) => HostFn::StaticContext(Box::leak(f)),
+        };
         self.functions.push(FnDef { name: name.to_string(), sig, f, names: None, doc: None });
         self
     }

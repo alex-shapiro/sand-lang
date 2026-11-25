@@ -1,10 +1,14 @@
-//! VM access for the future of an async native call.
+//! VM access and Sand callbacks for native functions.
+//!
+//! Synchronous native functions call Sand through [`CallContext`].
+//! [`Later::new`](super::func::Later::new) futures use [`NativeContext`].
 
 use super::func::{NativeError, NativeReturn};
 use crate::policy::Capability;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
+use crate::vm::sched::ProgramCode;
 use crate::vm::value::VmValue;
-use crate::vm::{CtlKind, Fail, SharedVm, Vm, WaitKind};
+use crate::vm::{Ctl, CtlKind, Fail, Fiber, RunEnding, SharedVm, Vm, WaitKind};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
@@ -53,9 +57,9 @@ pub struct NativeContext {
     state: Arc<Mutex<NativeCallState>>,
 }
 
-/// Handle to a heap value rooted in a [`NativeContext`] across waits.
+/// Handle to a [`VmValue`] rooted until the native call returns.
 ///
-/// Pass this handle to [`NativeContext::value`] on the context that created it.
+/// Read it back from the same context with `value()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RootedValue(u32);
 
@@ -177,13 +181,10 @@ impl NativeContext {
         self.state.lock().callback_result.take().expect("the scheduler stores the callback result before polling again")
     }
 
-    /// Runs `f` with `&mut Vm` under automatic retry for limit errors and
-    /// permission requests.
+    /// Runs `f` with `&mut Vm`, retrying after garbage collection on limit
+    /// errors or after a user permission prompt.
     ///
-    /// `f` must check limits and capabilities before any side effect. After a
-    /// memory or resource limit error, the engine collects all garbage before
-    /// running `f` again. After a permission request, the engine prompts the
-    /// user before running `f` again.
+    /// Check limits and capabilities in `f` before any side effect.
     ///
     /// ```
     /// # use sandlang::native::context::NativeContext;
@@ -197,32 +198,19 @@ impl NativeContext {
     /// }
     /// ```
     pub async fn step<R, E: NativeError>(&mut self, mut f: impl FnMut(&mut Vm) -> Result<R, E>) -> Result<R, E::FutureError> {
-        let mut collected = false;
+        let mut has_collected = false;
         let result = loop {
-            let step_result = self.with_vm(|vm| {
-                vm.collected = collected;
-                let step_result = f(vm);
-                vm.collected = false;
-                step_result
-            });
-            let ctl = match step_result.map_err(E::into_ctl) {
-                Ok(value) => break Ok(value),
-                Err(Err(error)) => break Err(error),
-                Err(Ok(ctl)) => ctl,
-            };
-            if !collected && ctl.can_retry_after_collection() {
-                collected = true;
-                self.wait_for_request(VmRequest::Collect).await;
-                continue;
-            }
-            match ctl.into_kind() {
-                CtlKind::NeedPermission(capability) => {
+            match self.with_vm(|vm| attempt_step(vm, has_collected, &mut f)) {
+                StepAttempt::Done(result) => break result,
+                StepAttempt::Collect => {
+                    has_collected = true;
+                    self.wait_for_request(VmRequest::Collect).await;
+                }
+                StepAttempt::Prompt(capability) => {
                     // Allow garbage collection again if the post-prompt retry hits a limit.
-                    collected = false;
+                    has_collected = false;
                     self.wait_for_request(VmRequest::Prompt(capability)).await;
                 }
-                CtlKind::Fail(fail) => break Err(fail.into()),
-                other => break Err(Fail::internal(format!("unsupported scheduler request in `NativeContext::step`: {other:?}")).into()),
             }
         };
         self.with_vm(Vm::forget_once_answers);
@@ -265,5 +253,177 @@ impl Drop for VmRequestFuture<'_> {
     fn drop(&mut self) {
         // `&mut NativeContext` guarantees a single active `VmRequestFuture` per call.
         self.context.state.lock().request = None;
+    }
+}
+
+/// Outcome of a closure call inside [`CallContext::step`] or [`NativeContext::step`].
+enum StepAttempt<R, E> {
+    Done(Result<R, E>),
+    /// The closure hit a retryable memory or resource limit.
+    Collect,
+    /// The closure requested a permission prompt for this capability.
+    Prompt(Capability),
+}
+
+/// Runs `step_fn` once into a [`StepAttempt`].
+///
+/// Pass `has_collected = true` on the retry after garbage collection.
+fn attempt_step<R, E: NativeError>(
+    vm: &mut Vm,
+    has_collected: bool,
+    step_fn: &mut impl FnMut(&mut Vm) -> Result<R, E>,
+) -> StepAttempt<R, E::FutureError> {
+    vm.collected = has_collected;
+    let result = step_fn(vm);
+    vm.collected = false;
+    let ctl = match result.map_err(E::into_ctl) {
+        Ok(value) => return StepAttempt::Done(Ok(value)),
+        Err(Err(error)) => return StepAttempt::Done(Err(error)),
+        Err(Ok(ctl)) => ctl,
+    };
+    if !has_collected && ctl.can_retry_after_collection() {
+        return StepAttempt::Collect;
+    }
+    match ctl.into_kind() {
+        CtlKind::NeedPermission(capability) => StepAttempt::Prompt(capability),
+        CtlKind::Fail(fail) => StepAttempt::Done(Err(fail.into())),
+        unexpected_ctl => {
+            StepAttempt::Done(Err(Fail::internal(format!("unsupported scheduler request in a native `step`: {unexpected_ctl:?}")).into()))
+        }
+    }
+}
+
+/// Maximum root slots that an idle fiber retains between synchronous native calls.
+const MAX_IDLE_ROOT_SLOTS: usize = 1024;
+
+/// VM and callback handle for a synchronous native function.
+///
+/// Functions taking `&mut CallContext` first run once per call. Use
+/// [`CallContext::call`] for Sand callbacks and [`CallContext::step`] for
+/// retryable VM operations.
+///
+/// ```
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::native::context::CallContext;
+/// # use sandlang::native::ty::{Param, VmVal};
+/// # use sandlang::vm::Fail;
+/// let mut module = NativeModule::new("calls");
+/// module.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
+/// module.function("twice", |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, input: Param<0>| -> Result<Param<0>, Fail> {
+///     let once = context.call(sand_fn.raw(), &[input.raw()])?;
+///     Ok(Param::from_raw(context.call(sand_fn.raw(), &[once])?))
+/// });
+/// ```
+pub struct CallContext<'a> {
+    vm: &'a mut Vm,
+    fiber: &'a mut Fiber,
+    /// Length of `fiber.native_roots` at the start of the call.
+    roots_start: usize,
+    /// Cached program code and stack base for callbacks in this call.
+    callback_state: Option<(ProgramCode, usize)>,
+    /// First terminal run ending from a callback or a `step` call.
+    run_ending: Option<RunEnding>,
+}
+
+impl<'a> CallContext<'a> {
+    pub(crate) fn new(vm: &'a mut Vm, fiber: &'a mut Fiber) -> CallContext<'a> {
+        // A retried argument conversion in `call_native` leaves `collected` set.
+        vm.collected = false;
+        let roots_start = fiber.native_roots.len();
+        CallContext { vm, fiber, roots_start, callback_state: None, run_ending: None }
+    }
+
+    /// Returns shared read access to the [`Vm`].
+    ///
+    /// Use [`CallContext::step`] for `&mut Vm` and [`CallContext::root`] to
+    /// keep heap values alive across `call` or `step`.
+    pub fn vm(&self) -> &Vm {
+        self.vm
+    }
+
+    /// Calls Sand function `callee` with `args` on the calling task.
+    ///
+    /// Returns an unrooted [`VmValue`] valid until the next `call` or `step`.
+    /// Use [`CallContext::root`] to keep it longer. Task waits, permission
+    /// prompts, and self-cancellation fail with an `"invalid"` error.
+    ///
+    /// A terminal run ending from `callee` is recorded, returned from this and
+    /// all later `call` or `step` calls, and applied after the native call returns.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `args.len()` exceeds 255.
+    #[inline]
+    pub fn call(&mut self, callee: VmValue, args: &[VmValue]) -> Result<VmValue, Fail> {
+        assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
+        if let Some(ending) = &self.run_ending {
+            return Err(ending.clone().into());
+        }
+        let (vm, fiber) = (&mut *self.vm, &mut *self.fiber);
+        let (code, frame_base) = self.callback_state.get_or_insert_with(|| (vm.program_code(), fiber.live_top(&vm.prog)));
+        vm.run_callback(code, fiber, *frame_base, callee, args).map_err(|ending| {
+            self.run_ending = Some(ending.clone());
+            ending.into()
+        })
+    }
+
+    /// Roots `value` until this native call returns.
+    pub fn root(&mut self, value: VmValue) -> RootedValue {
+        let roots = &mut self.fiber.native_roots;
+        let capacity = roots.capacity();
+        roots.push(value);
+        self.vm.heap.fiber_bytes += (roots.capacity() - capacity) * std::mem::size_of::<VmValue>();
+        RootedValue((roots.len() - 1) as u32)
+    }
+
+    /// Returns the [`VmValue`] for `rooted` in this call.
+    pub fn value(&self, rooted: RootedValue) -> VmValue {
+        self.fiber.native_roots[rooted.0 as usize]
+    }
+
+    /// Runs `f` with `&mut Vm`, retrying once after garbage collection on
+    /// memory or resource limits.
+    ///
+    /// Check limits in `f` before any side effect. Permission prompts fail with
+    /// an `"invalid"` error.
+    pub fn step<R, E: NativeError>(&mut self, mut f: impl FnMut(&mut Vm) -> Result<R, E>) -> Result<R, E::FutureError> {
+        if let Some(ending) = &self.run_ending {
+            return Err(Fail::from(ending.clone()).into());
+        }
+        let stress_armed = self.vm.heap.fail_next_check.get();
+        let mut has_collected = false;
+        let result = loop {
+            self.vm.heap.fail_next_check.set(self.vm.retry_stress && !has_collected);
+            match attempt_step(self.vm, has_collected, &mut f) {
+                StepAttempt::Done(result) => break result,
+                StepAttempt::Collect => {
+                    has_collected = true;
+                    self.vm.collect_all_garbage(Some(self.fiber));
+                }
+                StepAttempt::Prompt(_) => {
+                    let ending = self.vm.synchronous_call_error(self.fiber, "prompt for a permission", None);
+                    self.run_ending = Some(ending.clone());
+                    break Err(Fail::from(ending).into());
+                }
+            }
+        };
+        self.vm.heap.fail_next_check.set(stress_armed);
+        result
+    }
+
+    /// Truncates the fiber's root stack, converts `output` to a Sand value, and
+    /// turns any [`Fail`] into a terminal run ending.
+    pub(crate) fn finish(self, output: impl NativeReturn<Fail>) -> Result<VmValue, Ctl> {
+        let CallContext { vm, fiber, roots_start, run_ending, .. } = self;
+        fiber.native_roots.truncate(roots_start);
+        if roots_start == 0 && fiber.native_roots.capacity() > MAX_IDLE_ROOT_SLOTS {
+            vm.heap.fiber_bytes = vm.heap.fiber_bytes.saturating_sub(fiber.native_roots.capacity() * std::mem::size_of::<VmValue>());
+            fiber.native_roots = Vec::new();
+        }
+        if let Some(ending) = run_ending {
+            return Err(Fail::from(ending).into());
+        }
+        vm.unchecked(|vm| output.into_call_result(vm))
+            .map_err(|fail| Fail::from(vm.run_ending_of(fail, |vm| vm.trace_of(fiber, None))).into())
     }
 }

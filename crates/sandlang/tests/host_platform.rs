@@ -13,17 +13,16 @@ struct ManualClock {
     origin: Instant,
     elapsed: Mutex<Duration>,
     sleeps: Mutex<Vec<Duration>>,
-    work: Mutex<u64>,
+    tick_on_now: Duration,
 }
 
 impl ManualClock {
     fn new() -> Arc<ManualClock> {
-        Arc::new(ManualClock {
-            origin: Instant::now(),
-            elapsed: Mutex::new(Duration::ZERO),
-            sleeps: Mutex::new(Vec::new()),
-            work: Mutex::new(0),
-        })
+        Self::with_tick(Duration::ZERO)
+    }
+
+    fn with_tick(tick_on_now: Duration) -> Arc<ManualClock> {
+        Arc::new(ManualClock { origin: Instant::now(), elapsed: Mutex::new(Duration::ZERO), sleeps: Mutex::new(Vec::new()), tick_on_now })
     }
 
     fn elapsed(&self) -> Duration {
@@ -37,11 +36,13 @@ impl Clock for ManualClock {
     }
 
     fn now(&self) -> Instant {
-        self.origin + self.elapsed()
+        let mut elapsed = self.elapsed.lock();
+        *elapsed += self.tick_on_now;
+        self.origin + *elapsed
     }
 
     fn cpu_time(&self) -> Duration {
-        Duration::from_nanos(*self.work.lock() * 10)
+        Duration::ZERO
     }
 
     fn sleep(&self, duration: Duration) -> ClockFuture {
@@ -52,11 +53,6 @@ impl Clock for ManualClock {
 
     fn yield_now(&self) -> ClockFuture {
         Box::pin(std::future::ready(()))
-    }
-
-    fn work(&self, fuel: u64) {
-        *self.work.lock() += fuel;
-        *self.elapsed.lock() += Duration::from_nanos(fuel * 10);
     }
 }
 
@@ -79,7 +75,7 @@ fn sleeps_wait_on_host_timers() {
 
 #[test]
 fn wall_time_limit_is_measured_by_host_clock() {
-    let clock = ManualClock::new();
+    let clock = ManualClock::with_tick(Duration::from_millis(1));
     let limits = Limits { max_wall_time: Some(Duration::from_millis(50)), ..Limits::default() };
     let r = run_with("var n = 0\nwhile true { n += 1 }", |c| c.clock(clock.clone()).limits(limits));
     assert!(matches!(r.result, Err(Error::Limit(LimitKind::WallTime))), "{:?}", r.result);

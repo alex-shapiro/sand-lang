@@ -395,7 +395,7 @@ fn output_with_fuel(case: &Case, mode: Mode) -> String {
 }
 
 #[test]
-fn spec_cases_use_identical_fuel_under_gc_and_retry_stress() {
+fn spec_cases_use_identical_fuel_under_gc_stress() {
     const UNSUPPORTED: [&str; 8] = ["error", "fmt", "lint", "test", "file", "stdin", "args", "env"];
     let dir = format!("{}/tests/spec", env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
@@ -410,17 +410,15 @@ fn spec_cases_use_identical_fuel_under_gc_and_retry_stress() {
                 continue;
             }
             let plain = output_with_fuel(&case, Mode::Plain);
-            for mode in [Mode::GcStress, Mode::RetryStress] {
-                let stressed = output_with_fuel(&case, mode);
-                if plain != stressed {
-                    failures.push(format!(
-                        "[{}:{}] {}{}\nplain:\n{plain}stressed:\n{stressed}",
-                        path.display(),
-                        case.line,
-                        case.name,
-                        mode.note()
-                    ));
-                }
+            let stressed = output_with_fuel(&case, Mode::GcStress);
+            if plain != stressed {
+                failures.push(format!(
+                    "[{}:{}] {}{}\nplain:\n{plain}stressed:\n{stressed}",
+                    path.display(),
+                    case.line,
+                    case.name,
+                    Mode::GcStress.note()
+                ));
             }
         }
     }
