@@ -22,7 +22,7 @@ pub struct EncodeState<W> {
 /// The object-safe view of an [`EncodeState`] for Sand `Encoder` methods.
 pub trait DynEncodeState: Any + Send {
     fn write(&mut self, event: Event<'_>);
-    fn max_len(&self, event: &Event<'_>, text_len: usize) -> usize;
+    fn max_len(&self, event: &Event<'_>) -> usize;
     fn out(&mut self) -> &mut String;
 }
 
@@ -30,8 +30,8 @@ impl<W: FormatWriter> DynEncodeState for EncodeState<W> {
     fn write(&mut self, event: Event<'_>) {
         self.writer.write(&mut self.out, event)
     }
-    fn max_len(&self, event: &Event<'_>, text_len: usize) -> usize {
-        self.writer.max_len(event, text_len)
+    fn max_len(&self, event: &Event<'_>) -> usize {
+        self.writer.max_len(event)
     }
     fn out(&mut self) -> &mut String {
         &mut self.out

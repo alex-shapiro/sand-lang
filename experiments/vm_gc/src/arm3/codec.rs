@@ -31,7 +31,7 @@ pub struct EncodeState<W> {
 /// The object-safe view of an [`EncodeState`] for Sand `Encoder` methods.
 trait DynEncodeState: Any + Send {
     fn write(&mut self, event: Event<'_>);
-    fn max_len(&self, event: &Event<'_>, text_len: usize) -> usize;
+    fn max_len(&self, event: &Event<'_>) -> usize;
     fn out(&mut self) -> &mut String;
 }
 
@@ -39,8 +39,8 @@ impl<W: FormatWriter> DynEncodeState for EncodeState<W> {
     fn write(&mut self, event: Event<'_>) {
         self.writer.write(&mut self.out, event)
     }
-    fn max_len(&self, event: &Event<'_>, text_len: usize) -> usize {
-        self.writer.max_len(event, text_len)
+    fn max_len(&self, event: &Event<'_>) -> usize {
+        self.writer.max_len(event)
     }
     fn out(&mut self) -> &mut String {
         &mut self.out
@@ -74,6 +74,12 @@ impl Contents for DecoderObj {
     }
 }
 
+/// Charges output growth that a format made beyond its `max_len`.
+#[inline(always)]
+fn charge_overrun(heap: &mut Heap, capacity: usize, out: &String) -> Result<()> {
+    if out.capacity() == capacity { Ok(()) } else { heap.reserve(out.capacity() - capacity) }
+}
+
 /// Reserves output capacity for `need` more bytes.
 #[inline]
 fn grow_output(heap: &mut Heap, out: &mut String, need: usize) -> Result<()> {
@@ -98,10 +104,11 @@ fn write<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, event: Event<'_>) -
         vm.charge(text_fuel(event.text_len()))?;
     }
     let state = cx.state.as_deref_mut().expect("encode state");
-    let need = state.writer.max_len(&event, event.text_len());
+    let need = state.writer.max_len(&event);
     grow_output(&mut vm.heap, &mut state.out, need)?;
+    let capacity = state.out.capacity();
     state.writer.write(&mut state.out, event);
-    Ok(())
+    charge_overrun(&mut vm.heap, capacity, &state.out)
 }
 
 /// Encodes `v` with `writer` and returns the output as a Sand string.
@@ -283,10 +290,11 @@ fn with_encoder(vm: &mut Vm, args: Args, f: impl FnOnce(&mut Vm, &mut dyn DynEnc
 
 fn encoder_event(vm: &mut Vm, args: Args, event: Event<'static>) -> Result<Value> {
     with_encoder(vm, args, |vm, state| {
-        let need = state.max_len(&event, 0);
+        let need = state.max_len(&event);
         grow_output(&mut vm.heap, state.out(), need)?;
+        let capacity = state.out().capacity();
         state.write(event);
-        Ok(())
+        charge_overrun(&mut vm.heap, capacity, state.out())
     })
 }
 
@@ -296,10 +304,11 @@ fn encoder_text(vm: &mut Vm, args: Args, event: for<'a> fn(&'a str) -> Event<'a>
     with_encoder(vm, args, |vm, state| {
         let text = text.str().ok_or_else(|| type_error("str"))?;
         vm.charge(text_fuel(text.len()))?;
-        let need = state.max_len(&event(""), text.len());
+        let need = state.max_len(&event(text));
         grow_output(&mut vm.heap, state.out(), need)?;
+        let capacity = state.out().capacity();
         state.write(event(text));
-        Ok(())
+        charge_overrun(&mut vm.heap, capacity, state.out())
     })
 }
 

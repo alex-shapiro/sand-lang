@@ -55,10 +55,11 @@ impl FormatWriter for JsonWriter {
     }
 
     #[inline(always)]
-    fn max_len(&self, _event: &Event<'_>, text_len: usize) -> usize {
-        // A comma, braces, quotes, a colon, and at most 24 bytes of a
-        // number, plus six bytes per escaped text byte.
-        32 + 6 * text_len
+    fn max_len(&self, event: &Event<'_>) -> usize {
+        // A comma, braces, quotes, a colon, and at most 24 bytes of a number,
+        // plus the text. Short text takes the worst case of six bytes per
+        // byte, which is cheaper than a scan.
+        32 + event.text().map_or(0, |s| if s.len() <= 64 { 6 * s.len() } else { escaped_len(s) })
     }
 }
 
@@ -106,6 +107,21 @@ fn has_escape(bytes: &[u8]) -> bool {
             Some(last) => !rest.is_empty() && word(last),
             None => rest.iter().any(|&b| needs_escape(b)),
         }
+}
+
+/// Returns the length of `s` after escaping, without quotes.
+#[inline(always)]
+fn escaped_len(s: &str) -> usize {
+    if !has_escape(s.as_bytes()) {
+        return s.len();
+    }
+    s.bytes()
+        .map(|b| match b {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' => 2,
+            0..0x20 => 6,
+            _ => 1,
+        })
+        .sum()
 }
 
 /// Appends `s` as a quoted, escaped JSON string.

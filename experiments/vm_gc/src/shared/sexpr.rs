@@ -46,8 +46,9 @@ impl FormatWriter for SExprWriter {
         }
     }
 
-    fn max_len(&self, _event: &Event<'_>, text_len: usize) -> usize {
-        32 + 2 * text_len
+    fn max_len(&self, event: &Event<'_>) -> usize {
+        let escapes = |s: &str| s.bytes().filter(|b| matches!(b, b'"' | b'\\' | b'\n')).count();
+        32 + event.text().map_or(0, |s| s.len() + escapes(s))
     }
 }
 

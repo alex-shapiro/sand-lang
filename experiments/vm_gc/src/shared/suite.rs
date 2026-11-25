@@ -380,6 +380,11 @@ pub fn b4_oversized<E: ArmEngine>() {
     assert_eq!(e.call("huge_pair_string", &[int(i64::MAX)]), Err(Fail::OutOfMemory));
     assert!(e.stats().tracked_bytes <= before + 4096, "{} > {before}", e.stats().tracked_bytes);
     assert_eq!(call_ok(&mut e, "huge_string", &[int(1000)]), HostValue::Int(1000));
+
+    // A 1 MiB string encodes in a cap that holds a few copies of it: the
+    // output reservation follows the escaped length, not the worst case.
+    let mut e: E = engine(Variant::Structural, Limits { max_memory: 7 << 20, gc_min_threshold: 1 << 20, ..Limits::default() });
+    assert_eq!(call_ok(&mut e, "encode_long", &[int(1 << 20)]), HostValue::Int((1 << 20) + 2));
 }
 
 // -------------------------------------------------------------------------

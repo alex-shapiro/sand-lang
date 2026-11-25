@@ -16,6 +16,18 @@ use crate::shared::{BYTES_PER_FUEL, Fail, Result, text_fuel};
 use std::any::Any;
 use std::mem::size_of;
 
+/// Returns a `Key` or `Str` event for `text`.
+#[inline(always)]
+fn text_event(key: bool, text: &str) -> Event<'_> {
+    if key { Event::Key(text) } else { Event::Str(text) }
+}
+
+/// Charges output growth that a format made beyond its `max_len`.
+#[inline(always)]
+fn charge_overrun(vm: &mut Vm, capacity: usize, out: &String, gc: GcScope<'_, '_>) -> Result<()> {
+    if out.capacity() == capacity { Ok(()) } else { vm.reserve(out.capacity() - capacity, gc) }
+}
+
 /// Reserves output capacity for `need` more bytes.
 #[inline]
 fn grow_output(vm: &mut Vm, out: &mut String, need: usize, gc: GcScope<'_, '_>) -> Result<()> {
@@ -42,15 +54,16 @@ impl<W: FormatWriter> EncodeCx<W> {
 }
 
 #[inline(always)]
-fn write<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, event: Event<'_>, gc: GcScope<'_, '_>) -> Result<()> {
+fn write<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, event: Event<'_>, mut gc: GcScope<'_, '_>) -> Result<()> {
     if event.text_len() >= BYTES_PER_FUEL {
         vm.charge(text_fuel(event.text_len()))?;
     }
     let state = cx.state();
-    let need = state.writer.max_len(&event, event.text_len());
-    grow_output(vm, &mut state.out, need, gc)?;
+    let need = state.writer.max_len(&event);
+    grow_output(vm, &mut state.out, need, gc.reborrow())?;
+    let capacity = state.out.capacity();
     state.writer.write(&mut state.out, event);
-    Ok(())
+    charge_overrun(vm, capacity, &state.out, gc)
 }
 
 /// Writes the long string `v` in two steps, because the output may grow
@@ -59,16 +72,14 @@ fn write<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, event: Event<'_>, g
 fn write_heap_str<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, v: Value<'_>, key: bool, mut gc: GcScope<'_, '_>) -> Result<()> {
     let len = vm.str(&v, gc.nogc())?.len();
     vm.charge(text_fuel(len))?;
-    let probe = if key { Event::Key("") } else { Event::Str("") };
-    let state = cx.state();
-    let need = state.writer.max_len(&probe, len);
+    let state = cx.state.as_deref_mut().expect("encode state");
+    let need = state.writer.max_len(&text_event(key, vm.str(&v, gc.nogc())?));
     grow_output(vm, &mut state.out, need, gc.reborrow())?;
     // `v` is rooted by the container that holds it.
     let v = v.bind(gc.nogc());
-    let text = vm.str(&v, gc.nogc())?;
-    let state = cx.state.as_deref_mut().expect("encode state");
-    state.writer.write(&mut state.out, if key { Event::Key(text) } else { Event::Str(text) });
-    Ok(())
+    let capacity = state.out.capacity();
+    state.writer.write(&mut state.out, text_event(key, vm.str(&v, gc.nogc())?));
+    charge_overrun(vm, capacity, &state.out, gc)
 }
 
 /// Encodes `v` with `writer` and returns the output as a Sand string. The
@@ -284,11 +295,12 @@ fn with_encoder<'a>(
 }
 
 fn encoder_event<'a>(vm: &mut Vm, args: Args, event: Event<'static>, gc: GcScope<'a, '_>) -> Result<Value<'a>> {
-    with_encoder(vm, args, gc, |vm, state, gc| {
-        let need = state.max_len(&event, 0);
-        grow_output(vm, state.out(), need, gc)?;
+    with_encoder(vm, args, gc, |vm, state, mut gc| {
+        let need = state.max_len(&event);
+        grow_output(vm, state.out(), need, gc.reborrow())?;
+        let capacity = state.out().capacity();
         state.write(event);
-        Ok(())
+        charge_overrun(vm, capacity, state.out(), gc)
     })
 }
 
@@ -297,11 +309,13 @@ fn encoder_text<'a>(vm: &mut Vm, args: Args, event: for<'t> fn(&'t str) -> Event
     with_encoder(vm, args, gc, |vm, state, mut gc| {
         let len = vm.str(&vm.arg(args, 1, gc.nogc()), gc.nogc())?.len();
         vm.charge(text_fuel(len))?;
-        let need = state.max_len(&event(""), len);
+        let text = vm.arg(args, 1, gc.nogc());
+        let need = state.max_len(&event(vm.str(&text, gc.nogc())?));
         grow_output(vm, state.out(), need, gc.reborrow())?;
         let text = vm.arg(args, 1, gc.nogc());
+        let capacity = state.out().capacity();
         state.write(event(vm.str(&text, gc.nogc())?));
-        Ok(())
+        charge_overrun(vm, capacity, state.out(), gc)
     })
 }
 

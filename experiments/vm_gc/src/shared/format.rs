@@ -29,13 +29,19 @@ pub enum Event<'a> {
 }
 
 impl Event<'_> {
+    /// Returns the text that the event carries.
+    #[inline(always)]
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Event::Str(s) | Event::Key(s) | Event::Tag(s) | Event::OpenVariant(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Byte length of the text that the event carries.
     #[inline(always)]
     pub fn text_len(&self) -> usize {
-        match self {
-            Event::Str(s) | Event::Key(s) | Event::Tag(s) | Event::OpenVariant(s) => s.len(),
-            _ => 0,
-        }
+        self.text().map_or(0, str::len)
     }
 }
 
@@ -43,12 +49,13 @@ impl Event<'_> {
 pub trait FormatWriter: Send + 'static {
     /// Appends `event` to `out`. The walker reserves
     /// [`max_len`](FormatWriter::max_len) bytes of capacity first, so `write`
-    /// never grows `out`.
+    /// does not need to grow `out`.
     fn write(&mut self, out: &mut String, event: Event<'_>);
 
-    /// Upper bound on the bytes that `write` appends for an event of this
-    /// kind whose text is `text_len` bytes long.
-    fn max_len(&self, event: &Event<'_>, text_len: usize) -> usize;
+    /// Upper bound on the bytes that `write` appends for `event`. If `write`
+    /// appends more, the walker charges the growth to the memory limit
+    /// after the write.
+    fn max_len(&self, event: &Event<'_>) -> usize;
 }
 
 /// A decoded string: a byte range of the input, or the scratch buffer if the

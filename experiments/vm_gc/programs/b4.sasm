@@ -48,3 +48,12 @@ fn huge_pair_string(n) {
     len l r
     ret l
 }
+
+# Encodes a string of `n` bytes and returns the encoded length.
+fn encode_long(n) {
+    str x "x"
+    repeat s x n
+    native t json.encode s
+    len l t
+    ret l
+}
