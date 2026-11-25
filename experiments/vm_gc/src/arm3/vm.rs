@@ -578,7 +578,7 @@ impl Vm {
                     }
                     Op::Len { dst, src } => {
                         let n = match &reg!(src) {
-                            Value::Short(s) => s.as_str().len(),
+                            Value::Short(s) => s.len(),
                             Value::Str(s) => s.text.len(),
                             Value::List(l) => l.lock()?.0.len(),
                             Value::Map(m) => m.lock()?.0.len(),
@@ -614,18 +614,7 @@ impl Vm {
                     }
                     Op::Concat { dst, a, b } => {
                         let Vm { stack, heap, .. } = self;
-                        let (x, y) = (stack[base + a as usize].str(), stack[base + b as usize].str());
-                        let (Some(x), Some(y)) = (x, y) else { return Err(type_error("str")) };
-                        let v = match ShortStr::concat(x, y) {
-                            Some(short) => Value::Short(short),
-                            None => {
-                                heap.reserve(LongStr::size(x.len() + y.len()))?;
-                                let mut s = String::with_capacity(x.len() + y.len());
-                                s.push_str(x);
-                                s.push_str(y);
-                                Value::Str(Arc::new(LongStr::new(s.into_boxed_str(), heap.tracker.clone())))
-                            }
-                        };
+                        let v = concat(heap, &stack[base + a as usize], &stack[base + b as usize])?;
                         set!(dst, v);
                     }
                     Op::IntToStr { dst, src } => {
@@ -825,6 +814,24 @@ pub fn list_push(heap: &mut Heap, list: &Shared<ListObj>, v: Value) -> Result<()
     }
     items.0.push(v);
     Ok(())
+}
+
+#[inline(never)]
+fn concat(heap: &mut Heap, a: &Value, b: &Value) -> Result<Value> {
+    if let (Value::Short(x), Value::Short(y)) = (a, b)
+        && let Some(short) = ShortStr::concat_short(*x, *y)
+    {
+        return Ok(Value::Short(short));
+    }
+    let (Some(x), Some(y)) = (a.str(), b.str()) else { return Err(type_error("str")) };
+    if let Some(short) = ShortStr::concat(x, y) {
+        return Ok(Value::Short(short));
+    }
+    heap.reserve(LongStr::size(x.len() + y.len()))?;
+    let mut s = String::with_capacity(x.len() + y.len());
+    s.push_str(x);
+    s.push_str(y);
+    Ok(Value::Str(Arc::new(LongStr::new(s.into_boxed_str(), heap.tracker.clone()))))
 }
 
 fn map_set(heap: &mut Heap, map: &Shared<MapObj>, key: Value, value: Value) -> Result<()> {

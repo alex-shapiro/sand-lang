@@ -780,7 +780,7 @@ impl Vm {
                     Op::Len { dst, src } => {
                         let v = reg!(src);
                         let n = match v {
-                            Value::Short(s) => s.as_str().len(),
+                            Value::Short(s) => s.len(),
                             Value::Obj(h) => match self.heap.get(h) {
                                 Obj::Str(s) => s.len(),
                                 Obj::List(items) => items.len(),
@@ -808,18 +808,7 @@ impl Vm {
                         reg!(dst) = if matches!(op, Op::MapKey { .. }) { k } else { v };
                     }
                     Op::Concat { dst, a, b } => {
-                        let (x, y) = (self.str(&reg!(a))?, self.str(&reg!(b))?);
-                        let v = match ShortStr::concat(x, y) {
-                            Some(short) => Value::Short(short),
-                            None => {
-                                let len = x.len() + y.len();
-                                self.reserve_object(len)?;
-                                let mut s = String::with_capacity(len);
-                                s.push_str(self.str(&reg!(a))?);
-                                s.push_str(self.str(&reg!(b))?);
-                                self.insert(Obj::Str(s.into_boxed_str()))
-                            }
-                        };
+                        let v = self.concat(reg!(a), reg!(b))?;
                         reg!(dst) = v;
                     }
                     Op::IntToStr { dst, src } => {
@@ -860,6 +849,24 @@ impl Vm {
             self.stack.resize(base + regs, Value::Unit);
         }
         Ok(())
+    }
+
+    #[inline(never)]
+    fn concat(&mut self, a: Value, b: Value) -> Result<Value> {
+        if let (Value::Short(x), Value::Short(y)) = (a, b)
+            && let Some(short) = ShortStr::concat_short(x, y)
+        {
+            return Ok(Value::Short(short));
+        }
+        let len = self.str(&a)?.len() + self.str(&b)?.len();
+        if let Some(short) = ShortStr::concat(self.str(&a)?, self.str(&b)?) {
+            return Ok(Value::Short(short));
+        }
+        self.reserve_object(len)?;
+        let mut s = String::with_capacity(len);
+        s.push_str(self.str(&a)?);
+        s.push_str(self.str(&b)?);
+        Ok(self.insert(Obj::Str(s.into_boxed_str())))
     }
 
     fn map_set(&mut self, map: Value, key: Value, value: Value) -> Result<()> {

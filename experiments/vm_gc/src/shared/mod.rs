@@ -214,6 +214,29 @@ impl ShortStr {
         Some(ShortStr { len: len as u8, bytes })
     }
 
+    /// Returns `a` followed by `b`, if the result fits inline. Joining two
+    /// valid UTF-8 strings needs no validation.
+    #[inline]
+    pub fn concat_short(a: ShortStr, b: ShortStr) -> Option<ShortStr> {
+        let (a_len, len) = (a.len as usize, a.len as usize + b.len as usize);
+        if len > SHORT_STR_MAX {
+            return None;
+        }
+        let mut bytes = a.bytes;
+        bytes[a_len..len].copy_from_slice(&b.bytes[..b.len as usize]);
+        Some(ShortStr { len: len as u8, bytes })
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     #[inline]
     pub fn as_str(&self) -> &str {
         // Bytes come from a `&str` cut at its end, so they are valid UTF-8.
