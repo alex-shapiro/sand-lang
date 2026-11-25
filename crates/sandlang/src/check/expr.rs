@@ -617,13 +617,6 @@ impl Checker {
             let own = self.declare_params(&f.generics, &scope, self_ty);
             for (g, &p) in f.generics.iter().zip(&own) {
                 scope.push((self.params[p as usize].name, p));
-                let with_dicts: Vec<TraitRef> = self.params[p as usize].traits.iter().copied().filter(|tr| self.has_dict(tr)).collect();
-                if !with_dicts.is_empty() {
-                    self.error(g.name.span, "local functions cannot require traits with methods; declare the function at the top level");
-                    // Insert error evidence so the body can use the traits without cascading errors.
-                    let pt = self.param_ty(p);
-                    self.fs.evidence.extend(with_dicts.into_iter().map(|tr| (pt, tr, mk(HKind::Error, TypeId::UNIT, g.name.span))));
-                }
                 if g.reflect {
                     self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
                 }
@@ -659,6 +652,15 @@ impl Checker {
             self.fs.ctx.push(FnCtx { ret, kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
             self.push_scope();
             let mut params = Vec::new();
+            let dicts = self.local_fn_dicts(self_local);
+            for &(bound_ty, trait_ref) in &dicts {
+                let dict_local = self.declare_local_sym(Symbol::DICT, TypeId::UNIT, false, f.name.span, true);
+                self.fs.data[dict_local as usize].used = true;
+                // Each local function owns distinct `ParamId`s, so its dictionary
+                // parameters stay valid in `fs.evidence` across the enclosing function.
+                self.fs.evidence.push((bound_ty, trait_ref, mk(HKind::Local(dict_local), TypeId::UNIT, f.name.span)));
+                params.push(dict_local);
+            }
             for (p, &t) in f.params.iter().zip(&ptys) {
                 params.push(self.declare_local(&p.name.name, t, false, p.name.span, true));
             }
@@ -672,7 +674,7 @@ impl Checker {
             self.fs.ctx.pop();
             self.fs.generics = saved_generics;
             lambdas.push(mk(
-                HKind::Lambda(Box::new(HLambda { id, name: f.name.name.clone(), params, body, self_local: Some(self_local) })),
+                HKind::Lambda(Box::new(HLambda { id, name: f.name.name.clone(), params, dicts, body, self_local: Some(self_local) })),
                 fty,
                 f.span,
             ));
@@ -942,7 +944,7 @@ impl Checker {
                 self.fs.ctx.pop();
                 let lam_ty = self.fn_ty(&[], ret);
                 let lam = mk(
-                    HKind::Lambda(Box::new(HLambda { id, name: "<spawn>".into(), params: vec![], body, self_local: None })),
+                    HKind::Lambda(Box::new(HLambda { id, name: "<spawn>".into(), params: vec![], dicts: vec![], body, self_local: None })),
                     lam_ty,
                     span,
                 );
@@ -1007,15 +1009,59 @@ impl Checker {
     // ------------------------------------------------------------------
     // Names
 
-    fn instantiate_local(&mut self, l: LocalId, span: Span) -> TypeId {
-        let t = self.fs.data[l as usize].ty;
-        if self.fs.data[l as usize].scheme.is_empty() {
-            return t;
+    /// Returns the trait bounds on local function `local_id` that need runtime
+    /// dictionaries.
+    fn local_fn_dicts(&mut self, local_id: LocalId) -> Vec<(TypeId, TraitRef)> {
+        let mut dicts = Vec::new();
+        for param in self.fs.data[local_id as usize].scheme.clone() {
+            let param_ty = self.arena.param(param);
+            dicts.extend(
+                self.params[param as usize]
+                    .traits
+                    .iter()
+                    .filter(|trait_ref| self.has_dict(trait_ref))
+                    .map(|&trait_ref| (param_ty, trait_ref)),
+            );
         }
-        let scheme = self.fs.data[l as usize].scheme.clone();
+        dicts
+    }
+
+    /// Returns a use of local `local_id`, wrapping a generic local function in
+    /// a closure if it takes hidden dictionary parameters.
+    fn local_value(&mut self, local_id: LocalId, span: Span) -> HExpr {
+        let local_ty = self.fs.data[local_id as usize].ty;
+        if self.fs.data[local_id as usize].scheme.is_empty() {
+            return mk(HKind::Local(local_id), local_ty, span);
+        }
+        let scheme = self.fs.data[local_id as usize].scheme.clone();
         let fresh: Vec<TypeId> = scheme.iter().map(|_| self.fresh()).collect();
-        self.require_traits(&scheme, &fresh, &[], span);
-        self.arena.instantiate(t, &scheme, &fresh)
+        let dicts = self.local_fn_dicts(local_id);
+        self.require_traits(&scheme, &fresh, &dicts, span);
+        let local_ty = self.arena.instantiate(local_ty, &scheme, &fresh);
+        if dicts.is_empty() {
+            return mk(HKind::Local(local_id), local_ty, span);
+        }
+        let Ty::Fn(param_list, ret) = self.ty(local_ty) else { return mk(HKind::Local(local_id), local_ty, span) };
+        let param_tys = self.elems(param_list);
+        let lambda_id = self.new_lambda();
+        let mut args = Vec::new();
+        for (bound_ty, trait_ref) in dicts {
+            let bound_ty = self.arena.instantiate(bound_ty, &scheme, &fresh);
+            let trait_ref = trait_ref.subst_params(&mut self.arena, &|p| scheme.iter().position(|&g| g == p).map(|i| fresh[i]));
+            args.push(self.evidence_hole(bound_ty, trait_ref, false, span));
+        }
+        let mut params = Vec::new();
+        for &param_ty in &param_tys {
+            self.fs.locals.push(LocalInfo { name: Symbol::ARG, mutable: false, owner: lambda_id, cell: false, span });
+            self.fs.data.push(LocalData { ty: param_ty, scheme: vec![], used: true, assigned: false, is_param: true, decl_span: span });
+            let param_local = (self.fs.locals.len() - 1) as LocalId;
+            params.push(param_local);
+            args.push(mk(HKind::Local(param_local), param_ty, span));
+        }
+        let callee = Box::new(mk(HKind::Local(local_id), local_ty, span));
+        let body = mk(HKind::CallValue { callee, args }, ret, span);
+        let name = self.name(self.fs.locals[local_id as usize].name).to_string();
+        mk(HKind::Lambda(Box::new(HLambda { id: lambda_id, name, params, dicts: vec![], body, self_local: None })), local_ty, span)
     }
 
     fn check_ident(&mut self, id: &ast::Ident, hint: Option<TypeId>) -> HExpr {
@@ -1024,10 +1070,9 @@ impl Checker {
             self.error(span, "`_` cannot be used as a value");
             return err(span);
         }
-        if let Some(l) = self.find_local(&id.name) {
-            self.use_local(l);
-            let t = self.instantiate_local(l, span);
-            return mk(HKind::Local(l), t, span);
+        if let Some(local_id) = self.find_local(&id.name) {
+            self.use_local(local_id);
+            return self.local_value(local_id, span);
         }
         match self.lookup_global(&id.name) {
             Some(def) => self.def_value(def, &id.name, hint, span),
@@ -2949,7 +2994,11 @@ impl Checker {
             b
         };
         let fty = self.fn_ty(&ptys, ret);
-        mk(HKind::Lambda(Box::new(HLambda { id, name: "<lambda>".into(), params: locals, body: body_h, self_local: None })), fty, span)
+        mk(
+            HKind::Lambda(Box::new(HLambda { id, name: "<lambda>".into(), params: locals, dicts: vec![], body: body_h, self_local: None })),
+            fty,
+            span,
+        )
     }
 }
 
