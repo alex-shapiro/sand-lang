@@ -33,7 +33,7 @@ We want a runtime model that meets these requirements:
 - Hard `max_memory` limits even if a large native call starts with a mostly full heap.
 - Monotonic fuel metering across VM bytecode and native loops.
 - `Send` engines and run futures across async yields, matching [api.rs](../crates/sandlang/tests/api.rs#L56-L62).
-- 500 levels of interleaved recursion inside a 512 KB stack on every target, including WebAssembly, without `mmap`, signal handlers, or stack scanning.
+- 500 levels of structural recursion and safe stack-overflow handling for deeply nested synchronous callbacks inside a 512 KB stack on every target, including WebAssembly, without `mmap`, signal handlers, or stack scanning.
 - Simple host module APIs that let external crates add new encoding formats.
 - Low memory overhead and short GC pauses.
 - Small total implementation size across both the VM/GC core and host modules, in 100% safe Rust.
@@ -62,7 +62,7 @@ Same flat `Vec<Obj>` heap and root stack as Arm 1, with `GcScope` and `NoGcScope
 
 Fast unrooted code borrows `NoGcScope`. Functions that may collect take `GcScope`, so Rust rejects bound local handles used across `gc.reborrow()`. Values kept across callbacks use `Scoped` roots, and strings are read by handle plus byte offset inside `NoGcScope`.
 
-Trade-offs: runtime layout and speed match Arm 1, and code still cannot hold `&str` across allocations or callbacks. Passing handles into functions that may collect requires `.unbind()` at the call site and `.bind(gc.nogc())` on entry, and forgetting `.bind()` still compiles.
+Trade-offs: runtime layout and speed match Arm 1, and code still cannot hold `&str` across allocations or callbacks. Passing handles into functions that may collect requires `.unbind()` at the call site and `.bind(gc.nogc())` on entry, forgetting `.bind()` still compiles, and `GcScope` only checks synchronous callbacks (async yields across `.await` use a non-LIFO root table like Arm 1).
 
 ### Arm 3: `Arc` with Cycle Collector
 
@@ -72,7 +72,7 @@ Cloning a string handle takes constant time without copying bytes. Natives hold 
 
 For cycles, use a Python-style reference-count cycle detector over all container types (both immutable and mutable, since an immutable struct can reference a mutable container that points back to it). Leave externally held native values untouched and allocate no new memory at `max_memory`. Implement iterative `Drop` on linked values so deep drops fit on a 512 KB stack.
 
-Trade-offs: atomic refcount traffic on clones and drops, lock overhead on mutable containers, `Weak` cycle-table entries that pin `Arc` headers until pruned, and two heap allocations per tracked long string in 100% safe Rust.
+Trade-offs: atomic refcount traffic on clones and drops, lock overhead on mutable containers, `Weak` cycle-table entries that pin the full `Arc` allocation block until pruned, and two heap allocations per tracked long string in 100% safe Rust.
 
 ## Experimental Harness
 
@@ -85,7 +85,7 @@ Keep measurements fair across all three arms:
 - Share one bytecode ISA, test suite, dataset generator, and stateless JSON scanner (`(src: &str, pos: &mut usize)`) across all arms.
 - Share one strict byte tracker checked before every allocation. Count object headers, inner container buffers, root stacks, and cycle-collector tables.
 - Do not build a second structural-only fast-path codec beside the general callback codec in any arm. Give every arm one equal review and tuning pass before recording final numbers.
-- Use the same memory-threshold collection policy across all three arms (running mark-sweep for Arms 1 and 2, and `Weak`-table pruning plus cycle collection for Arm 3, if tracked bytes reach the larger of 2x the last post-sweep live set or a shared minimum threshold, plus emergency sweeps at `max_memory`). In B2 and B3, set that minimum threshold above the working set of one full benchmark run so B2 and B3 isolate steady-state codec speed while B4 tests GC under pressure.
+- Use the same memory-threshold collection policy across all three arms (running mark-sweep for Arms 1 and 2, and `Weak`-table pruning plus cycle collection for Arm 3, if tracked bytes reach the larger of 2x the last post-sweep live set or a shared minimum threshold, plus emergency sweeps at `max_memory`). In B1, B2, and B3, set that minimum threshold above the working set of one full benchmark run so B1 to B3 isolate steady-state speed while B4 tests GC under pressure.
 - In B1, B2/B3 `decode`, and B2/B3 `small_encode`, report operation time, post-run cleanup time (one full collection for Arms 1 and 2; dropping the output and pruning dead `Weak` entries for Arm 3), and total combined time. Compare total combined time on `small_decode` and `small_encode`, since Arm 3 drops per-iteration outputs during operation time while Arms 1 and 2 defer freeing them to cleanup. In B2/B3 `large_encode`, report operation time without forcing a full-heap GC over the live input objects.
 
 ### Dataset and Baseline
@@ -131,14 +131,19 @@ Repeat B2 with `Address` and `Status` implemented as Sand bytecode methods calli
 
 Check four cases under a hard `max_memory` cap:
 
-- Fill the heap to 70% with dead acyclic objects, then run B2 and B3. Treat this case as a correctness and memory-limit check rather than a speed race, since Arm 3 frees acyclic inner buffers on drop while `Weak` entries pin `Arc` headers until pruned.
-- Fill the heap to 70% with dead reference cycles, then run B2 and B3.
+- Fill the heap to 70% with dead acyclic objects (pausing automatic sweeps during setup), then run B2 and B3. Treat this case as a correctness and memory-limit check rather than a speed race, since Arm 3 frees acyclic inner buffers on drop while `Weak` entries pin full `Arc` allocation blocks until pruned.
+- Fill the heap to 70% with dead reference cycles (pausing automatic sweeps during setup), then run B2 and B3.
 - Run B3 with a custom callback that allocates temporary garbage in a loop inside one decode call.
 - Attempt a single string or list allocation larger than `max_memory` and verify rejection before memory grows.
 
-### B5: Deep Interleaved Recursion
+### B5: Deep Recursion and Callback Stack Safety
 
-Define `struct Node { value: int, next: Node? }`. Encode, decode, and drop a 500-level linked `Node` with custom Sand callbacks that recurse through the native `Encoder` and `Decoder` walker at every level on a 512 KB native thread stack in debug builds (matching [api.rs](../crates/sandlang/tests/api.rs#L154-L167)). Note that WebAssembly stack limits are a follow-up check for any winning arm.
+Define `struct Node { value: int, next: Node? }`. Run two checks on a 512 KB native thread stack in debug builds (matching [api.rs](../crates/sandlang/tests/api.rs#L154-L167) and [native_calls.rs](../crates/sandlang/tests/native_calls.rs#L476-L482)):
+
+- Encode, decode, and drop a 500-level structural `Node` without custom callbacks.
+- Run deeply nested custom `Node` callbacks and verify a clean runtime stack-overflow error at the Rust stack budget (256 KB, matching [sched.rs](../crates/sandlang/src/vm/sched.rs#L109-L117)) without crashing the thread.
+
+WebAssembly stack limits are a follow-up check for any winning arm.
 
 ### B6: Async Yield and `Send`
 
@@ -146,13 +151,13 @@ Run two cooperative fibers on one VM. Fiber 1 enters a native, holds a live `Use
 
 ### B7: Memory Footprint and GC Pause
 
-Measure live bytes for 5,000 `User` records and the pause time of one full collection (mark-sweep for Arms 1 and 2; `Weak`-list cycle sweep for Arm 3). Measure actual process allocations via a counting global allocator in a dedicated B7 measurement mode, never enabled during B1 to B3 timing runs.
+Measure live requested bytes, live allocation count, and the pause time of one full collection (mark-sweep for Arms 1 and 2; `Weak`-list cycle sweep for Arm 3) for 5,000 `User` records. Record actual process allocations via a counting global allocator in a dedicated B7 measurement mode, never enabled during B1 to B3 timing runs.
 
 ### B8: Host Module Ergonomics and Isolation
 
 Build four host integrations using only the public host API:
 
-- `List.map` calling a Sand closure per element.
+- `List.map` calling a Sand closure per element, including a test where the closure mutates the input list without deadlocking.
 - A second format (`SExpr`) implementing both encoding and decoding.
 - A host object storing a Sand callback across multiple calls, verifying that a cycle between the host object and its stored callback is collected.
 - Two independent engines running interleaved in the same process.
