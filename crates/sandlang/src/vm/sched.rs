@@ -245,13 +245,12 @@ impl RunTimer {
         self.last_clock_fuel = total_fuel;
     }
 
-    /// Reports fuel and reads the clock once the slice count or fuel since the
-    /// last read reaches its threshold.
+    /// Reads the clock once the slice count or fuel since the last read
+    /// reaches its threshold.
     fn ran(&mut self, meter: &VmMeter) {
         self.unrecorded_slices += 1;
         let used = meter.total_fuel_used();
         if self.unrecorded_slices >= CLOCK_SLICES || used.saturating_sub(self.last_clock_fuel) >= SLICE_FUEL as u64 {
-            meter.report_fuel_to_clock();
             self.read(used);
         }
     }
@@ -782,7 +781,6 @@ pub(crate) async fn drive<U: DriveUntil>(shared_vm: &SharedVm, stop_policy: U) -
         let (pause, total_fuel) = {
             let mut vm = shared_vm.lock();
             let pause = run_ready(&mut vm, shared_vm, &stop_policy, &mut timer);
-            vm.meter.report_fuel_to_clock();
             (pause?, vm.meter.total_fuel_used())
         };
         match pause {

@@ -2111,10 +2111,9 @@ the pseudorandom number generator used by `random` and `uuid`.
 Custom clock and time zone providers decouple script execution from the system
 clock. `Config::clock` supplies a `platform::Clock` that drives wall time,
 monotonic time, `MemFs` timestamps, UUIDv7 timestamps, sleep timers, execution
-deadlines, and network timeouts, while receiving fuel consumption reports via
-`Clock::work` and scheduler yields via `Clock::yield_now`. `Config::time_zone`
-sets the `time::TimeZone` returned by `time.local_zone()` if the policy allows
-`Capability::TimeZone`.
+deadlines, network timeouts, and scheduler yields via `Clock::yield_now`.
+`Config::time_zone` sets the `time::TimeZone` returned by `time.local_zone()` if
+the policy allows `Capability::TimeZone`.
 
 A custom `network::Network` provider can intercept all DNS resolution, outgoing
 TCP streams, and TCP listeners in `net` and `http`. If `Config::network` is

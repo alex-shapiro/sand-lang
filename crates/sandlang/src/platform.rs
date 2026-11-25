@@ -32,11 +32,6 @@ pub trait Clock: Send + Sync {
 
     /// Yields execution to the host scheduler.
     fn yield_now(&self) -> ClockFuture;
-
-    /// Records fuel units of work completed by the engine.
-    fn record_work(&self, fuel: u64) {
-        let _ = fuel;
-    }
 }
 
 /// Execution deadline evaluated against a clock.

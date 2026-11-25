@@ -668,19 +668,20 @@ fn scheduler_preempts_task_after_long_synchronous_callback() {
     }
 }
 
-/// Test clock that adds 1 microsecond per reported unit of fuel.
-struct WorkClock {
+/// Test clock that advances by 5 milliseconds on each monotonic read.
+struct TickingClock {
     origin: sandlang::platform::Instant,
-    reported_fuel: std::sync::atomic::AtomicU64,
+    ticks: std::sync::atomic::AtomicU64,
     yield_count: std::sync::atomic::AtomicU64,
 }
 
-impl sandlang::platform::Clock for WorkClock {
+impl sandlang::platform::Clock for TickingClock {
     fn wall(&self) -> sandlang::platform::SystemTime {
         sandlang::platform::UNIX_EPOCH
     }
     fn now(&self) -> sandlang::platform::Instant {
-        self.origin + Duration::from_micros(self.reported_fuel.load(Ordering::SeqCst))
+        let ticks = self.ticks.fetch_add(1, Ordering::SeqCst);
+        self.origin + Duration::from_millis(ticks * 5)
     }
     fn cpu_time(&self) -> Duration {
         Duration::ZERO
@@ -692,18 +693,12 @@ impl sandlang::platform::Clock for WorkClock {
         self.yield_count.fetch_add(1, Ordering::SeqCst);
         Box::pin(std::future::ready(()))
     }
-    fn record_work(&self, fuel: u64) {
-        self.reported_fuel.fetch_add(fuel, Ordering::SeqCst);
-    }
 }
 
 #[test]
 fn engine_enforces_wall_time_limit_inside_callbacks_under_host_clock() {
-    let clock = Arc::new(WorkClock {
-        origin: sandlang::platform::Instant::now(),
-        reported_fuel: Default::default(),
-        yield_count: Default::default(),
-    });
+    let clock =
+        Arc::new(TickingClock { origin: sandlang::platform::Instant::now(), ticks: Default::default(), yield_count: Default::default() });
     let limits = Limits { max_wall_time: Some(Duration::from_millis(50)), max_instructions: Some(100_000_000), ..Limits::default() };
     let source = "calls.apply_sync((x) => {\nvar i = 0\nwhile i >= 0 { i += 1 }\nx\n}, 0, 1)";
     let (result, _) = run(Config::new().clock(clock).limits(limits), &EventLog::default(), source);
@@ -712,11 +707,8 @@ fn engine_enforces_wall_time_limit_inside_callbacks_under_host_clock() {
 
 #[test]
 fn scheduler_yields_to_host_after_multi_slice_synchronous_callback() {
-    let clock = Arc::new(WorkClock {
-        origin: sandlang::platform::Instant::now(),
-        reported_fuel: Default::default(),
-        yield_count: Default::default(),
-    });
+    let clock =
+        Arc::new(TickingClock { origin: sandlang::platform::Instant::now(), ticks: Default::default(), yield_count: Default::default() });
     let source = "fn spin(n: int) -> int {\n\
                       var i = 0\n\
                       while i < n { i += 1 }\n\

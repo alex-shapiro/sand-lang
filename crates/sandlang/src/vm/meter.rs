@@ -72,8 +72,6 @@ pub struct VmMeter {
     next_check_fuel: Cell<u64>,
     /// Fuel at which the current fiber slice ends.
     slice_fuel: Cell<u64>,
-    /// Fuel already reported to [`Clock::work`].
-    clock_reported_fuel: Cell<u64>,
     /// Starting countdown handed to the interpreter at the last sync boundary.
     interpreter_fuel_baseline: Cell<i64>,
     max_instructions: Option<u64>,
@@ -90,7 +88,6 @@ impl VmMeter {
             spent_fuel: Cell::new(0),
             next_check_fuel: Cell::new(0),
             slice_fuel: Cell::new(0),
-            clock_reported_fuel: Cell::new(0),
             interpreter_fuel_baseline: Cell::new(0),
             max_instructions,
             cpu_deadline: Cell::new(None),
@@ -170,20 +167,8 @@ impl VmMeter {
         self.reload_interpreter_fuel()
     }
 
-    /// Sends fuel spent since the last report to [`Clock::work`].
-    pub(crate) fn report_fuel_to_clock(&self) {
-        let spent = self.spent_fuel.get();
-        let unreported = spent.saturating_sub(self.clock_reported_fuel.get());
-        if unreported > 0 {
-            self.clock_reported_fuel.set(spent);
-            self.clock.record_work(unreported);
-        }
-    }
-
-    /// Reports spent fuel to the clock, checks limits, and refills the
-    /// interpreter counter for the next check window.
+    /// Checks limits and sets the next check window.
     pub(crate) fn refill_after_limit_check(&self) -> Result<i64, Fail> {
-        self.report_fuel_to_clock();
         self.advance_limit_check()?;
         Ok(self.reload_interpreter_fuel())
     }
@@ -218,7 +203,6 @@ impl VmMeter {
         self.spent_fuel.set(0);
         self.next_check_fuel.set(0);
         self.slice_fuel.set(0);
-        self.clock_reported_fuel.set(0);
         self.interpreter_fuel_baseline.set(0);
         self.interrupt_flag = interrupt_flag;
     }
