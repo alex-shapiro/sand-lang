@@ -904,7 +904,7 @@ impl Checker {
         }
         let name = self.fns[f as usize].runtime_name(&self.types, &self.syms);
         let body = mk(self.call_kind(f, inst.fresh, args), inst.ret, span);
-        let lam = HLambda { id, name, params, body, self_local: None };
+        let lam = HLambda { id, name, params, dicts: vec![], body, self_local: None };
         let fty = self.fn_ty(&inst.params, inst.ret);
         mk(HKind::Lambda(Box::new(lam)), fty, span)
     }
@@ -1082,6 +1082,16 @@ impl Checker {
             out.push(e);
         }
         out
+    }
+
+    /// Returns `true` if dictionary `expr` reads a local owned by a lambda.
+    pub(crate) fn reads_lambda_local(&self, expr: &HExpr) -> bool {
+        match &expr.kind {
+            HKind::Dict { args, .. } => args.iter().any(|arg| self.reads_lambda_local(arg)),
+            HKind::Field { obj, .. } => self.reads_lambda_local(obj),
+            HKind::Local(local_id) => self.fs.locals[*local_id as usize].owner != 0,
+            _ => false,
+        }
     }
 
     /// Hoists non-constant dictionary expressions into entry-block local

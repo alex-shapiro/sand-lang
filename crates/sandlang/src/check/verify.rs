@@ -512,6 +512,10 @@ impl<'a> Verifier<'a> {
     fn check_expr(&mut self, cx: &mut VerifyCtx, locals: &[LocalInfo], e: &HExpr) -> VerifyResult {
         match &e.kind {
             HKind::Error | HKind::Evidence(_) => Err("a placeholder remains".into()),
+            HKind::Lambda(lam) if !lam.dicts.is_empty() => {
+                cx.dicts.extend(lam.params.iter().copied().zip(lam.dicts.iter().copied()));
+                Ok(())
+            }
             HKind::Let { pat: HPat { kind: HPatKind::Bind(l), .. }, init, .. } if locals[*l as usize].name == Symbol::DICT => {
                 cx.hoisted.insert(*l, (**init).clone());
                 Ok(())

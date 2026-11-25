@@ -197,7 +197,9 @@ impl Checker {
             HKind::Evidence(i) => {
                 let i = *i as usize;
                 *e = HExpr { span: e.span, ..fin.dicts[i].clone() };
-                if nested && fin.hoist && matches!(e.kind, HKind::Dict { .. }) && !is_const_dict(e) {
+                // Hoisted dictionaries initialize at top-level function entry, so keep
+                // dictionaries that read a lambda's local inside that lambda.
+                if nested && fin.hoist && matches!(e.kind, HKind::Dict { .. }) && !is_const_dict(e) && !self.reads_lambda_local(e) {
                     self.hoist_dict(e, &mut fin.hoisted);
                 }
                 return;
