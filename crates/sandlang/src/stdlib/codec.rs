@@ -1711,7 +1711,7 @@ fn check_depth(depth: usize) -> CodecResult {
     if depth >= MAX_NESTING_DEPTH { nesting_limit_error() } else { Ok(()) }
 }
 
-fn check_list_growth(context: &mut CallContext, list: VmValue) -> Result<(), Fail> {
+pub(crate) fn check_list_growth(context: &mut CallContext, list: VmValue) -> Result<(), Fail> {
     context.step(|vm| {
         if let Obj::List(items) = vm.heap.get(list)
             && items.len() == items.capacity()
@@ -1722,7 +1722,7 @@ fn check_list_growth(context: &mut CallContext, list: VmValue) -> Result<(), Fai
     })
 }
 
-fn check_set_or_map_growth(vm: &mut Vm, table: VmValue, key: VmValue) -> Result<(), Fail> {
+pub(crate) fn check_set_or_map_growth(vm: &mut Vm, table: VmValue, key: VmValue) -> Result<(), Fail> {
     let (len, cap, elem_size, index) = match vm.heap.get(table) {
         Obj::Set(so) => (so.entries.len(), so.entries.capacity(), SET_ENTRY_SIZE, so.index_growth(key)),
         Obj::Map(mo) => (mo.entries.len(), mo.entries.capacity(), MAP_ENTRY_SIZE, mo.index_growth(key)),

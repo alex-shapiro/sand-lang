@@ -2397,6 +2397,55 @@ print(decoded.v)
 }
 
 #[test]
+fn json_source_edge_cases_skip_metering_option_keys_nested_enum_and_gc() {
+    // 1. Skipping a huge unknown JSON field stops at max_instructions.
+    let skip_src = r##"
+import json
+struct Empty {}
+let huge = "{\"unknown\": [" + "1,".repeat(50000) + "1]}"
+let _: Result<Empty> = json.decode(huge)
+"##;
+    let limits = Limits { max_instructions: Some(10_000), ..Limits::default() };
+    let (res, _, _) = run_src(Config::new().limits(limits), skip_src);
+    assert!(matches!(res, Err(Error::Limit(LimitKind::Instructions))), "expected instruction limit on skip, got {res:?}");
+
+    // 2. Option map keys are rejected on decode, and nested enum trailing comma reports outer enum name.
+    let edge_src = r##"
+import json
+let bad_map: Result<[str?: int]> = json.decode(r#"{"null": 1}"#)
+print(bad_map)
+enum Inner { Leaf(int) }
+enum Outer { Wrap(Inner) }
+let bad_enum: Result<Outer> = json.decode(r#"{"Wrap": [{"Leaf": [1]}], "Extra": 2}"#)
+print(bad_enum)
+"##;
+    let (res, out, _) = run_src(Config::new(), edge_src);
+    res.unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].contains("expected value, found the map key"), "got: {}", lines[0]);
+    assert!(lines[1].contains("expected a single variant of Outer"), "got: {}", lines[1]);
+
+    // 3. Json.decode and json.to_json reclaim dead garbage before hitting max_memory.
+    let gc_src = r##"
+import json
+struct Boxed { data: str }
+var garbage: [str] = []
+for _ in 0..8 {
+    garbage.push("x".repeat(256 * 1024))
+}
+garbage = []
+let payload = "{\"s\": \"" + "y".repeat(300 * 1024) + "\"}"
+let decoded: json.Json = json.decode(payload)?
+let built = json.to_json(Boxed(data: "z".repeat(300 * 1024)))
+print((match decoded { json.Json.Obj(_) => true, _ => false }, match built { json.Json.Obj(_) => true, _ => false }))
+"##;
+    let limits = Limits { max_memory: Some(3 << 20), ..Limits::default() };
+    let (res, out, _) = run_src(Config::new().limits(limits), gc_src);
+    res.unwrap();
+    assert_eq!(out, "(true, true)\n");
+}
+
+#[test]
 fn host_functions_take_and_return_durations_and_never() {
     use jiff::SignedDuration;
     use sandlang::native::ty::Never;

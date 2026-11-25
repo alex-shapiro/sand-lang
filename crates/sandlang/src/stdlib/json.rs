@@ -16,7 +16,7 @@ use crate::vm::bytecode::{Program, ShapeKind};
 use crate::vm::compare::str_hash;
 use crate::vm::heap::Staging;
 use crate::vm::iomem::{IoMemory, Reservation};
-use crate::vm::meter::{SLOW_BYTES_PER_FUEL_UNIT, VmMeter};
+use crate::vm::meter::{BYTES_PER_FUEL_UNIT, SLOW_BYTES_PER_FUEL_UNIT, VmMeter, WorkerMeter};
 use crate::vm::value::{KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, VmValue, slot_fits};
 use crate::vm::{Fail, Vm, fail, internal};
 use hashbrown::HashTable;
@@ -98,8 +98,7 @@ pub(crate) fn module() -> NativeModule {
         Encoder::write(context, encoder, |context, sink| encode_json(context.vm(), value.raw(), sink))
     });
     module.function("Json.decode", |context: &mut CallContext, decoder: VmVal<Decoder>| {
-        context.step(|vm| vm.check_memory(NODE_BYTES))?;
-        Decoder::read(context, decoder, |context, source| decode_json(context.vm_mut(), source).map(VmVal::<Json>::from_raw))
+        Decoder::read(context, decoder, |context, source| decode_json_context(context, source).map(VmVal::<Json>::from_raw))
     });
     module.function(
         "encode",
@@ -122,14 +121,11 @@ pub(crate) fn module() -> NativeModule {
             if let Some(json) = context.step(|vm| direct_json(vm, dict.raw(), value.raw()))? {
                 return Ok(VmVal::<Json>::from_raw(json));
             }
-            let sink = JsonSink::new(JsonTextWriter::new(0, &context.vm().heap.io_memory));
+            let sink = JsonSink::new(JsonValueWriter::new(&context.vm().heap.io_memory));
             codec::encode(context, sink, context.value(val_root), context.value(dict_root), |context, mut sink| {
-                let (text, reservation) = sink.writer.take_text();
-                context.step(|vm| vm.check_memory(text.len().saturating_mul(2).max(NODE_BYTES)))?;
-                let mut source = JsonSource::owned(text.into_boxed_str(), reservation);
-                let json = decode_json(context.vm_mut(), &mut source)?;
-                context.vm().charge(1 + (source.take_consumed_bytes() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
-                Ok(VmVal::<Json>::from_raw(json))
+                let (json, _reservation) = sink.writer.take_json().ok_or_else(|| Fail::internal("to_json: no value"))?;
+                let vm_val = context.step(|vm| json_to_vm_value(vm, &json))?;
+                Ok(VmVal::<Json>::from_raw(vm_val))
             })
             .map_err(codec::walk_error_to_fail)
         },
@@ -231,9 +227,10 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
         }
         let text = KeyText { start: self.key_text.len() as u32, len: key.len() as u32 };
         self.key_text.push_str(key);
+        self.pending += key.len();
         let v = self.st.new_str(key);
         if key.len() <= MAX_SHARED_KEY_LEN && self.keys.len() < MAX_SHARED_KEYS {
-            self.pending += 2 * NODE_BYTES + key.len();
+            self.pending += 2 * NODE_BYTES;
             self.keys.insert_unique(hash, (hash, text, v), |e| e.0);
         }
         (v, text)
@@ -378,10 +375,14 @@ impl FromVmValue for Json {
 
 impl IntoVmValue for Json {
     fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
-        let ids = JsonIds::new(&vm.prog)?;
-        let meter = &vm.meter;
-        vm.heap.staged(|_, st| Builder::new(st, meter).json(ids, self))
+        json_to_vm_value(vm, &self)
     }
+}
+
+fn json_to_vm_value(vm: &mut Vm, json: &Json) -> Result<VmValue, Fail> {
+    let ids = JsonIds::new(&vm.prog)?;
+    let meter = &vm.meter;
+    vm.heap.staged(|_, st| Builder::new(st, meter).json(ids, json))
 }
 
 fn missing_root_error() -> Fail {
@@ -412,16 +413,16 @@ fn rust_string(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<String, Fai
 }
 
 /// Open Rust [`Json`] array or object during conversion to Sand `Json`.
-enum WriteFrame {
-    Arr(std::vec::IntoIter<Json>, Vec<VmValue>),
+enum WriteFrame<'j> {
+    Arr(std::slice::Iter<'j, Json>, Vec<VmValue>),
     /// Remaining members, map builder, and the key and hash of the current
     /// member.
-    Obj(indexmap::map::IntoIter<String, Json>, MapBuilder, String, u64),
+    Obj(indexmap::map::Iter<'j, String, Json>, MapBuilder, &'j str, u64),
 }
 
 impl Builder<'_, '_, '_> {
     /// Converts `json` into a Sand `Json` value.
-    fn json(&mut self, ids: JsonIds, json: Json) -> Result<VmValue, Fail> {
+    fn json(&mut self, ids: JsonIds, json: &Json) -> Result<VmValue, Fail> {
         let mut stack = Vec::new();
         let mut node = json;
         loop {
@@ -429,21 +430,21 @@ impl Builder<'_, '_, '_> {
             self.meter.charge(1)?;
             let mut value = match node {
                 Json::Null => Some(VmValue::Tag(ids.null)),
-                Json::Bool(b) => Some(self.st.new_variant(ids.bool_, &[VmValue::Bool(b)])),
-                Json::Int(i) => Some(self.st.new_variant(ids.int, &[VmValue::Int(i)])),
-                Json::Float(f) => Some(self.st.new_variant(ids.float, &[VmValue::Float(f)])),
+                Json::Bool(b) => Some(self.st.new_variant(ids.bool_, &[VmValue::Bool(*b)])),
+                Json::Int(i) => Some(self.st.new_variant(ids.int, &[VmValue::Int(*i)])),
+                Json::Float(f) => Some(self.st.new_variant(ids.float, &[VmValue::Float(*f)])),
                 Json::Str(s) => {
                     self.st.check_memory((NODE_BYTES + self.pending).saturating_add(s.len()))?;
                     self.meter.charge_bytes(s.len())?;
-                    let s = self.st.new_str(s);
+                    let s = self.st.new_str(s.as_str());
                     Some(self.st.new_variant(ids.str_, &[s]))
                 }
                 Json::Arr(items) => {
-                    stack.push(WriteFrame::Arr(items.into_iter(), Vec::new()));
+                    stack.push(WriteFrame::Arr(items.iter(), Vec::new()));
                     None
                 }
                 Json::Obj(members) => {
-                    stack.push(WriteFrame::Obj(members.into_iter(), self.start_map(), String::new(), 0));
+                    stack.push(WriteFrame::Obj(members.iter(), self.start_map(), "", 0));
                     None
                 }
             };
@@ -467,8 +468,8 @@ impl Builder<'_, '_, '_> {
                             self.append(map, *hash, key, value)?;
                         }
                         if let Some((next_key, member)) = members.next() {
-                            *hash = self.hash(&next_key)?;
-                            *key = next_key;
+                            *hash = self.hash(next_key)?;
+                            *key = next_key.as_str();
                             break member;
                         }
                     }
@@ -646,6 +647,166 @@ fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValu
     })
 }
 
+/// Decodes a Sand `Json` value from `source` on a [`CallContext`], rooting open
+/// containers so garbage collection can run before any allocation hits
+/// `max_memory`.
+fn decode_json_context(context: &mut CallContext, source: &mut dyn DecodeSource) -> CodecResult<VmValue> {
+    enum Frame {
+        /// Root index of the open `Obj::List`.
+        Arr(usize),
+        /// Root indices `(map, key)` of the open `Obj::Map` and its pending key.
+        Obj(usize, usize),
+    }
+    let ids = JsonIds::new(&context.vm().prog)?;
+    let mark = context.root_mark();
+    let scratch = context.push_roots(1, VmValue::Unit)?;
+    let mut stack: Vec<Frame> = Vec::new();
+    let result = (|| -> CodecResult<VmValue> {
+        loop {
+            let consumed = source.take_consumed_bytes();
+            context.vm().charge(1 + (consumed / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
+            let mut value = match source.kind()? {
+                InputKind::Null => {
+                    source.unit()?;
+                    Some(VmValue::Tag(ids.null))
+                }
+                InputKind::Bool => {
+                    let b = source.bool()?;
+                    Some(context.step(|vm| {
+                        vm.check_memory(NODE_BYTES)?;
+                        Ok::<_, Fail>(vm.heap.new_variant(ids.bool_, &[VmValue::Bool(b)]))
+                    })?)
+                }
+                InputKind::Int => {
+                    let n = source.int()?;
+                    Some(context.step(|vm| {
+                        vm.check_memory(NODE_BYTES)?;
+                        Ok::<_, Fail>(vm.heap.new_variant(ids.int, &[VmValue::Int(n)]))
+                    })?)
+                }
+                InputKind::Float => {
+                    let n = source.float()?;
+                    Some(context.step(|vm| {
+                        vm.check_memory(NODE_BYTES)?;
+                        Ok::<_, Fail>(vm.heap.new_variant(ids.float, &[VmValue::Float(n)]))
+                    })?)
+                }
+                InputKind::Str => {
+                    let text = source.str()?;
+                    context.vm().charge_bytes(text.len())?;
+                    let val = context.step(|vm| {
+                        vm.check_memory(NODE_BYTES.saturating_mul(2).saturating_add(text.len()))?;
+                        let s = vm.new_str(&*text);
+                        Ok::<_, Fail>(vm.heap.new_variant(ids.str_, &[s]))
+                    })?;
+                    Some(val)
+                }
+                InputKind::List => {
+                    if stack.len() >= MAX_NESTING_DEPTH {
+                        return codec::nesting_limit_error();
+                    }
+                    source.begin_list()?;
+                    let list = context.step(|vm| {
+                        vm.check_memory(NODE_BYTES)?;
+                        Ok::<_, Fail>(vm.heap.new_list(Vec::new()))
+                    })?;
+                    let base = context.push_roots(1, list)?;
+                    stack.push(Frame::Arr(base));
+                    None
+                }
+                InputKind::Map => {
+                    if stack.len() >= MAX_NESTING_DEPTH {
+                        return codec::nesting_limit_error();
+                    }
+                    source.begin_map()?;
+                    let map = context.step(|vm| {
+                        vm.check_memory(NODE_BYTES)?;
+                        Ok::<_, Fail>(vm.heap.alloc(Obj::Map(Box::<MapObj>::default())))
+                    })?;
+                    let base = context.push_roots(2, VmValue::Unit)?;
+                    context.set_root(base, map);
+                    stack.push(Frame::Obj(base, base + 1));
+                    None
+                }
+                InputKind::Duration
+                | InputKind::Bytes
+                | InputKind::Tuple
+                | InputKind::Struct
+                | InputKind::Range
+                | InputKind::Native
+                | InputKind::Variant => {
+                    return Err(HostError::new("parse", format!("{}: expected JSON data", source.path())));
+                }
+            };
+            loop {
+                let next = match stack.last() {
+                    None => return value.ok_or_else(|| missing_root_error().into()),
+                    Some(&Frame::Arr(list_root)) => {
+                        if let Some(item) = value.take() {
+                            context.set_root(scratch, item);
+                            let list = context.root_at(list_root);
+                            codec::check_list_growth(context, list)?;
+                            let item = context.root_at(scratch);
+                            context.vm_mut().heap.list_push(list, item).map_err(Fail::limit)?;
+                        }
+                        source.next()?
+                    }
+                    Some(&Frame::Obj(map_root, key_root)) => {
+                        if let Some(entry_val) = value.take() {
+                            context.set_root(scratch, entry_val);
+                            let map = context.root_at(map_root);
+                            let key = context.root_at(key_root);
+                            context.step(|vm| codec::check_set_or_map_growth(vm, map, key))?;
+                            let entry_val = context.root_at(scratch);
+                            context.vm_mut().map_insert(map, key, entry_val)?;
+                        }
+                        match source.next()? {
+                            true => {
+                                let key_text = source.str()?;
+                                context.vm().charge_bytes(key_text.len())?;
+                                let key_val = context.step(|vm| {
+                                    vm.check_memory(NODE_BYTES.saturating_add(key_text.len()))?;
+                                    Ok::<_, Fail>(vm.new_str(&*key_text))
+                                })?;
+                                context.set_root(key_root, key_val);
+                                true
+                            }
+                            false => false,
+                        }
+                    }
+                };
+                if next {
+                    break;
+                }
+                source.end()?;
+                value = Some(match stack.pop() {
+                    Some(Frame::Arr(list_root)) => {
+                        let list = context.root_at(list_root);
+                        let wrapped = context.step(|vm| {
+                            vm.check_memory(NODE_BYTES)?;
+                            Ok::<_, Fail>(vm.heap.new_variant(ids.arr, &[list]))
+                        })?;
+                        context.truncate_roots(list_root);
+                        wrapped
+                    }
+                    Some(Frame::Obj(map_root, _)) => {
+                        let map = context.root_at(map_root);
+                        let wrapped = context.step(|vm| {
+                            vm.check_memory(NODE_BYTES)?;
+                            Ok::<_, Fail>(vm.heap.new_variant(ids.obj, &[map]))
+                        })?;
+                        context.truncate_roots(map_root);
+                        wrapped
+                    }
+                    None => return Err(missing_root_error().into()),
+                });
+            }
+        }
+    })();
+    context.truncate_roots(mark);
+    result
+}
+
 /// Converts `value` to `Json` without a codec walk if `dict` is the built-in
 /// `Encode` dictionary of `Json` or of a JSON scalar.
 ///
@@ -707,8 +868,21 @@ fn invalid_key_error<T>() -> CodecResult<T> {
     Err(HostError::new("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type"))
 }
 
-/// Open container frame in [`JsonSink`].
-enum SinkFrame {
+/// Target backend driven by [`JsonSink`] for JSON text or [`Json`] trees.
+trait JsonWriter {
+    fn begin(&mut self, is_array: bool) -> CodecResult;
+    fn null(&mut self) -> CodecResult;
+    fn bool(&mut self, value: bool) -> CodecResult;
+    fn int(&mut self, value: i64) -> CodecResult;
+    fn float(&mut self, value: f64) -> CodecResult;
+    fn str(&mut self, text: &str) -> CodecResult;
+    fn base64(&mut self, bytes: &[u8]) -> CodecResult;
+    fn key(&mut self, key: &str) -> CodecResult;
+    fn end(&mut self) -> CodecResult;
+}
+
+/// Kind of open container frame in [`JsonSink`].
+enum SinkFrameKind {
     Array,
     Map {
         key_next: bool,
@@ -724,44 +898,62 @@ enum SinkFrame {
     },
     /// Tuple-variant payload inside the outer `{"Variant": ...}` object.
     PositionalVariant,
-    /// `Some` or a unit variant written inline without enclosing brackets.
-    Inline,
 }
 
-/// [`EncodeSink`] that serializes Sand values as JSON text.
-struct JsonSink {
-    writer: JsonTextWriter,
+/// Open container frame in [`JsonSink`].
+struct SinkFrame {
+    kind: SinkFrameKind,
+    /// Open `Some` or unit-variant inline wrappers inside this container.
+    inline: usize,
+}
+
+/// [`EncodeSink`] that serializes Sand values through a [`JsonWriter`].
+struct JsonSink<W> {
+    writer: W,
     frames: Vec<SinkFrame>,
+    /// Open `Some` or unit-variant inline wrappers outside any container.
+    root_inline: usize,
 }
 
-impl JsonSink {
-    fn new(writer: JsonTextWriter) -> JsonSink {
-        JsonSink { writer, frames: Vec::new() }
+impl<W: JsonWriter> JsonSink<W> {
+    fn new(writer: W) -> JsonSink<W> {
+        JsonSink { writer, frames: Vec::new(), root_inline: 0 }
+    }
+
+    fn inline_slot(&mut self) -> &mut usize {
+        match self.frames.last_mut() {
+            Some(frame) => &mut frame.inline,
+            None => &mut self.root_inline,
+        }
     }
 
     /// Emits any pending struct or variant field key before the next value.
     ///
     /// Returns `true` if the next value is a map key.
     fn prepare_next_value(&mut self) -> CodecResult<bool> {
-        match self.frames.last_mut() {
-            Some(SinkFrame::Map { key_next }) => {
+        if *self.inline_slot() > 0 {
+            return Ok(false);
+        }
+        let Some(frame) = self.frames.last_mut() else { return Ok(false) };
+        match &mut frame.kind {
+            SinkFrameKind::Map { key_next } => {
                 let is_key = *key_next;
                 *key_next = !is_key;
                 Ok(is_key)
             }
-            Some(SinkFrame::Struct { desc, next_field }) => {
+            SinkFrameKind::Struct { desc, next_field } => {
                 let name = desc.fields.get(*next_field).map_or("", String::as_str);
                 *next_field += 1;
                 self.writer.key(name)?;
                 Ok(false)
             }
-            Some(SinkFrame::NamedVariant { desc, next_field }) => {
+            SinkFrameKind::NamedVariant { desc, next_field } => {
                 let name = desc.fields.as_ref().and_then(|fields| fields.get(*next_field)).map_or("", String::as_str);
                 *next_field += 1;
                 self.writer.key(name)?;
                 Ok(false)
             }
-            _ => Ok(false),
+            SinkFrameKind::Array | SinkFrameKind::PositionalVariant => Ok(false),
         }
     }
 
@@ -770,7 +962,7 @@ impl JsonSink {
     fn write_scalar(
         &mut self,
         format_key: impl FnOnce() -> Option<String>,
-        write_value: impl FnOnce(&mut JsonTextWriter) -> CodecResult,
+        write_value: impl FnOnce(&mut W) -> CodecResult,
     ) -> CodecResult {
         match self.prepare_next_value()? {
             true => match format_key() {
@@ -781,16 +973,16 @@ impl JsonSink {
         }
     }
 
-    fn begin(&mut self, frame: SinkFrame) -> CodecResult {
+    fn begin(&mut self, kind: SinkFrameKind) -> CodecResult {
         if self.prepare_next_value()? {
             return invalid_key_error();
         }
-        self.frames.push(frame);
+        self.frames.push(SinkFrame { kind, inline: 0 });
         Ok(())
     }
 }
 
-impl EncodeSink for JsonSink {
+impl<W: JsonWriter + Send> EncodeSink for JsonSink<W> {
     fn unit(&mut self) -> CodecResult {
         self.write_scalar(|| None, |writer| writer.null())
     }
@@ -859,12 +1051,12 @@ impl EncodeSink for JsonSink {
         if self.prepare_next_value()? {
             return invalid_key_error();
         }
-        self.frames.push(SinkFrame::Inline);
+        *self.inline_slot() += 1;
         Ok(())
     }
 
     fn begin_list(&mut self, _: usize) -> CodecResult {
-        self.begin(SinkFrame::Array)?;
+        self.begin(SinkFrameKind::Array)?;
         self.writer.begin(true)
     }
 
@@ -877,26 +1069,26 @@ impl EncodeSink for JsonSink {
     }
 
     fn begin_map(&mut self, _: usize) -> CodecResult {
-        self.begin(SinkFrame::Map { key_next: true })?;
+        self.begin(SinkFrameKind::Map { key_next: true })?;
         self.writer.begin(false)
     }
 
     fn begin_struct(&mut self, desc: &Arc<StructDesc>) -> CodecResult {
-        self.begin(SinkFrame::Struct { desc: desc.clone(), next_field: 0 })?;
+        self.begin(SinkFrameKind::Struct { desc: desc.clone(), next_field: 0 })?;
         self.writer.begin(false)
     }
 
     fn begin_variant(&mut self, desc: &Arc<VariantDesc>, len: usize) -> CodecResult {
         if len == 0 {
             let result = self.str(&desc.name);
-            self.frames.push(SinkFrame::Inline);
+            *self.inline_slot() += 1;
             return result;
         }
-        let frame = match desc.fields {
-            Some(_) => SinkFrame::NamedVariant { desc: desc.clone(), next_field: 0 },
-            None => SinkFrame::PositionalVariant,
+        let kind = match desc.fields {
+            Some(_) => SinkFrameKind::NamedVariant { desc: desc.clone(), next_field: 0 },
+            None => SinkFrameKind::PositionalVariant,
         };
-        self.begin(frame)?;
+        self.begin(kind)?;
         self.writer.begin(false)?;
         self.writer.key(&desc.name)?;
         match desc.fields {
@@ -906,15 +1098,132 @@ impl EncodeSink for JsonSink {
     }
 
     fn end(&mut self) -> CodecResult {
-        match self.frames.pop() {
-            Some(SinkFrame::Inline) | None => {}
-            Some(SinkFrame::NamedVariant { .. } | SinkFrame::PositionalVariant) => {
+        let inline = self.inline_slot();
+        if *inline > 0 {
+            *inline -= 1;
+            return Ok(());
+        }
+        match self.frames.pop().map(|f| f.kind) {
+            None => {}
+            Some(SinkFrameKind::NamedVariant { .. } | SinkFrameKind::PositionalVariant) => {
                 self.writer.end()?;
                 self.writer.end()?;
             }
             Some(_) => self.writer.end()?,
         }
         Ok(())
+    }
+}
+
+/// Open container in [`JsonValueWriter`].
+enum OpenJsonValue {
+    Arr(Vec<Json>),
+    Obj(indexmap::IndexMap<String, Json>, Option<String>),
+}
+
+/// [`JsonWriter`] that assembles a memory-tracked Rust [`Json`] tree directly.
+struct JsonValueWriter {
+    root: Option<Json>,
+    open_containers: Vec<OpenJsonValue>,
+    allocated: usize,
+    reservation: Reservation,
+}
+
+impl JsonValueWriter {
+    fn new(memory: &Arc<IoMemory>) -> JsonValueWriter {
+        JsonValueWriter { root: None, open_containers: Vec::new(), allocated: 0, reservation: Reservation::new(memory) }
+    }
+
+    fn take_json(&mut self) -> Option<(Json, Reservation)> {
+        let root = self.root.take()?;
+        let sibling = self.reservation.sibling();
+        Some((root, std::mem::replace(&mut self.reservation, sibling)))
+    }
+
+    fn grow(&mut self, bytes: usize) -> CodecResult {
+        self.allocated = self.allocated.saturating_add(bytes);
+        if self.allocated <= self.reservation.bytes() {
+            return Ok(());
+        }
+        let ahead = self.allocated.saturating_mul(2).max(1 << 10);
+        match self.reservation.ensure(ahead).or_else(|_| self.reservation.ensure(self.allocated)) {
+            Ok(()) => Ok(()),
+            Err(_) => crate::native::codec::memory_limit_error(),
+        }
+    }
+
+    fn push(&mut self, value: Json) -> CodecResult {
+        self.grow(std::mem::size_of::<Json>())?;
+        match self.open_containers.last_mut() {
+            None => self.root = Some(value),
+            Some(OpenJsonValue::Arr(items)) => items.push(value),
+            Some(OpenJsonValue::Obj(members, pending_key)) => {
+                let key = pending_key.take().unwrap_or_default();
+                members.insert(key, value);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl JsonWriter for JsonValueWriter {
+    fn begin(&mut self, is_array: bool) -> CodecResult {
+        if self.open_containers.len() >= MAX_NESTING_DEPTH {
+            return codec::nesting_limit_error();
+        }
+        self.grow(std::mem::size_of::<OpenJsonValue>())?;
+        self.open_containers.push(if is_array {
+            OpenJsonValue::Arr(Vec::new())
+        } else {
+            OpenJsonValue::Obj(indexmap::IndexMap::new(), None)
+        });
+        Ok(())
+    }
+
+    fn null(&mut self) -> CodecResult {
+        self.push(Json::Null)
+    }
+
+    fn bool(&mut self, value: bool) -> CodecResult {
+        self.push(Json::Bool(value))
+    }
+
+    fn int(&mut self, value: i64) -> CodecResult {
+        self.push(Json::Int(value))
+    }
+
+    fn float(&mut self, value: f64) -> CodecResult {
+        self.push(Json::Float(value))
+    }
+
+    fn str(&mut self, text: &str) -> CodecResult {
+        self.grow(text.len())?;
+        self.push(Json::Str(text.to_string()))
+    }
+
+    fn base64(&mut self, bytes: &[u8]) -> CodecResult {
+        let len = bytes.len().div_ceil(3) * 4;
+        self.grow(len)?;
+        let mut encoded = String::with_capacity(len);
+        base64::encode_into(&mut encoded, bytes, false);
+        self.push(Json::Str(encoded))
+    }
+
+    fn key(&mut self, key: &str) -> CodecResult {
+        self.grow(OBJ_ENTRY_BYTES.saturating_add(key.len()))?;
+        if let Some(OpenJsonValue::Obj(_, pending_key)) = self.open_containers.last_mut() {
+            *pending_key = Some(key.to_string());
+        }
+        Ok(())
+    }
+
+    fn end(&mut self) -> CodecResult {
+        let Some(frame) = self.open_containers.pop() else { return Ok(()) };
+        let value = match frame {
+            OpenJsonValue::Arr(items) => Json::Arr(items),
+            OpenJsonValue::Obj(members, _) => Json::Obj(members),
+        };
+        self.push(value)
     }
 }
 
@@ -1016,7 +1325,9 @@ impl JsonTextWriter {
         }
         Ok(())
     }
+}
 
+impl JsonWriter for JsonTextWriter {
     fn begin(&mut self, is_array: bool) -> CodecResult {
         if self.open_containers.len() >= MAX_NESTING_DEPTH {
             return codec::nesting_limit_error();
@@ -1110,18 +1421,20 @@ struct SourceFrame {
     count: usize,
     /// `true` once the closing `]` or `}` has been consumed.
     closed: bool,
+    /// Open `Option.Some` wrappers inside this container.
+    inline_some: usize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum SourceFrameKind {
     /// JSON array. A `Some(len)` value enforces an exact tuple length.
     Array(Option<usize>),
     Object,
     Map,
-    Some,
     /// Enum variant. `is_object` is `true` for `{"Variant": payload}` and `false` for `"Variant"`.
     Variant {
         is_object: bool,
+        enum_name: String,
+        variant_name: String,
     },
 }
 
@@ -1132,22 +1445,19 @@ pub(crate) struct JsonSource {
     _text_reservation: Reservation,
     /// Tracks peak memory used by `scratch` and Base64 decoding.
     scratch_reservation: Reservation,
+    /// Enforces execution limits and interrupts during internal `skip` and
+    /// `range` loops.
+    meter: WorkerMeter,
     pos: usize,
     /// Byte offset in `text` already reported by [`DecodeSource::take_consumed_bytes`].
     charged: usize,
     frames: Vec<SourceFrame>,
-    /// Number of `SourceFrameKind::Some` frames in `frames`.
-    ///
-    /// `Some` frames do not add JSON brackets. The nesting limit excludes them.
-    some_depth: usize,
+    /// Open `Option.Some` wrappers outside any container.
+    root_inline_some: usize,
     /// Map key buffered for the next scalar decode step.
     pending_map_key: Option<PathSegment>,
     /// Unescaped contents of the most recently scanned escaped string.
     scratch: String,
-    /// Variant name from the active `begin_variant` call for error messages.
-    variant_name: String,
-    /// Enum name from the active `begin_variant` call for error messages.
-    enum_name: String,
 }
 
 /// Location of a scanned JSON string's unescaped text.
@@ -1166,23 +1476,24 @@ impl JsonSource {
         if reservation.ensure(text.len()).is_err() {
             return Err(Fail::limit(crate::engine::LimitKind::Memory));
         }
-        Ok(JsonSource::owned(text.into(), reservation))
-    }
-
-    /// Creates a [`JsonSource`] over `text` backed by `reservation`.
-    fn owned(text: Box<str>, reservation: Reservation) -> JsonSource {
-        JsonSource {
-            text,
+        Ok(JsonSource {
+            text: text.into(),
             scratch_reservation: reservation.sibling(),
             _text_reservation: reservation,
+            meter: vm.meter.worker_meter(),
             pos: 0,
             charged: 0,
             frames: Vec::new(),
-            some_depth: 0,
+            root_inline_some: 0,
             pending_map_key: None,
             scratch: String::new(),
-            variant_name: String::new(),
-            enum_name: String::new(),
+        })
+    }
+
+    fn inline_some_slot(&mut self) -> &mut usize {
+        match self.frames.last_mut() {
+            Some(frame) => &mut frame.inline_some,
+            None => &mut self.root_inline_some,
         }
     }
 
@@ -1454,12 +1765,10 @@ impl JsonSource {
     }
 
     fn open(&mut self, kind: SourceFrameKind) -> CodecResult {
-        if kind == SourceFrameKind::Some {
-            self.some_depth += 1;
-        } else if self.frames.len() - self.some_depth >= MAX_NESTING_DEPTH {
+        if self.frames.len() >= MAX_NESTING_DEPTH {
             return Err(self.error_at(self.pos, "nesting too deep"));
         }
-        self.frames.push(SourceFrame { kind, segment: PathSegment::None, count: 0, closed: false });
+        self.frames.push(SourceFrame { kind, segment: PathSegment::None, count: 0, closed: false, inline_some: 0 });
         Ok(())
     }
 
@@ -1625,6 +1934,7 @@ impl DecodeSource for JsonSource {
         self.open(SourceFrameKind::Object)?;
         let (mut start, mut end, mut inclusive) = (None, None, false);
         while let Some(key) = self.next_key()? {
+            self.meter.charge_fail(1)?;
             let name = self.segment_text(&key).to_string();
             self.top()?.segment = key;
             match &*name {
@@ -1650,14 +1960,11 @@ impl DecodeSource for JsonSource {
     }
 
     fn option(&mut self) -> CodecResult<bool> {
-        if self.pending_map_key.is_none() {
-            self.skip_whitespace();
-            if self.peek() == Some(b'n') {
-                self.literal(b"null")?;
-                return Ok(false);
-            }
+        if self.start("value")? == Some(b'n') {
+            self.literal(b"null")?;
+            return Ok(false);
         }
-        self.open(SourceFrameKind::Some)?;
+        *self.inline_some_slot() += 1;
         Ok(true)
     }
 
@@ -1743,45 +2050,48 @@ impl DecodeSource for JsonSource {
     }
 
     fn begin_variant(&mut self, type_name: &str) -> CodecResult<Cow<'_, str>> {
-        let name = Self::short_name(type_name).to_string();
-        self.enum_name.clone_from(&name);
-        if let Some(key) = self.pending_map_key.take() {
-            self.open(SourceFrameKind::Variant { is_object: false })?;
-            self.variant_name = self.segment_text(&key).to_string();
-            return Ok(Cow::Borrowed(&self.variant_name));
-        }
-        self.skip_whitespace();
-        match self.peek() {
-            Some(b'"') => {
-                let scanned = self.scan_str(true)?;
-                self.variant_name = self.scanned_str(&scanned).to_string();
-                self.open(SourceFrameKind::Variant { is_object: false })?;
-            }
-            Some(b'{') => {
-                self.pos += 1;
-                self.open(SourceFrameKind::Variant { is_object: true })?;
-                match self.next_key()? {
-                    Some(key) => self.variant_name = self.segment_text(&key).to_string(),
-                    None => return Err(self.fail(&format!("expected a variant of {name}"))),
+        let enum_name = Self::short_name(type_name).to_string();
+        let (is_object, variant_name) = if let Some(key) = self.pending_map_key.take() {
+            (false, self.segment_text(&key).to_string())
+        } else {
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b'"') => {
+                    let scanned = self.scan_str(true)?;
+                    (false, self.scanned_str(&scanned).to_string())
                 }
+                Some(b'{') => {
+                    self.pos += 1;
+                    self.open(SourceFrameKind::Variant { is_object: true, enum_name: enum_name.clone(), variant_name: String::new() })?;
+                    let variant_name = match self.next_key()? {
+                        Some(key) => self.segment_text(&key).to_string(),
+                        None => return Err(self.fail(&format!("expected a variant of {enum_name}"))),
+                    };
+                    if let SourceFrameKind::Variant { variant_name: slot, .. } = &mut self.top()?.kind {
+                        slot.clone_from(&variant_name);
+                    }
+                    return Ok(Cow::Owned(variant_name));
+                }
+                _ => return Err(self.mismatch(&enum_name)),
             }
-            _ => return Err(self.mismatch(&name)),
-        }
-        Ok(Cow::Borrowed(&self.variant_name))
+        };
+        self.open(SourceFrameKind::Variant { is_object, enum_name, variant_name: variant_name.clone() })?;
+        Ok(Cow::Owned(variant_name))
     }
 
     fn begin_payload(&mut self, form: PayloadForm) -> CodecResult {
-        let SourceFrameKind::Variant { is_object } = self.top()?.kind else {
-            return Err(Fail::internal("json: a payload outside a variant").into());
+        let (is_object, enum_name, variant_name) = match &self.top()?.kind {
+            SourceFrameKind::Variant { is_object, enum_name, variant_name } => (*is_object, enum_name.clone(), variant_name.clone()),
+            _ => return Err(Fail::internal("json: a payload outside a variant").into()),
         };
         match (is_object, form) {
             (false, PayloadForm::Unit) => Ok(()),
             (false, _) => {
-                let msg = format!("variant `{}` of {} needs a payload", self.variant_name, self.enum_name);
+                let msg = format!("variant `{variant_name}` of {enum_name} needs a payload");
                 Err(self.fail(&msg))
             }
             (true, form) => {
-                self.top()?.segment = PathSegment::Owned(self.variant_name.clone());
+                self.top()?.segment = PathSegment::Owned(variant_name);
                 self.begin_payload_value(form)
             }
         }
@@ -1793,6 +2103,7 @@ impl DecodeSource for JsonSource {
         }
         let depth = self.frames.len();
         loop {
+            let before = self.pos;
             self.skip_whitespace();
             match self.peek() {
                 Some(b'n') => self.literal(b"null")?,
@@ -1812,6 +2123,8 @@ impl DecodeSource for JsonSource {
                 }
                 _ => return Err(self.unexpected()),
             }
+            let bytes = self.pos.saturating_sub(before);
+            self.meter.charge_fail(1 + (bytes / BYTES_PER_FUEL_UNIT) as u64)?;
             loop {
                 if self.frames.len() == depth {
                     return Ok(());
@@ -1829,10 +2142,12 @@ impl DecodeSource for JsonSource {
     }
 
     fn end(&mut self) -> CodecResult {
-        let Some(frame) = self.frames.pop() else { return Ok(()) };
-        if frame.kind == SourceFrameKind::Some {
-            self.some_depth -= 1;
+        let inline = self.inline_some_slot();
+        if *inline > 0 {
+            *inline -= 1;
+            return Ok(());
         }
+        let Some(frame) = self.frames.pop() else { return Ok(()) };
         if let SourceFrameKind::Array(Some(expected_len)) = frame.kind {
             self.skip_whitespace();
             if frame.count != expected_len || (!frame.closed && !self.eat(b']')) {
@@ -1840,13 +2155,14 @@ impl DecodeSource for JsonSource {
                 return Err(self.fail(&format!("expected array of length {expected_len}")));
             }
         }
-        if let Some(SourceFrame { kind: SourceFrameKind::Variant { is_object: true }, .. }) = self.frames.last()
+        if let Some(SourceFrame { kind: SourceFrameKind::Variant { is_object: true, enum_name, .. }, .. }) = self.frames.last()
             && !matches!(frame.kind, SourceFrameKind::Variant { .. })
         {
+            let enum_name = enum_name.clone();
             // Consume the outer `}` of `{"Variant": payload}`.
             self.skip_whitespace();
             if !self.eat(b'}') {
-                let msg = format!("expected a single variant of {}", self.enum_name);
+                let msg = format!("expected a single variant of {enum_name}");
                 return Err(if self.peek() == Some(b',') { self.fail(&msg) } else { self.unexpected() });
             }
             self.frames.pop();
