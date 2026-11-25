@@ -89,13 +89,13 @@ const BENCHES: &[Bench] = &[
     },
     Bench {
         name: "json parse/stringify 2MB",
-        source: "import json\nlet items = [\"{\\\"id\\\": \\(i), \\\"name\\\": \\\"item \\(i)\\\", \\\"tags\\\": [1, 2, 3]}\" for i in 0..30000]\nlet text = \"[\" + items.join(\",\") + \"]\"\nlet j = json.parse(text).unwrap()\nprint(json.encode(j).len() > 0)",
+        source: "import json\nlet items = [\"{\\\"id\\\": \\(i), \\\"name\\\": \\\"item \\(i)\\\", \\\"tags\\\": [1, 2, 3]}\" for i in 0..30000]\nlet text = \"[\" + items.join(\",\") + \"]\"\nlet j = json.parse(text).unwrap()\nprint(json.encode(j).unwrap().len() > 0)",
         expected: "true\n",
         ops: 0,
     },
     Bench {
         name: "json decode and to_json 20k structs",
-        source: "import json\nstruct Item {\n    id: int\n    name: str\n    tags: [int]\n    meta: [str: float]\n}\nlet items = [Item(id: i, name: \"item \\(i)\", tags: [1, 2, i], meta: [\"a\": 1.5, \"b\": i.to_float()]) for i in 0..20000]\nlet back: [Item] = json.decode(json.encode(items)).unwrap()\nprint(json.to_json(back) == json.to_json(items))",
+        source: "import json\nstruct Item {\n    id: int\n    name: str\n    tags: [int]\n    meta: [str: float]\n}\nlet items = [Item(id: i, name: \"item \\(i)\", tags: [1, 2, i], meta: [\"a\": 1.5, \"b\": i.to_float()]) for i in 0..20000]\nlet back: [Item] = json.decode(json.encode(items).unwrap()).unwrap()\nprint(json.to_json(back) == json.to_json(items))",
         expected: "true\n",
         ops: 0,
     },

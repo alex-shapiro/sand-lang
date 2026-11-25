@@ -584,7 +584,7 @@ print(Box(item: 1).show())
 --- error
 8: int does not implement `Describe`
 
-=== reflect natives alongside dictionaries
+=== json.encode and json.decode alongside user trait dictionaries
 import json
 trait Describe {
     fn describe(self) -> str
@@ -592,7 +592,7 @@ trait Describe {
 struct P { x: int }
 impl Describe for P {
     fn describe(self) -> str {
-        let again: P = json.decode(json.encode(self)).unwrap()
+        let again: P = json.decode(json.encode(self).unwrap()).unwrap()
         "P\(again.x)"
     }
 }
@@ -1554,7 +1554,7 @@ fn f(x: Keys<float>) -> int { x.len() }
 --- error
 1: the type parameters of a type alias cannot require traits; require them on the functions that use the alias
 
-=== never implements only the traits without methods
+=== never implements Encode, Decode, and traits without methods
 trait D { fn d(self) -> int }
 trait Make { fn make() -> Self }
 impl D for int { fn d(self) -> int { self } }
@@ -1626,13 +1626,27 @@ enum E { Keyed([float: int]) }
 6: str does not implement `Describe` (required for Wrap<str>)
 7: float does not implement `Hash` (required for the keys of [float: int])
 
-=== field defaults cannot use traits with methods of the type's parameters
+=== struct field defaults can call trait methods on type parameters
+import json
 trait Make { fn make() -> Self }
 impl Make for int { fn make() -> int { 7 } }
+impl Make for str { fn make() -> str { "s" } }
 struct Bag<T: Make + Ord> { x: T = T.make(), big: bool = false }
 struct Keys<T: Hash> { s: Set<T> = Set([]) }
---- error
-3: field defaults cannot use `Make`, which type parameter `T` requires, because defaults receive no trait dictionaries
+fn empty<T: Make + Ord>() -> Bag<T> { Bag() }
+let a: Bag<int> = Bag()
+print(a)
+let s: Bag<str> = empty()
+print(s)
+let b: Bag<int> = json.decode("{\"big\": true}")?
+print(b)
+let k: Keys<int> = Keys()
+print(k)
+--- stdout
+Bag(x: 7, big: false)
+Bag(x: "s", big: false)
+Bag(x: 7, big: true)
+Keys(s: Set([]))
 
 === required traits take the type arguments that the trait declares
 trait Into<T> {

@@ -27,8 +27,8 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("string building", "var s = \"\"\nwhile true { s += \"abcdefgh\" }"),
     ("list doubling", "let xs = []\nwhile true { xs.push(1) }"),
     (
-        "type descriptions",
-        "import json\nstruct P<A, B> { a: A, b: B }\nfn make<reflect A: Decode, reflect B: Decode>(n: int, x: [A], y: [B]) -> fn() -> bool {\n    \
+        "decode dictionaries",
+        "import json\nstruct P<A, B> { a: A, b: B }\nfn make<A: Decode, B: Decode>(n: int, x: [A], y: [B]) -> fn() -> bool {\n    \
          if n == 0 {\n        return () => {\n            let r: Result<[(A, B)]> = json.decode(\"[]\")\n            r.is_ok()\n        }\n    }\n    \
          let w: [P<A, B>] = []\n    make(n - 1, w, w)\n}\nlet keep = []\nlet w: [int] = []\nwhile true { keep.push(make(100, w, w)) }",
     ),
@@ -49,6 +49,17 @@ const PROGRAMS: &[(&str, &str)] = &[
          m: int = one(), n: int = one(), o: int = one(), p: int = one()\n}\nlet text = \"[\" + \"{},\".repeat(100000) + \"{}]\"\n\
          let keep = []\nwhile true {\n    let r: Result<[P]> = json.decode(text)\n    keep.push(r)\n}",
     ),
+    (
+        "large decoded list",
+        "import json\nlet text = \"[\" + \"1,\".repeat(12000000) + \"1]\"\nlet r: Result<[int]> = json.decode(text)\nprint(r.is_ok())",
+    ),
+    (
+        "custom decoders that allocate garbage",
+        "import json\nstruct Id { v: int }\nimpl Decode for Id {\n    fn decode(decoder: Decoder) -> Result<Id> {\n        \
+         let junk = [\"x\".repeat(1000)]\n        let v: int = decoder.decode()?\n        Ok(Id(v: v + junk.len()))\n    }\n}\n\
+         let text = \"[\" + \"1,\".repeat(200000) + \"1]\"\nlet keep = []\nwhile true {\n    let r: Result<[Id]> = json.decode(text)\n    keep.push(r)\n}",
+    ),
+    ("encoded bytes", "import json\nlet b = \"a\".repeat(4000000).bytes()\nlet keep = []\nwhile true { keep.push(json.encode(b)) }"),
     (
         "decoded constant defaults",
         "import json\nstruct P { a: int = 1, b: int = 2 }\nlet text = \"[\" + \"{},\".repeat(100000) + \"{}]\"\n\

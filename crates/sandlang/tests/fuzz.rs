@@ -346,7 +346,8 @@ fn hostile_runtime_programs_are_contained() {
         "print(\"\\(1:999999999)\".len())",
         // Sleeping forever.
         "task.sleep(1000h)",
-        "struct P<A, B> { a: A, b: B }\nfn grow<reflect A, reflect B>(n: int, a: A?, b: B?) -> int {\n    let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))",
+        // Polymorphic recursion that builds a deeper `Encode` dictionary at each call.
+        "import json\nstruct P<A, B> { a: A, b: B }\nfn grow<A: Encode, B: Encode>(n: int, a: A?, b: B?) -> int {\n    let x: P<A, B>? = None\n    json.encode(x).unwrap().len() + grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))",
     ];
     for src in programs {
         let start = std::time::Instant::now();
@@ -422,7 +423,7 @@ fn hostile_native_work_is_contained() {
         format!("{dag}print([a].contains(b))"),
         format!("{dag}print(Set([a]).len())"),
         format!("{dag}let m = [a: 1]\nprint(m.len())"),
-        format!("import json\n{dag}print(json.encode(a).len())"),
+        format!("import json\n{dag}print(json.encode(a)?.len())"),
         "let s = \"x\".repeat(20000000)\nvar n = 0\nwhile true { n += s.len() + s.find(\"y\").unwrap_or(0) }".into(),
         "let s = \"x\".repeat(20000000)\nlet m = [s: 1]\nwhile true { m.contains(s) }".into(),
         "let xs = (0..1000000).to_list()\nwhile true { xs.sorted() }".into(),

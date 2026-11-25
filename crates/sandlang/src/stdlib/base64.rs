@@ -35,8 +35,14 @@ fn decode_native(vm: &mut Vm, text: VmVal<String>, url: bool) -> Result<Vec<u8>,
 /// Encodes `data`: the standard alphabet with padding, or the URL-safe
 /// alphabet without padding.
 pub(crate) fn encode(data: &[u8], url: bool) -> String {
-    let alphabet = if url { URL_SAFE } else { STANDARD };
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    encode_into(&mut out, data, url);
+    out
+}
+
+/// Appends the Base64 encoding of `data` to `out`.
+pub(crate) fn encode_into(out: &mut String, data: &[u8], url: bool) {
+    let alphabet = if url { URL_SAFE } else { STANDARD };
     for chunk in data.chunks(3) {
         let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
         for i in 0..4 {
@@ -47,7 +53,6 @@ pub(crate) fn encode(data: &[u8], url: bool) -> String {
             }
         }
     }
-    out
 }
 
 /// Decodes base64 text. The standard form requires padding; the URL-safe

@@ -1,18 +1,21 @@
 //! JSON encoding and decoding (RFC 8259).
 //!
-//! ### Enum Encodings
+//! ### Enum Representation
 //!
-//! - Unit enum variants map to strings like `"Red"`
-//! - Tuple variants with a single payload field map to `{"Variant": payload}`
-//! - Tuple variants with multiple payload fields map to `{"Variant": [f0, f1, ...]}`
-//! - Struct variants map to `{"Variant": {...}}`
+//! - Unit variants are encoded as strings such as `"Red"`.
+//! - Tuple variants are encoded as `{"Variant": [f0, f1, ...]}`.
+//! - Struct variants are encoded as `{"Variant": {...}}`.
+//! - `Some(x)` is encoded as `x`.
+//! - `None` is encoded as `null`.
+//! - `Json` values are encoded directly as their JSON data.
 //!
-//! ### Other Type Encodings
+//! ### Other Type Representations
 //!
-//! - `bytes` maps to a standard Base64 string
-//! - `duration` maps to an integer nanosecond count
-//! - `Range` maps to `{"start": int, "end": int, "inclusive": bool}`
-//! - native value types like `time.*` and `net.SocketAddr` map to their canonical text representations
+//! - `()` is encoded as `null`.
+//! - `bytes` is encoded as a standard Base64 string.
+//! - `duration` is encoded as an integer nanosecond count.
+//! - `Range` is encoded as an object with `start`, `end`, and optional `inclusive` fields.
+//! - Native value types are encoded as their canonical text forms.
 
 extend Json {
     /// Returns the field `key` if `self` is an `Obj`, or `None` otherwise.
@@ -109,6 +112,16 @@ extend Json {
     }
 }
 
+impl Encode for Json {
+    /// Writes the JSON data of `self` to `encoder`.
+    native fn encode(self, encoder: Encoder) -> Result<()>
+}
+
+impl Decode for Json {
+    /// Reads JSON data from `decoder`.
+    native fn decode(decoder: Decoder) -> Result<Json>
+}
+
 /// Parses `text` as a `Json` value.
 ///
 /// Numbers without a decimal point, exponent, or `-0` that fit in a 64-bit
@@ -117,49 +130,49 @@ extend Json {
 /// exceeds 512 levels.
 pub native fn parse(text: str) -> Result<Json>
 
-/// Serializes `value` as JSON text.
+/// Encodes `value` as JSON text.
 ///
-/// Emits compact output if `indent <= 0`, or pretty-prints with `indent` spaces
-/// per level. Finite floats include a decimal point or exponent, and `NaN` or
-/// infinite floats are serialized as `null`. Aborts with kind `"invalid"` if a
-/// map key is not a `str`, `int`, `duration`, `bool`, unit enum variant, or
-/// value type, or with kind `"limit"` if array or object nesting exceeds 512
-/// levels.
-pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
+/// Emits compact output if `indent <= 0`. Pretty-prints with `indent` spaces
+/// per level if `indent > 0`. Finite floats are formatted with a decimal point
+/// or exponent.
+///
+/// Map keys are formatted as JSON object keys for these key types:
+///
+/// - `str`
+/// - `int`
+/// - `duration`
+/// - `bool`
+/// - unit enum variants
+/// - native value types
+///
+/// Fails with kind `"invalid"` for a non-finite float or an unsupported map
+/// key type. Fails with kind `"limit"` if nesting exceeds 512 levels.
+/// Propagates any error returned by a custom `Encode.encode` implementation.
+pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>
 
 /// Decodes JSON `text` into a value of type `T`.
 ///
-/// Unknown object fields are ignored, and duplicate keys overwrite earlier
-/// values.
+/// `decode` ignores unknown struct fields. For a map, `decode` overwrites
+/// earlier entries on duplicate keys. For a struct, `decode` fails with kind
+/// `"parse"` on duplicate fields.
 ///
-/// If a struct field is omitted from a JSON object, `decode` uses the field's
-/// declared default, or `None` if the field is an `Option` without a default.
-/// Constant defaults are filled inline during parsing, and non-constant default
-/// expressions are evaluated in post-order after parsing succeeds.
+/// If a JSON object omits a struct field, `decode` uses the field's declared
+/// default. If an omitted `Option` field lacks a declared default, `decode`
+/// sets it to `None`. If a struct declares `init`, `decode` reads each `init`
+/// parameter from the JSON object. It then calls `init`. Any `init` parameter
+/// can be provided in the JSON object, even if the parameter has a default.
+///
+/// `decode` runs custom `Decode.decode` methods, `init`, and computed defaults
+/// as it visits each value. `decode` executes earlier callbacks even if it
+/// rejects a later value.
 ///
 /// Fails with kind `"parse"` on invalid JSON syntax, missing required fields,
-/// or type mismatches, including the JSON path such as `$.items[2].price` in
-/// the error message. Fails with kind `"invalid"` if a target map key type does
-/// not implement `Encode`.
-pub fn decode<reflect T: Decode>(text: str) -> Result<T> {
-    let decoded: Decoded<T> = decode_raw(text)
-    match decoded {
-        Done(value) => Ok(value)
-        Pending(value, fills) => {
-            for fill in fills {
-                fill()
-            }
-            Ok(value)
-        }
-        Failed(e) => Err(e)
-    }
-}
+/// or type mismatches. `decode` prefixes value error messages with the JSON
+/// path, such as `$.items[2].price`.
+pub native fn decode<T: Decode>(text: str) -> Result<T>
 
-native fn decode_raw<reflect T: Decode>(text: str) -> Decoded<T>
-
-/// Converts `value` into a `Json` value using the same representation as
-/// `encode`. Aborts with kind `"invalid"` if `value` contains a map key type
-/// that `encode` does not support, or with kind `"limit"` if array or object
-/// nesting exceeds 512 levels. Also reuses existing `Json` values without
-/// traversing them.
+/// Converts `value` into a `Json` value with the same representation as
+/// `encode`.
+///
+/// Aborts with the error that `encode(value)` would return.
 pub native fn to_json<T: Encode>(value: T) -> Json

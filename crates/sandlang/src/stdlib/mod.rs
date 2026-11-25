@@ -3,6 +3,7 @@
 //! Host code can use the Rust types in [`json`], [`log`], and [`time`].
 
 mod base64;
+pub(crate) mod codec;
 pub(crate) mod core;
 mod crypto;
 mod fs;

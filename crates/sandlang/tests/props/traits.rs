@@ -205,7 +205,7 @@ impl Trait {
             Trait::Eq => ("need(x) == x", "true"),
             Trait::Ord => ("need(x) <= x", "true"),
             Trait::Hash => ("Set([need(x), x]).len()", "1"),
-            Trait::Encode => ("json.encode(need(x)).len() > 0", "true"),
+            Trait::Encode => ("json.encode(need(x)).unwrap().len() > 0", "true"),
             _ => unreachable!("{self:?} is not derived"),
         }
     }
@@ -279,8 +279,8 @@ proptest! {
             }
             Err(msgs) => {
                 prop_assert!(!t.implements(tr), "rejected: {msgs:?}\n{src}");
-                let want = format!("does not implement `{}`, which trait `Via` requires", tr.name());
-                prop_assert!(msgs.iter().all(|m| m.contains(&want)), "{msgs:?}\n{src}");
+                let want = format!("does not implement `{}`", tr.name());
+                prop_assert!(msgs.iter().all(|msg| msg.contains(&want) && msg.contains(", which trait `Via` requires")), "{msgs:?}\n{src}");
             }
         }
     }

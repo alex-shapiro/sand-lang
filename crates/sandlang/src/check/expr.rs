@@ -615,11 +615,8 @@ impl Checker {
             let mut scope = self.fs.generics.clone();
             let self_ty = self.fs.self_ty;
             let own = self.declare_params(&f.generics, &scope, self_ty);
-            for (g, &p) in f.generics.iter().zip(&own) {
+            for &p in &own {
                 scope.push((self.params[p as usize].name, p));
-                if g.reflect {
-                    self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
-                }
             }
             let mut ptys = Vec::new();
             self.check_param_names(f.params.iter().map(|p| &p.name));
@@ -1164,14 +1161,14 @@ impl Checker {
         }
     }
 
-    fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
-        let fi = &self.fns[f as usize];
-        if !fi.dicts.is_empty() || fi.generics.iter().any(|&p| self.params[p as usize].reflect) {
-            return self.wrapper_value(f, &[], span);
+    fn fn_value(&mut self, fn_id: FnId, span: Span) -> HExpr {
+        let fi = &self.fns[fn_id as usize];
+        if !fi.dicts.is_empty() || self.takes_encoded_arg(fn_id) {
+            return self.wrapper_value(fn_id, &[], span);
         }
-        let inst = self.instantiate_fn_with(f, span, &[]);
+        let inst = self.instantiate_fn_with(fn_id, span, &[]);
         let t = self.fn_ty(&inst.params, inst.ret);
-        mk(HKind::FnValue { func: f, targs: inst.fresh }, t, span)
+        mk(HKind::FnValue { func: fn_id, targs: inst.fresh }, t, span)
     }
 
     /// Returns the type arguments for constructing `d`, reusing `hint` if it is
@@ -1595,18 +1592,56 @@ impl Checker {
         let Some(mut hargs) = self.bind_args(Callee::Fn(f), &ptys, recv, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        let mut hidden = self.hidden_args(f, &fresh, &dicts, "call", &|_, _| false, span);
+        let mut hidden = self.hidden_args(&dicts, &|_, _| false, span);
         if !hidden.is_empty() {
-            let k = hidden.len();
+            let dict_count = hidden.len();
             for a in &mut hargs {
                 if let HArg::Default { inputs, .. } = a {
-                    *inputs = (0..k).chain(inputs.iter().map(|i| i + k)).collect();
+                    *inputs = (0..dict_count).chain(inputs.iter().map(|i| i + dict_count)).collect();
                 }
             }
             hidden.extend(hargs);
             hargs = hidden;
         }
+        let first_value_arg = hargs.len() - ptys.len();
+        self.encode_native_args(f, &ptys, &mut hargs[first_value_arg..], span);
         mk(self.call_kind(f, fresh, hargs), ret, span)
+    }
+
+    /// Returns `true` if native function `fn_id` accepts an
+    /// [`Encoded`](crate::native::ty::Encoded) parameter.
+    fn takes_encoded_arg(&self, fn_id: FnId) -> bool {
+        let FnKind::Native(n) = self.fns[fn_id as usize].kind else { return false };
+        self.natives.fns.get(n as usize).is_some_and(|d| d.sig.params.iter().any(|t| matches!(t, Type::Encoded(_))))
+    }
+
+    /// Wraps each [`Encoded`](crate::native::ty::Encoded) argument of native
+    /// function `fn_id` in a `prelude.encode_arg` call.
+    pub(crate) fn encode_native_args(&mut self, fn_id: FnId, param_tys: &[TypeId], args: &mut [HArg], span: Span) {
+        let FnKind::Native(n) = self.fns[fn_id as usize].kind else { return };
+        let Some(decl) = self.natives.fns.get(n as usize) else { return };
+        let is_encoded_param: Vec<bool> =
+            decl.sig.params.iter().filter(|t| !matches!(t, Type::TraitDict(..))).map(|t| matches!(t, Type::Encoded(_))).collect();
+        if !is_encoded_param.contains(&true) {
+            return;
+        }
+        let (Some(encode_fn), Some(encode_trait)) = (self.natives.id("prelude.encode_arg"), self.builtin_trait(Builtin::Encode)) else {
+            return;
+        };
+        for ((arg, &param_ty), _) in args.iter_mut().zip(param_tys).zip(&is_encoded_param).filter(|(_, is_encoded)| **is_encoded) {
+            let HArg::Expr(expr) = arg else { continue };
+            let value = std::mem::replace(expr, mk(HKind::Unit, TypeId::UNIT, span));
+            let dict = self.evidence_hole(param_ty, encode_trait, false, span);
+            let call = HKind::CallNative { native: encode_fn, targs: vec![param_ty], args: vec![HArg::Expr(dict), HArg::Expr(value)] };
+            *expr = mk(call, self.encoded_arg_ty(), span);
+        }
+    }
+
+    fn encoded_arg_ty(&mut self) -> TypeId {
+        match self.prelude.and_then(|p| self.lookup_module_def(p, "EncodedArg")) {
+            Some(Def::Type(TyRef::Def(d))) => self.arena.named(d, &[]),
+            _ => TypeId::ERROR,
+        }
     }
 
     pub(crate) fn call_kind(&self, f: FnId, targs: Vec<TypeId>, args: Vec<HArg>) -> HKind {
@@ -2235,7 +2270,18 @@ impl Checker {
             let v = match (given, &base, self.types[d as usize].fields()[i].default) {
                 (Some(h), _, _) => h,
                 (None, Some(b), _) => mk(HKind::Field { obj: Box::new(b.clone()), index: i as u32 }, fty, span),
-                (None, None, Some(helper)) => mk(HKind::Call { func: helper, targs: targs.clone(), args: vec![] }, fty, span),
+                (None, None, Some(helper)) => {
+                    let generics = self.types[d as usize].generics.clone();
+                    let mut args = Vec::new();
+                    for (bound_ty, trait_ref) in self.fns[helper as usize].dicts.clone() {
+                        let bound_ty = self.arena.instantiate(bound_ty, &generics, &targs);
+                        let trait_ref = trait_ref.subst_params(&mut self.arena, &|param| {
+                            generics.iter().position(|&generic| generic == param).map(|idx| targs[idx])
+                        });
+                        args.push(HArg::Expr(self.evidence_hole(bound_ty, trait_ref, false, span)));
+                    }
+                    mk(HKind::Call { func: helper, targs: targs.clone(), args }, fty, span)
+                }
                 (None, None, None) => {
                     let field = self.name(self.types[d as usize].fields()[i].name);
                     self.error(span, format!("missing field `{field}` in `{name}(...)`"));

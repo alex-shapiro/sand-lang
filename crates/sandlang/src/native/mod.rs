@@ -1,5 +1,6 @@
 //! Native module registration and Rust-to-Sand type bindings.
 
+pub mod codec;
 pub mod context;
 pub mod convert;
 pub mod func;
@@ -11,7 +12,7 @@ use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::ValueTypeInfo;
 use crate::value::{StructDesc, StructValue, Value, VariantDesc, VariantValue, qualified_name, qualified_name_module};
 use crate::vm::heap::Heap;
-use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
+use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, Vm};
 use convert::{Conversion, FromVmValue, mismatch};
 use func::{BoxedNativeFn, NativeFunction, Signature};
@@ -19,7 +20,7 @@ use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
-use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, VmVal};
+use ty::{Channel, Num, Param, Range, SandType, Task, Type, VmVal};
 
 /// A Rust type bound to a nominal Sand type in a [`NativeModule`].
 ///
@@ -48,31 +49,47 @@ pub trait NamedType: Sized + 'static {
 }
 
 #[doc(hidden)]
-pub struct Binding<T>(BoundKind, PhantomData<fn() -> T>);
+pub struct Binding<T> {
+    kind: BoundKind,
+    derives: &'static [&'static str],
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Binding<T> {
+    fn new(kind: BoundKind) -> Binding<T> {
+        Binding { kind, derives: &[], _marker: PhantomData }
+    }
+
+    /// Declares the structural traits derived for `T`.
+    pub fn derives(mut self, traits: &'static [&'static str]) -> Binding<T> {
+        self.derives = traits;
+        self
+    }
+}
 
 impl<T: EnumType> Binding<T> {
     pub fn of_enum() -> Binding<T> {
-        Binding(BoundKind::Enum { rust: T::rust_type(), params: T::PARAMS, variants: T::VARIANTS }, PhantomData)
+        Binding::new(BoundKind::Enum { rust: T::rust_type(), params: T::PARAMS, variants: T::VARIANTS })
     }
 }
 
 impl<T: ObjectType> Binding<T> {
     pub fn of_object() -> Binding<T> {
-        Binding(BoundKind::Object(T::rust_type()), PhantomData)
+        Binding::new(BoundKind::Object(T::rust_type()))
     }
 }
 
 impl<T: StructType> Binding<T> {
     pub fn of_struct() -> Binding<T> {
         let defaults = T::FIELDS.iter().map(|f| f.default.map(|default| default())).collect();
-        Binding(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults }, PhantomData)
+        Binding::new(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults })
     }
 }
 
 impl<T: ValueType> Binding<T> {
     pub fn of_value() -> Binding<T> {
         let info = ValueTypeInfo { ord: T::ORDER.is_some(), parse: crate::vm::value::parse_value::<T>, type_id: T::rust_type() };
-        Binding(BoundKind::Value(info), PhantomData)
+        Binding::new(BoundKind::Value(info))
     }
 }
 
@@ -197,14 +214,14 @@ pub type StructDescCell = OnceLock<Arc<StructDesc>>;
 pub type VariantDescCell = OnceLock<Arc<VariantDesc>>;
 
 #[doc(hidden)]
-pub fn encode_struct<T: StructType>(ty: &StructDescCell, fields: impl IntoIterator<Item = Value>) -> Value {
+pub fn struct_to_value<T: StructType>(ty: &StructDescCell, fields: impl IntoIterator<Item = Value>) -> Value {
     let ty =
         ty.get_or_init(|| StructDesc::new(qualified_name(qualified_name_module(T::MODULE), T::NAME), T::FIELDS.iter().map(|f| f.name)));
     Value::Struct(StructValue { ty: ty.clone(), fields: fields.into_iter().collect() })
 }
 
 #[doc(hidden)]
-pub fn encode_variant<T: EnumType>(variants: &[VariantDescCell], index: usize, payload: impl IntoIterator<Item = Value>) -> Value {
+pub fn variant_to_value<T: EnumType>(variants: &[VariantDescCell], index: usize, payload: impl IntoIterator<Item = Value>) -> Value {
     let desc = variants[index].get_or_init(|| {
         let (type_name, variant) = (qualified_name(qualified_name_module(T::MODULE), T::NAME), &T::VARIANTS[index]);
         let field_names: Option<Vec<&str>> = variant.fields.iter().map(|f| f.name).collect();
@@ -577,15 +594,6 @@ impl<T: ObjectType> VmVal<T> {
     }
 }
 
-impl<const N: u8> Reflect<N> {
-    pub fn desc(self, heap: &Heap) -> Result<&Arc<TypeDesc>, Fail> {
-        match heap.get(self.raw()) {
-            Obj::TypeDesc(d) => Ok(&d.desc),
-            _ => Err(Fail::internal("a native function expected a type description")),
-        }
-    }
-}
-
 /// Method names of the prelude `Num` trait in dictionary slot order.
 pub(crate) const NUM_METHODS: [&str; 2] = ["zero", "one"];
 
@@ -701,6 +709,7 @@ pub(crate) struct BoundType {
     pub doc: &'static str,
     pub public: bool,
     pub kind: BoundKind,
+    pub derives: &'static [&'static str],
 }
 
 #[derive(Clone, Debug)]
@@ -906,7 +915,7 @@ impl NativeModule {
     /// variant, field, or type parameter names of `T` are invalid or
     /// duplicated, or if `T::NAME` is already registered in this module.
     pub fn bind<T: NamedType>(&mut self) -> &mut Self {
-        let kind = T::binding().0;
+        let Binding { kind, derives, .. } = T::binding();
         let names = |what: &str, owner: &str, names: &[&str], type_names: bool| {
             for (i, n) in names.iter().enumerate() {
                 match type_names {
@@ -940,12 +949,12 @@ impl NativeModule {
             }
             _ => {}
         }
-        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: T::PUBLIC, kind })
+        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: T::PUBLIC, kind, derives })
     }
 
     pub(crate) fn builtin_type(&mut self, name: &'static str, doc: &'static str, params: &'static [&'static str]) -> &mut Self {
         assert!(self.kind == ModKind::Prelude, "only the prelude has built-in types");
-        self.add_type(BoundType { module: "prelude", name, doc, public: true, kind: BoundKind::Builtin(params) })
+        self.add_type(BoundType { module: "prelude", name, doc, public: true, kind: BoundKind::Builtin(params), derives: &[] })
     }
 
     fn add_type(&mut self, t: BoundType) -> &mut Self {

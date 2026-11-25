@@ -3,7 +3,7 @@
 //! Every instruction is 8 bytes. Registers are frame-relative `u16` slots.
 //! Jump offsets are relative to the instruction *after* the jump.
 
-use super::value::{DescTemplate, FxHashMap, TypeDesc};
+use super::value::FxHashMap;
 use crate::hir::FormatSpec;
 use crate::value::{StructDesc, VariantDesc, qualified_name};
 use std::sync::{Arc, OnceLock};
@@ -904,12 +904,6 @@ pub enum Op {
         dst: Reg,
         tmpl: u32,
     },
-    /// Instantiates `Program::desc_templates[tmpl]` with the type descriptors
-    /// in `base..` and writes the result to `base`.
-    Describe {
-        base: Reg,
-        tmpl: u32,
-    },
     /// `local += "..."` (an interpolation) for a string builder local (see
     /// `AppendStr`): formats the template and appends it in place.
     AppendInterp {
@@ -1221,7 +1215,6 @@ pub enum Const {
     /// A script function (closure without captures).
     Fn(u32),
     Native(u32),
-    TypeDesc(Arc<TypeDesc>),
     /// An immutable tuple of earlier constants (constant trait dictionaries).
     Tuple(Vec<u32>),
 }
@@ -1295,6 +1288,82 @@ pub struct VariantRt {
     pub desc: OnceLock<Arc<VariantDesc>>,
 }
 
+/// Tuple slot that holds the shape index in a structural dictionary.
+///
+/// Slot 0 holds the trait method. Bound dictionaries follow this slot.
+pub const SHAPE_SLOT: usize = 1;
+
+/// Layout of a type for a structural implementation's native default method.
+#[derive(Clone, Debug)]
+pub struct Shape {
+    pub kind: ShapeKind,
+    /// Dictionary templates for each part in walk order.
+    pub parts: Vec<PartTemplate>,
+    /// Fallback strategy for each omitted struct field or `init` parameter.
+    pub fills: Vec<PartFill>,
+    /// Constructor data if a struct builds values through `init`.
+    pub init: Option<InitCall>,
+    /// Name-to-slot map for structs with more than [`MAX_SCANNED_SLOTS`] slots.
+    pub slot_index: Option<FxHashMap<String, u32>>,
+}
+
+/// Maximum slot count scanned linearly before using [`Shape::slot_index`].
+pub const MAX_SCANNED_SLOTS: usize = 8;
+
+/// Constructor data for building a struct through `init`.
+#[derive(Clone, Debug)]
+pub struct InitCall {
+    /// Constant pool index of the `init` function.
+    pub func: u32,
+    /// Dictionary templates required by `init`.
+    pub dicts: Vec<PartTemplate>,
+    /// Parameter names of `init` in declaration order.
+    pub names: std::sync::Arc<[String]>,
+}
+
+/// Type constructor tag for a [`Shape`].
+#[derive(Clone, Debug)]
+pub enum ShapeKind {
+    Never,
+    Unit,
+    Bool,
+    Int,
+    Float,
+    Str,
+    Bytes,
+    Duration,
+    Range,
+    List,
+    Set,
+    Map,
+    Tuple,
+    Option,
+    Struct(u32),
+    Enum { def: u32, first_variant: u32 },
+    Native(u32, crate::vm::value::ParseValue),
+}
+
+/// Template that builds a part dictionary from the outer dictionary.
+#[derive(Clone, Debug)]
+pub enum PartTemplate {
+    /// Constant pool index of a static dictionary.
+    Const(u32),
+    /// Tuple slot of the outer dictionary.
+    Bound(u32),
+    /// Tuple slot of the dictionary built by the inner template.
+    Field(Box<PartTemplate>, u32),
+    /// Tuple dictionary assembled from the inner templates.
+    Dict(Vec<PartTemplate>),
+}
+
+/// Fallback strategy for an omitted struct field or `init` parameter.
+#[derive(Clone, Debug)]
+pub enum PartFill {
+    Required,
+    Const(crate::types::ConstVal),
+    Call(u32, Vec<PartTemplate>),
+}
+
 /// Well-known runtime ids.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RtIds {
@@ -1331,8 +1400,8 @@ pub struct Program {
     pub native_argc: Arc<[u16]>,
     /// Templates for string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
-    /// Templates for parameterized type descriptors (`Op::Describe`).
-    pub desc_templates: Vec<DescTemplate>,
+    /// Structural type layouts indexed by structural trait dictionaries.
+    pub shapes: Vec<Shape>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,
 }

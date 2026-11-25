@@ -3,8 +3,10 @@
 //! Synchronous native functions call Sand through [`CallContext`].
 //! [`Later::new`](super::func::Later::new) futures use [`NativeContext`].
 
+use super::convert::HostError;
 use super::func::{NativeError, NativeReturn};
 use crate::policy::Capability;
+use crate::value::Value;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::sched::ProgramCode;
 use crate::vm::value::VmValue;
@@ -339,6 +341,77 @@ impl<'a> CallContext<'a> {
     /// keep heap values alive across `call` or `step`.
     pub fn vm(&self) -> &Vm {
         self.vm
+    }
+
+    /// Returns mutable access to the [`Vm`] for crate-internal codec paths that
+    /// manage memory checks and rooting explicitly.
+    pub(crate) fn vm_mut(&mut self) -> &mut Vm {
+        self.vm
+    }
+
+    /// Returns the current root stack depth so scoped roots can be released
+    /// with [`CallContext::truncate_roots`].
+    pub(crate) fn root_mark(&self) -> usize {
+        self.fiber.native_roots.len()
+    }
+
+    /// Releases roots pushed after `mark`.
+    pub(crate) fn truncate_roots(&mut self, mark: usize) {
+        self.fiber.native_roots.truncate(mark);
+    }
+
+    /// Pushes `count` copies of `value` onto the fiber root stack and returns
+    /// their starting index.
+    pub(crate) fn push_roots(&mut self, count: usize, value: VmValue) -> Result<usize, Fail> {
+        let start = self.fiber.native_roots.len();
+        let old_cap = self.fiber.native_roots.capacity();
+        if start + count > old_cap {
+            let need = (start + count - old_cap) * std::mem::size_of::<VmValue>();
+            self.step(|vm| vm.check_memory(need))?;
+        }
+        let roots = &mut self.fiber.native_roots;
+        let old_cap = roots.capacity();
+        roots.resize(start + count, value);
+        self.vm.heap.fiber_bytes += (roots.capacity() - old_cap) * std::mem::size_of::<VmValue>();
+        Ok(start)
+    }
+
+    /// Updates rooted slot `index` on the fiber root stack.
+    #[inline]
+    pub(crate) fn set_root(&mut self, index: usize, value: VmValue) {
+        self.fiber.native_roots[index] = value;
+    }
+
+    /// Returns a slice of rooted slots from the fiber root stack.
+    #[inline]
+    pub(crate) fn roots_slice(&self, range: std::ops::Range<usize>) -> &[VmValue] {
+        &self.fiber.native_roots[range]
+    }
+
+    /// Returns mutable VM access alongside the fiber's root slice.
+    #[inline]
+    pub(crate) fn vm_and_roots(&mut self) -> (&mut Vm, &[VmValue]) {
+        (self.vm, &self.fiber.native_roots)
+    }
+
+    /// Encodes `value` into a host [`Value`] using `encode_dict`.
+    ///
+    /// Pass a [`TraitDict`](super::ty::TraitDict) for `Encode` as
+    /// `encode_dict`. Runs custom Sand `Encode.encode` methods synchronously.
+    /// Any attempt to wait, prompt for permissions, or self-cancel inside a
+    /// custom method fails immediately with an `"invalid"` error.
+    pub fn to_value(&mut self, value: VmValue, encode_dict: VmValue) -> Result<Value, HostError<Fail>> {
+        crate::stdlib::codec::to_value(self, value, encode_dict)
+    }
+
+    /// Decodes host `value` into a Sand value using `decode_dict`.
+    ///
+    /// Pass a [`TraitDict`](super::ty::TraitDict) for `Decode` as
+    /// `decode_dict`. Runs custom Sand `Decode.decode` methods, `init`
+    /// constructors, and computed defaults synchronously. The returned
+    /// [`VmValue`] stays valid until the next `call` or `step`.
+    pub fn from_value(&mut self, value: Value, decode_dict: VmValue) -> Result<VmValue, HostError<Fail>> {
+        crate::stdlib::codec::from_value(self, value, decode_dict)
     }
 
     /// Calls Sand function `callee` with `args` on the calling task.
