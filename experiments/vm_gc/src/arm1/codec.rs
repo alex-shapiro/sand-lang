@@ -9,7 +9,7 @@
 
 use super::heap::{Handle, Obj, Value};
 use super::vm::{Args, NativeModule, Vm, type_error};
-use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, charge_input, find_field};
+use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, absent_fields, all_fields, charge_input, find_field};
 use crate::shared::isa::{DECODE_METHOD, ENCODE_METHOD, Program, Ty};
 use crate::shared::json::{Json, JsonWriter};
 use crate::shared::{BYTES_PER_FUEL, Fail, Result, SHORT_STR_MAX, ShortStr, text_fuel};
@@ -288,8 +288,8 @@ fn encoder_obj(vm: &mut Vm, v: Value) -> Result<&mut EncoderObj> {
 
 /// Encodes `v` into `encoder` from Sand code.
 fn encode_entry<W: FormatWriter>(vm: &mut Vm, encoder: Value, v: Value) -> Result<()> {
-    let state = encoder_obj(vm, encoder)?.state.take().ok_or_else(|| Fail::error("encoder is not active"))?;
     let mark = vm.push_root(encoder)?;
+    let state = encoder_obj(vm, encoder)?.state.take().ok_or_else(|| Fail::error("encoder is not active"))?;
     let mut cx = EncodeCx { state: Some(downcast_state::<W>(state)?), encoder: mark };
     let program = vm.program.clone();
     let result = encode_value(vm, &mut cx, &program, v);
@@ -476,7 +476,7 @@ fn decode_record<'p, R: FormatReader>(
     for _ in 0..n {
         vm.push_root(Value::Unit)?;
     }
-    let mut hint = 0;
+    let (mut hint, mut seen) = (0, 0u64);
     while let Some(span) = cx.reader.next_key(src!(vm, cx), &mut cx.pos, &mut cx.scratch)? {
         let key = span.resolve(src!(vm, cx), &cx.scratch);
         match find_field(fields.clone().map(|(name, _)| name), key, hint) {
@@ -485,6 +485,7 @@ fn decode_record<'p, R: FormatReader>(
                 let v = decode_value(vm, cx, p, ty)?;
                 vm.set_root(mark + i, v);
                 hint = i + 1;
+                seen |= 1 << i;
             }
             None => {
                 cx.reader.skip(src!(vm, cx), &mut cx.pos)?;
@@ -492,13 +493,9 @@ fn decode_record<'p, R: FormatReader>(
             }
         }
     }
-    for (i, (name, ty)) in fields.enumerate() {
-        if vm.root(mark + i) == Value::Unit {
-            if !matches!(ty, Ty::Option(_)) {
-                return Err(Fail::error(format!("missing field `{name}`")));
-            }
-            vm.set_root(mark + i, Value::None);
-        }
+    if seen != all_fields(n) {
+        let absent = absent_fields(fields, seen)?;
+        (0..n).filter(|i| absent & (1 << i) != 0).for_each(|i| vm.set_root(mark + i, Value::None));
     }
     vm.reserve_object(n * size_of::<Value>())?;
     let fields = vm.roots_from(mark).into();

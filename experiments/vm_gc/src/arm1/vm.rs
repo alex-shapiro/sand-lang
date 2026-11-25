@@ -179,11 +179,14 @@ impl Vm {
         if bytes > self.heap.tracker.limit() {
             return Err(Fail::OutOfMemory);
         }
-        if self.heap.policy.should_collect(self.heap.tracker.used().saturating_add(bytes)) {
+        let collect = self.heap.policy.should_collect(self.heap.tracker.used().saturating_add(bytes));
+        if collect {
             self.collect();
         }
         if !self.heap.tracker.fits(bytes) {
-            self.collect();
+            if !collect {
+                self.collect();
+            }
             if !self.heap.tracker.fits(bytes) {
                 return Err(Fail::OutOfMemory);
             }
@@ -390,7 +393,10 @@ impl Vm {
             self.release(capacity);
             return Ok(Value::Short(short));
         }
-        self.reserve_object(0)?;
+        if let Err(e) = self.reserve_object(0) {
+            self.release(capacity);
+            return Err(e);
+        }
         let boxed = s.into_boxed_str();
         self.release(capacity - boxed.len());
         Ok(self.insert(Obj::Str(boxed)))
@@ -704,7 +710,7 @@ impl Vm {
                     Op::Capture { dst, idx } => {
                         let Value::Obj(h) = frame.closure else { return Err(type_error("closure")) };
                         let Obj::Closure { captures, .. } = self.heap.get(h) else { return Err(type_error("closure")) };
-                        reg!(dst) = captures[idx as usize];
+                        reg!(dst) = *captures.get(idx as usize).ok_or_else(|| type_error("capture"))?;
                     }
                     Op::NewCell { dst, src } => {
                         self.reserve_object(0)?;
@@ -728,12 +734,15 @@ impl Vm {
                     }
                     Op::Field { dst, obj, idx } => {
                         let Obj::Struct { fields, .. } = self.heap.get(handle!(obj)) else { return Err(type_error("struct")) };
-                        reg!(dst) = fields[idx as usize];
+                        reg!(dst) = *fields.get(idx as usize).ok_or_else(|| type_error("field"))?;
                     }
                     Op::SetField { obj, idx, src } => {
                         let v = reg!(src);
-                        let Obj::Struct { fields, .. } = self.heap.get_mut(handle!(obj)) else { return Err(type_error("struct")) };
-                        fields[idx as usize] = v;
+                        let Obj::Struct { ty, fields } = self.heap.get_mut(handle!(obj)) else { return Err(type_error("struct")) };
+                        if !program.structs[*ty as usize].mutable {
+                            return Err(type_error("struct with `var` fields"));
+                        }
+                        *fields.get_mut(idx as usize).ok_or_else(|| type_error("field"))? = v;
                     }
                     Op::Variant { dst, tag, base: b, count } => {
                         self.reserve_object(count as usize * size_of::<Value>())?;
@@ -754,7 +763,7 @@ impl Vm {
                     }
                     Op::VariantField { dst, src, idx } => {
                         let Obj::Variant { fields, .. } = self.heap.get(handle!(src)) else { return Err(type_error("variant")) };
-                        reg!(dst) = fields[idx as usize];
+                        reg!(dst) = *fields.get(idx as usize).ok_or_else(|| type_error("payload field"))?;
                     }
                     Op::IsNone { dst, src } => reg!(dst) = Value::Bool(reg!(src) == Value::None),
                     Op::List { dst, base: b, count } => {
@@ -958,11 +967,20 @@ impl Vm {
             }
             Err(e) => FiberState::Done(Err(e)),
         };
-        if matches!(state, FiberState::Done(_)) {
-            self.frames.clear();
-            self.stack.clear();
-        }
         self.swap_fiber(i);
+        self.set_fiber_state(i, state);
+    }
+
+    /// Stores the state of fiber `i`, and returns the tracked bytes of its
+    /// stack and frames once it finishes.
+    fn set_fiber_state(&mut self, i: usize, state: FiberState) {
+        let fiber = &mut self.fibers[i];
+        if matches!(state, FiberState::Done(_)) {
+            let bytes = fiber.stack.capacity() * size_of::<Value>() + fiber.frames.capacity() * size_of::<Frame>() + size_of::<Fiber>();
+            fiber.stack = Vec::new();
+            fiber.frames = Vec::new();
+            self.release(bytes);
+        }
         self.fibers[i].state = state;
     }
 
@@ -1009,7 +1027,7 @@ impl Vm {
                     Err(e) => FiberState::Done(Err(e)),
                 };
                 self.swap_fiber(i);
-                self.fibers[i].state = state;
+                self.set_fiber_state(i, state);
             }
         }
         let fibers = std::mem::take(&mut self.fibers);

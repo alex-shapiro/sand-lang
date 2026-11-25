@@ -156,6 +156,10 @@ impl Assembler {
         let kind = head.next().unwrap_or_default();
         let name = head.next().ok_or("expected a type name")?.to_string();
         let items = split_top_level(body);
+        // Decoders track the fields they have seen in a 64-bit mask.
+        if items.iter().map(|i| split_top_level(i.split_once('(').map_or("", |(_, p)| p)).len()).chain([items.len()]).any(|n| n > 64) {
+            return Err(format!("`{name}` has more than 64 fields"));
+        }
         if kind == "struct" {
             let mut fields = Vec::new();
             let mut types = Vec::new();
@@ -483,6 +487,13 @@ impl<'a> FuncAssembler<'a> {
                 _ => unreachable!(),
             }
         }
+        // The interpreter never runs past the last instruction or jumps outside the code.
+        if !matches!(self.code.last(), Some(Op::Return { .. } | Op::Jump { .. })) {
+            return Err("a function must end with `ret` or `jmp`".into());
+        }
+        if self.labels.values().any(|&target| target as usize >= self.code.len()) {
+            return Err("a label must precede an instruction".into());
+        }
         let regs = arg_base as usize + self.max_args;
         Ok((regs.max(1) as u16, self.code))
     }
@@ -700,6 +711,13 @@ fn is_register_position(shape: Shape, i: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_code_that_runs_past_its_end() {
+        assert!(assemble("fn f() {\n    int x 1\n}").unwrap_err().contains("must end with"));
+        assert!(assemble("fn f() {\n    jmp @end\n@end\n}").is_err());
+        assert!(assemble("fn f() {\n    int x 1\n    ret x\n}").is_ok());
+    }
 
     #[test]
     fn assembles_types_methods_and_calls() {

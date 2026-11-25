@@ -9,7 +9,7 @@ use super::scope::{GcScope, NativeModule, NoGcScope, Record, Scoped, Value, Vm, 
 use crate::arm1::codec::{DecoderObj, DynEncodeState, EncodeState, EncoderObj};
 use crate::arm1::heap::{Obj, Value as RawValue};
 use crate::arm1::vm::{self as raw, Args, type_error};
-use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, find_field};
+use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, absent_fields, all_fields, find_field};
 use crate::shared::isa::{DECODE_METHOD, ENCODE_METHOD, Program, Ty};
 use crate::shared::json::{Json, JsonWriter};
 use crate::shared::{BYTES_PER_FUEL, Fail, Result, text_fuel};
@@ -267,8 +267,9 @@ fn encode_nested<W: FormatWriter>(vm: &mut Vm, encoder: RawValue, v: RawValue, m
     let encoder = Value::from_raw(encoder, gc.nogc());
     // The Sand caller's argument registers root `v`.
     let v = Value::from_raw(v, gc.nogc()).unbind();
-    let state = vm.encoder_obj(encoder, gc.nogc())?.state.take().ok_or_else(|| Fail::error("encoder is not active"))?;
     let mark = vm.push_root(encoder.unbind(), gc.reborrow())?;
+    let encoder = vm.root(mark, gc.nogc());
+    let state = vm.encoder_obj(encoder, gc.nogc())?.state.take().ok_or_else(|| Fail::error("encoder is not active"))?;
     let mut cx = EncodeCx { state: Some(downcast_state::<W>(state)?), encoder: mark };
     let program = vm.program().clone();
     let result = encode_value(vm, &mut cx, &program, v, gc.reborrow());
@@ -471,7 +472,7 @@ fn decode_record<'a, 's, 'p, R: FormatReader>(
     for _ in 0..n {
         vm.push_root(Value::UNIT, gc.reborrow())?;
     }
-    let mut hint = 0;
+    let (mut hint, mut seen) = (0, 0u64);
     while let Some(span) = cx.reader.next_key(src!(vm, cx, gc), &mut cx.pos, &mut cx.scratch)? {
         let key = span.resolve(src!(vm, cx, gc), &cx.scratch);
         match find_field(fields.clone().map(|(name, _)| name), key, hint) {
@@ -480,17 +481,14 @@ fn decode_record<'a, 's, 'p, R: FormatReader>(
                 let v = decode_value(vm, cx, p, ty, gc.reborrow())?.unbind();
                 vm.set_root(mark + i, v);
                 hint = i + 1;
+                seen |= 1 << i;
             }
             None => skip_value(vm, cx, gc.nogc())?,
         }
     }
-    for (i, (name, ty)) in fields.enumerate() {
-        if vm.root(mark + i, gc.nogc()).is_unit() {
-            if !matches!(ty, Ty::Option(_)) {
-                return Err(Fail::error(format!("missing field `{name}`")));
-            }
-            vm.set_root(mark + i, Value::NONE);
-        }
+    if seen != all_fields(n) {
+        let absent = absent_fields(fields, seen)?;
+        (0..n).filter(|i| absent & (1 << i) != 0).for_each(|i| vm.set_root(mark + i, Value::NONE));
     }
     vm.new_record_from_roots(mark, record, gc)
 }

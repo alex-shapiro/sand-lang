@@ -9,7 +9,7 @@
 use super::heap::Heap;
 use super::value::*;
 use super::vm::{Args, NativeModule, Vm, type_error};
-use crate::shared::format::{Event, FormatReader, FormatWriter, charge_input, find_field};
+use crate::shared::format::{Event, FormatReader, FormatWriter, absent_fields, all_fields, charge_input, find_field};
 use crate::shared::isa::{DECODE_METHOD, ENCODE_METHOD, Program, Ty};
 use crate::shared::json::{Json, JsonWriter};
 use crate::shared::{BYTES_PER_FUEL, Fail, Result, text_fuel};
@@ -411,7 +411,10 @@ fn decode_list<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, src: &str, p:
     })?;
     let header = Heap::shared_size::<ListObj>(0);
     let bytes = header + items.capacity() * size_of::<Value>();
-    vm.heap.reserve_container(header)?;
+    if let Err(e) = vm.heap.reserve_container(header) {
+        vm.release(items.capacity() * size_of::<Value>());
+        return Err(e);
+    }
     Ok(vm.heap.insert_list(items, bytes))
 }
 
@@ -429,7 +432,10 @@ fn decode_map<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, src: &str, p: 
     })?;
     let header = Heap::shared_size::<MapObj>(0);
     let bytes = header + entries.capacity() * size_of::<(Value, Value)>();
-    vm.heap.reserve_container(header)?;
+    if let Err(e) = vm.heap.reserve_container(header) {
+        vm.release(entries.capacity() * size_of::<(Value, Value)>());
+        return Err(e);
+    }
     Ok(vm.heap.insert_map(entries, bytes))
 }
 
@@ -462,7 +468,7 @@ fn decode_record<'p, R: FormatReader>(
     vm.reserve(bytes)?;
     let mut values = vec![Value::Unit; n];
     let result = (|| {
-        let mut hint = 0;
+        let (mut hint, mut seen) = (0, 0u64);
         while let Some(span) = cx.reader.next_key(src, &mut cx.pos, &mut cx.scratch)? {
             let key = span.resolve(src, &cx.scratch);
             match find_field(fields.clone().map(|(name, _)| name), key, hint) {
@@ -470,6 +476,7 @@ fn decode_record<'p, R: FormatReader>(
                     let ty = fields.clone().nth(i).expect("field").1;
                     values[i] = decode_value(vm, cx, src, p, ty)?;
                     hint = i + 1;
+                    seen |= 1 << i;
                 }
                 None => {
                     cx.reader.skip(src, &mut cx.pos)?;
@@ -477,13 +484,9 @@ fn decode_record<'p, R: FormatReader>(
                 }
             }
         }
-        for (value, (name, ty)) in values.iter_mut().zip(fields) {
-            if matches!(value, Value::Unit) {
-                if !matches!(ty, Ty::Option(_)) {
-                    return Err(Fail::error(format!("missing field `{name}`")));
-                }
-                *value = Value::None;
-            }
+        if seen != all_fields(n) {
+            let absent = absent_fields(fields, seen)?;
+            (0..n).filter(|i| absent & (1 << i) != 0).for_each(|i| values[i] = Value::None);
         }
         vm.heap.reserve_container(0)
     })();

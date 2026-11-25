@@ -21,7 +21,7 @@ pub struct LongStr {
 impl LongStr {
     /// Tracked bytes of a long string of `len` bytes.
     pub const fn size(len: usize) -> usize {
-        ARC_COUNTS + size_of::<LongStr>() + len
+        len.saturating_add(ARC_COUNTS + size_of::<LongStr>())
     }
 
     /// Creates a string whose bytes the caller reserved on `tracker`.

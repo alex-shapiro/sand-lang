@@ -41,3 +41,10 @@ fn huge_list(n) {
     len l xs
     ret l
 }
+
+fn huge_pair_string(n) {
+    str s "ab"
+    repeat r s n
+    len l r
+    ret l
+}

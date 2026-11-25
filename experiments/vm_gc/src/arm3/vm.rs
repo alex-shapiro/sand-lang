@@ -483,7 +483,8 @@ impl Vm {
                     }
                     Op::Capture { dst, idx } => {
                         let Value::Closure(c) = &self.frames.last().expect("a frame").closure else { return Err(type_error("closure")) };
-                        set!(dst, c.data.captures[idx as usize].dup());
+                        let v = c.data.captures.get(idx as usize).ok_or_else(|| type_error("capture"))?.dup();
+                        set!(dst, v);
                     }
                     Op::NewCell { dst, src } => {
                         let bytes = Heap::shared_size::<CellObj>(0);
@@ -515,8 +516,8 @@ impl Vm {
                     }
                     Op::Field { dst, obj, idx } => {
                         let v = match &reg!(obj) {
-                            Value::Struct(o) => o.data.fields[idx as usize].dup(),
-                            Value::MutStruct(o) => o.lock()?.fields[idx as usize].clone(),
+                            Value::Struct(o) => o.data.fields.get(idx as usize).ok_or_else(|| type_error("field"))?.dup(),
+                            Value::MutStruct(o) => o.lock()?.fields.get(idx as usize).ok_or_else(|| type_error("field"))?.clone(),
                             _ => return Err(type_error("struct")),
                         };
                         set!(dst, v);
@@ -524,7 +525,7 @@ impl Vm {
                     Op::SetField { obj, idx, src } => {
                         let v = reg!(src).dup();
                         let Value::MutStruct(o) = &reg!(obj) else { return Err(type_error("struct")) };
-                        let old = std::mem::replace(&mut o.lock()?.fields[idx as usize], v);
+                        let old = std::mem::replace(o.lock()?.fields.get_mut(idx as usize).ok_or_else(|| type_error("field"))?, v);
                         drop(old);
                     }
                     Op::Variant { dst, tag, base: b, count } => {
@@ -543,7 +544,8 @@ impl Vm {
                     }
                     Op::VariantField { dst, src, idx } => {
                         let Value::Variant(o) = &reg!(src) else { return Err(type_error("variant")) };
-                        set!(dst, o.data.fields[idx as usize].dup());
+                        let v = o.data.fields.get(idx as usize).ok_or_else(|| type_error("payload field"))?.dup();
+                        set!(dst, v);
                     }
                     Op::IsNone { dst, src } => set!(dst, Value::Bool(matches!(reg!(src), Value::None))),
                     Op::List { dst, base: b, count } => {
@@ -570,7 +572,10 @@ impl Vm {
                     Op::Index { dst, list, idx } => {
                         let i = int!(idx);
                         let Value::List(l) = &reg!(list) else { return Err(type_error("list")) };
-                        let v = usize::try_from(i).ok().and_then(|i| l.lock().ok()?.0.get(i).cloned()).ok_or_else(index_error)?;
+                        let v = usize::try_from(i)
+                            .ok()
+                            .and_then(|i| l.lock().map(|items| items.0.get(i).cloned()).transpose())
+                            .ok_or_else(index_error)??;
                         set!(dst, v);
                     }
                     Op::SetIndex { list, idx, src } => {
@@ -702,11 +707,20 @@ impl Vm {
             }
             Err(e) => FiberState::Done(Err(e)),
         };
-        if matches!(state, FiberState::Done(_)) {
-            self.frames.clear();
-            self.stack.clear();
-        }
         self.swap_fiber(i);
+        self.set_fiber_state(i, state);
+    }
+
+    /// Stores the state of fiber `i`, and returns the tracked bytes of its
+    /// stack and frames once it finishes.
+    fn set_fiber_state(&mut self, i: usize, state: FiberState) {
+        let fiber = &mut self.fibers[i];
+        if matches!(state, FiberState::Done(_)) {
+            let bytes = fiber.stack.capacity() * size_of::<Value>() + fiber.frames.capacity() * size_of::<Frame>() + size_of::<Fiber>();
+            fiber.stack = Vec::new();
+            fiber.frames = Vec::new();
+            self.release(bytes);
+        }
         self.fibers[i].state = state;
     }
 
@@ -750,7 +764,7 @@ impl Vm {
                     Err(e) => FiberState::Done(Err(e)),
                 };
                 self.swap_fiber(i);
-                self.fibers[i].state = state;
+                self.set_fiber_state(i, state);
             }
         }
         let fibers = std::mem::take(&mut self.fibers);

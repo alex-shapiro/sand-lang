@@ -3,6 +3,7 @@
 //! A format implements [`FormatWriter`] and [`FormatReader`]. Neither trait
 //! sees VM values, so a format works unchanged with every arm.
 
+use super::isa::Ty;
 use super::{BYTES_PER_FUEL, Fail, Result, charge};
 
 /// One write to an `Encoder`.
@@ -111,6 +112,31 @@ pub fn charge_input(fuel: &mut u64, charged: &mut usize, pos: usize) -> Result<(
 #[inline(never)]
 pub fn syntax_error<T>(format: &str, what: &str, pos: usize) -> Result<T> {
     Err(Fail::Error(format!("{format}: expected {what} at byte {pos}")))
+}
+
+/// Returns the mask of the record fields that the input left out and that
+/// default to `None`, or fails if the input left out a required field.
+/// `seen` has bit `i` set for each field `i` that the input gave.
+#[cold]
+#[inline(never)]
+pub fn absent_fields<'a>(mut fields: impl Iterator<Item = (&'a str, &'a Ty)>, seen: u64) -> Result<u64> {
+    let mut absent = 0;
+    for i in 0.. {
+        let Some((name, ty)) = fields.next() else { break };
+        if seen & (1 << i) == 0 {
+            if !matches!(ty, Ty::Option(_)) {
+                return Err(Fail::error(format!("missing field `{name}`")));
+            }
+            absent |= 1 << i;
+        }
+    }
+    Ok(absent)
+}
+
+/// Returns the mask with bits `0..n` set.
+#[inline(always)]
+pub fn all_fields(n: usize) -> u64 {
+    if n >= 64 { u64::MAX } else { (1 << n) - 1 }
 }
 
 /// Finds the struct field named `key`, trying `hint` first because inputs

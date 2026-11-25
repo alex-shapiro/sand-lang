@@ -349,6 +349,8 @@ pub fn b4_oversized<E: ArmEngine>() {
     assert_eq!(e.call("huge_string", &[int(B4_MAX_MEMORY as i64 + 1)]), Err(Fail::OutOfMemory));
     assert_eq!(e.call("huge_list", &[int((B4_MAX_MEMORY / 16) as i64 + 1)]), Err(Fail::OutOfMemory));
     assert_eq!(e.call("huge_list", &[int(i64::MAX / 2)]), Err(Fail::OutOfMemory));
+    // The byte count of this string overflows `usize`.
+    assert_eq!(e.call("huge_pair_string", &[int(i64::MAX)]), Err(Fail::OutOfMemory));
     assert!(e.stats().tracked_bytes <= before + 4096, "{} > {before}", e.stats().tracked_bytes);
     assert_eq!(call_ok(&mut e, "huge_string", &[int(1000)]), HostValue::Int(1000));
 }
@@ -412,6 +414,17 @@ pub fn b6_async<E: ArmEngine>() {
     assert_eq!(results[1], Ok(HostValue::Unit));
     assert!(e.stats().collections > before + 1, "fiber 2 must collect while fiber 1 waits");
     assert_send(&e);
+
+    // Finished fibers return their stack bytes.
+    e.collect();
+    let settled = e.stats().tracked_bytes;
+    for _ in 0..50 {
+        e.spawn("holder", &[int(7)]).unwrap();
+        e.spawn("churn", &[int(2)]).unwrap();
+        block_on(e.run_fibers());
+    }
+    e.collect();
+    assert!(e.stats().tracked_bytes <= settled + 4096, "{}: {} > {settled}", E::NAME, e.stats().tracked_bytes);
 }
 
 // -------------------------------------------------------------------------

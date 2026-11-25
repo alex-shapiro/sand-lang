@@ -211,11 +211,14 @@ impl Heap {
         if bytes > self.tracker.limit() {
             return Err(Fail::OutOfMemory);
         }
-        if self.policy.should_collect(self.tracker.used().saturating_add(bytes)) {
+        let collect = self.policy.should_collect(self.tracker.used().saturating_add(bytes));
+        if collect {
             self.collect();
         }
         if !self.tracker.fits(bytes) {
-            self.collect();
+            if !collect {
+                self.collect();
+            }
             if !self.tracker.fits(bytes) {
                 return Err(Fail::OutOfMemory);
             }
@@ -298,7 +301,10 @@ impl Heap {
             self.release(capacity);
             return Ok(Value::Short(short));
         }
-        self.reserve(LongStr::size(0))?;
+        if let Err(e) = self.reserve(LongStr::size(0)) {
+            self.release(capacity);
+            return Err(e);
+        }
         let text = s.into_boxed_str();
         self.release(capacity - text.len());
         Ok(Value::Str(Arc::new(LongStr::new(text, self.tracker.clone()))))
