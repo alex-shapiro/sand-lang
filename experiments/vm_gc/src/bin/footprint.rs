@@ -71,5 +71,6 @@ fn main() {
         "arm", "tracked bytes", "VM objects", "process bytes", "process allocs", "pause ms"
     );
     measure::<vm_gc::arm1::Engine>();
+    measure::<vm_gc::arm2::Engine>();
     measure::<vm_gc::arm3::Engine>();
 }

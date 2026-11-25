@@ -34,5 +34,6 @@ fn report<E: ArmEngine>() {
 #[ignore]
 fn nesting_depth_on_a_small_stack() {
     report::<vm_gc::arm1::Engine>();
+    report::<vm_gc::arm2::Engine>();
     report::<vm_gc::arm3::Engine>();
 }

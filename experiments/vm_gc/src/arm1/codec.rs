@@ -17,18 +17,18 @@ use std::any::Any;
 use std::mem::size_of;
 
 /// Runs a nested encode for an `Encoder` of one format.
-type EncodeWalk = fn(&mut Vm, Value, Value) -> Result<()>;
+pub type EncodeWalk = fn(&mut Vm, Value, Value) -> Result<()>;
 /// Runs a nested decode of `program.types[ty]` for a `Decoder` of one format.
-type DecodeWalk = fn(&mut Vm, Value, u16) -> Result<Value>;
+pub type DecodeWalk = fn(&mut Vm, Value, u16) -> Result<Value>;
 
 /// Format state of an encode: the writer and its output.
 pub struct EncodeState<W> {
-    writer: W,
-    out: String,
+    pub writer: W,
+    pub out: String,
 }
 
 /// The object-safe view of an [`EncodeState`] for Sand `Encoder` methods.
-trait DynEncodeState: Any + Send {
+pub trait DynEncodeState: Any + Send {
     fn write(&mut self, event: Event<'_>);
     fn max_len(&self, event: &Event<'_>, text_len: usize) -> usize;
     fn out(&mut self) -> &mut String;
@@ -48,8 +48,8 @@ impl<W: FormatWriter> DynEncodeState for EncodeState<W> {
 
 /// The Sand `Encoder`: holds the format state while a callback runs.
 pub struct EncoderObj {
-    state: Option<Box<dyn DynEncodeState>>,
-    walk: EncodeWalk,
+    pub state: Option<Box<dyn DynEncodeState>>,
+    pub walk: EncodeWalk,
 }
 
 impl EncoderObj {
@@ -61,10 +61,10 @@ impl EncoderObj {
 /// The Sand `Decoder`: holds the input and position while a callback runs.
 pub struct DecoderObj {
     pub input: Value,
-    pos: usize,
-    scratch: String,
-    reader: &'static dyn FormatReader,
-    walk: DecodeWalk,
+    pub pos: usize,
+    pub scratch: String,
+    pub reader: &'static dyn FormatReader,
+    pub walk: DecodeWalk,
 }
 
 impl DecoderObj {
