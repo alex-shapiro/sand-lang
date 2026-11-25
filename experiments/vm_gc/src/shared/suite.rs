@@ -247,6 +247,7 @@ pub fn gc_stress<E: ArmEngine>() {
         call_ok(&mut e, "setup_address", &[]);
         assert_eq!(call_ok(&mut e, "bench_small_decode", &[int(3)]), HostValue::Int(3 * "Springfield".len() as i64));
         assert_eq!(call_ok(&mut e, "map_mutating", &[]), HostValue::Int(12 * 100 + 3));
+        assert_eq!(call_str(&mut e, "map_allocating", &[]), map_allocating_text());
         if variant == Variant::Custom {
             assert_eq!(call_str(&mut e, "evil_encode", &[]), r#"[[1,"a long string that lives on the heap"]]"#);
         }
@@ -450,6 +451,12 @@ pub fn b8_list_map<E: ArmEngine>() {
     let mut e: E = engine(Variant::Structural, Limits { gc_min_threshold: 64 << 10, ..Limits::default() });
     // Mapped [2, 4, 6] sum to 12; the closure shrinks the input to 3 items.
     assert_eq!(call_ok(&mut e, "map_mutating", &[]), HostValue::Int(12 * 100 + 3));
+    assert_eq!(call_str(&mut e, "map_allocating", &[]), map_allocating_text());
+}
+
+/// The text that `map_allocating` returns.
+pub fn map_allocating_text() -> String {
+    [1, 2, 3, 1, 2, 3].map(|x| format!("the mapped value is {x}")).concat()
 }
 
 pub fn b8_sexpr<E: ArmEngine>() {

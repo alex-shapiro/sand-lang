@@ -117,3 +117,41 @@ fn host_chain(n) {
     unit u
     ret u
 }
+
+# Returns a long string for `x`, and grows the captured list to 6 items.
+fn describe_and_grow(x) {
+    cap xs 0
+    len n xs
+    int six 6
+    lt c n six
+    jf c @done
+    push xs x
+@done
+    str prefix "the mapped value is "
+    itos s x
+    concat r prefix s
+    ret r
+}
+
+# Maps [1, 2, 3] with a closure that allocates and grows the input list, so
+# the mapped list grows during the map. Returns the mapped strings, joined.
+fn map_allocating() {
+    int one 1
+    int two 2
+    int three 3
+    list xs one two three
+    closure f describe_and_grow xs
+    native ys list.map xs f
+    len n ys
+    int i 0
+    str joined ""
+@loop
+    lt c i n
+    jf c @done
+    index y ys i
+    concat joined joined y
+    add i i one
+    jmp @loop
+@done
+    ret joined
+}
