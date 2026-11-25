@@ -48,7 +48,7 @@ We want a runtime model that meets these requirements:
 All six arms follow the same language semantics:
 
 - Primitive values (`int`, `float`, `bool`, unit, and payload-less enum tags) stay unboxed inside `VmValue`.
-- Each arm uses its natural string layout (`CompactString` inside the heap string object for Arms 1 to 4, `EcoString` for Arm 5, and a matching 15-byte non-atomic inline string for Arm 6) instead of double-boxing strings. Note inline-string effects separately in B1 to B3 and B7.
+- Keep string-inlining behavior consistent across all six arms so short-string allocation counts do not confound GC comparisons.
 - Immutable heap types: `str`, `bytes`, tuples, enums, and structs without `var` fields.
 - Mutable heap types: `list`, `map`, structs with `var` fields, and closure capture cells.
 
@@ -90,7 +90,7 @@ For cycles, every container that can hold child objects registers a `Weak` point
 
 Same design as Arm 5, using non-atomic `Rc<T>` for immutable objects, a matching 15-byte non-atomic inline string for strings, and `Rc<RefCell<T>>` for mutable objects. 100% safe Rust and `!Send`.
 
-Arm 6 runs the async fiber yield test in B6 without the compile-time `Send` assertion and records `!Send` as a relaxed requirement. If selected, SandLang would either relax `Engine: Send` or add an isolated `unsafe` single-engine `Send` wrapper.
+Arm 6 runs the async fiber yield test in B6 without the compile-time `Send` assertion and records `!Send` as a relaxed requirement. If selected, SandLang would relax `Engine: Send`.
 
 ## Experimental Harness
 
@@ -105,7 +105,7 @@ Keep measurements fair across all six arms:
 - Share one strict byte tracker checked before every allocation. Count object headers, inner container buffers, root stacks, and cycle-collector tables. Wrap `Gc::new` in Arms 2 and 3 so allocations fail cleanly at `max_memory`.
 - Do not build a second structural-only fast-path codec beside the general callback codec in any arm. Give every arm one equal review and tuning pass before recording final numbers.
 - Use the same GC trigger policy across Arms 1 to 4 (collecting if allocated bytes reach the larger of 2x the last post-GC live set or a shared minimum threshold, plus emergency collection at `max_memory`) so B1 to B3 compare equal collection cadence without thrashing on small workloads.
-- In B1, B2, and B3, report both operation time (including any GC triggered during the run) and post-run cleanup time (one full collection for Arms 1 to 4; dropping the output for Arms 5 and 6) separately.
+- In B1, B2, and B3, report operation time, post-run cleanup time (one full collection for Arms 1 to 4; dropping the output and pruning dead `Weak` entries for Arms 5 and 6), and total combined time so deferred GC (such as Arm 2) is compared fairly.
 
 ### Dataset and Baseline
 
@@ -157,7 +157,7 @@ Check four cases under a hard `max_memory` cap:
 
 ### B5: Deep Interleaved Recursion
 
-Define `struct Node { value: int, next: Node? }`. Encode, decode, and drop a 500-level linked `Node` with custom Sand callbacks on a 512 KB native thread stack. Note that WebAssembly stack limits are a follow-up check for any winning arm.
+Define `struct Node { value: int, next: Node? }`. Encode, decode, and drop a 500-level linked `Node` with custom Sand callbacks that recurse through the native `Encoder` and `Decoder` walker at every level on a 512 KB native thread stack. Note that WebAssembly stack limits are a follow-up check for any winning arm.
 
 ### B6: Async Yield and `Send`
 
