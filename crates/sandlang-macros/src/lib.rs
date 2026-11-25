@@ -121,9 +121,6 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
                 if derive == "SandObject" {
                     return Err(meta.error("`SandObject` cannot derive traits"));
                 }
-                if !input.generics.params.is_empty() {
-                    return Err(meta.error("a generic native type cannot derive traits"));
-                }
                 meta.parse_nested_meta(|trait_meta| {
                     let Some(ident) = trait_meta.path.get_ident() else {
                         return Err(trait_meta.error("expected a trait name"));

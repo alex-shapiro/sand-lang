@@ -276,7 +276,7 @@ pub(crate) struct DeclRules<'s> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DefaultRule {
     All,
-    /// Only closed constants (`is_closed_const`).
+    /// Only closed constants (`closed_const`).
     Const,
     None,
 }
@@ -2295,13 +2295,17 @@ impl Checker {
                 let r = self.host_type(r, generics, owner, span)?;
                 self.arena.func(&ps, r)
             }
-            Type::Param(i, _) | Type::Encoded(i) => match generics.get(*i as usize) {
+            Type::Param(i, _) => match generics.get(*i as usize) {
                 Some(&p) => self.param_ty(p),
                 None => {
                     self.error(span, format!("{owner} uses type parameter {i}, which its declaration does not have"));
                     return None;
                 }
             },
+            Type::Encoded(_) => {
+                self.error(span, format!("{owner} can use `Encoded` only as a top-level parameter type"));
+                return None;
+            }
             Type::TraitDict(..) => {
                 self.error(span, format!("{owner} takes a trait dictionary that is not one of its first parameters"));
                 return None;
@@ -2351,6 +2355,19 @@ impl Checker {
         })
     }
 
+    fn host_param_type(&mut self, t: &Type, generics: &[ParamId], owner: &str, span: Span) -> Option<TypeId> {
+        match t {
+            Type::Encoded(i) => match generics.get(*i as usize) {
+                Some(&p) => Some(self.param_ty(p)),
+                None => {
+                    self.error(span, format!("{owner} uses type parameter {i}, which its declaration does not have"));
+                    None
+                }
+            },
+            _ => self.host_type(t, generics, owner, span),
+        }
+    }
+
     /// Verifies that a `native fn` declaration matches its registered Rust
     /// signature and trait bounds, returning the `(param_index, builtin)`
     /// dictionaries accepted by the Rust function.
@@ -2366,13 +2383,23 @@ impl Checker {
         let span = f.name.span;
         let owner = format!("the Rust function of native `{key}`");
         let mut declared_dicts: Vec<(u8, Builtin)> = Vec::new();
-        for i in 0..generics.len() as u8 {
-            for &b in Builtin::ALL {
-                if let Some(t) = self.builtins[b as usize]
-                    && self.traits[t as usize].has_dict
-                    && self.param_has_trait(generics[i as usize], t)
+        for (i, &p) in generics.iter().enumerate() {
+            let mut seen_traits: Vec<TraitId> = self.params[p as usize].traits.iter().map(|tr| tr.trait_id).collect();
+            let mut idx = 0;
+            while idx < seen_traits.len() {
+                let tid = seen_traits[idx];
+                idx += 1;
+                let td = &self.traits[tid as usize];
+                if td.has_dict
+                    && let Some(b) = td.builtin
+                    && !declared_dicts.contains(&(i as u8, b))
                 {
-                    declared_dicts.push((i, b));
+                    declared_dicts.push((i as u8, b));
+                }
+                for sup in &td.supers {
+                    if !seen_traits.contains(&sup.trait_id) {
+                        seen_traits.push(sup.trait_id);
+                    }
                 }
             }
         }
@@ -2385,10 +2412,18 @@ impl Checker {
             accepted_dicts.iter().all(|i| declared_iter.any(|j| j == i)) && !value_params.iter().any(|t| matches!(t, Type::TraitDict(..)));
         if dicts_match {
             let mark = self.diags.len();
-            let want: Option<Vec<TypeId>> = value_params.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
+            let want: Option<Vec<TypeId>> = value_params.iter().map(|t| self.host_param_type(t, generics, &owner, span)).collect();
             let want_ret = self.host_type(&sig.ret, generics, &owner, span);
             if self.diags.len() > mark {
                 return accepted_dicts;
+            }
+            for (ast_param, rust_ty) in f.params.iter().zip(value_params) {
+                if matches!(rust_ty, Type::Encoded(_)) && ast_param.default.is_some() {
+                    self.error(
+                        span,
+                        format!("{owner} cannot use `Encoded` on parameter `{}` because it has a default value", ast_param.name.name),
+                    );
+                }
             }
             let have: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
             if want.as_ref() == Some(&have) && want_ret == Some(ret) {

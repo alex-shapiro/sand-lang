@@ -99,6 +99,18 @@ impl Checker {
     /// Derives structural implementations for types from `first_type` onward
     /// and resolves part dictionaries for structural impls from `first_impl`.
     pub(crate) fn derive_structural_impls(&mut self, first_type: usize, first_impl: usize) {
+        let structural_names: Vec<String> =
+            self.traits.iter().filter(|t| t.structural.is_some()).map(|t| self.name(t.name).to_string()).collect();
+        for def_idx in first_type..self.types.len() {
+            if let Some(derives) = self.types[def_idx].native_derives {
+                let (span, def_name) = (self.types[def_idx].span, self.name(self.types[def_idx].name).to_string());
+                for &trait_name in derives {
+                    if !structural_names.iter().any(|name| name == trait_name) {
+                        self.error(span, format!("native type `{def_name}` cannot derive `{trait_name}`"));
+                    }
+                }
+            }
+        }
         for trait_id in 0..self.traits.len() as TraitId {
             if !self.is_structural_trait(trait_id) {
                 continue;
@@ -161,14 +173,28 @@ impl Checker {
     }
 
     fn add_structural_impl(&mut self, trait_ref: TraitRef, def_id: TypeDefId) -> ImplId {
-        let mut generics = Vec::new();
-        for p in self.types[def_id as usize].generics.clone() {
+        let old_generics = self.types[def_id as usize].generics.clone();
+        let mut generics = Vec::with_capacity(old_generics.len());
+        for &p in &old_generics {
             generics.push(self.new_param(self.params[p as usize].name));
         }
         let args: Vec<TypeId> = generics.iter().map(|&p| self.param_ty(p)).collect();
+        let mut evidence = Vec::new();
+        for (&old_p, (&new_p, &arg_ty)) in old_generics.iter().zip(generics.iter().zip(&args)) {
+            let bounds: Vec<TraitRef> = self.params[old_p as usize]
+                .traits
+                .clone()
+                .into_iter()
+                .map(|tr| tr.subst_params(&mut self.arena, &|p| old_generics.iter().position(|&g| g == p).map(|i| args[i])))
+                .collect();
+            for &bound in &bounds {
+                evidence.push((arg_ty, bound));
+            }
+            self.params[new_p as usize].traits = bounds;
+        }
         let target = self.arena.named(def_id, &args);
         let (module, span) = (self.types[def_id as usize].module, self.types[def_id as usize].span);
-        self.push_structural_impl(trait_ref, target, generics, Vec::new(), module, span)
+        self.push_structural_impl(trait_ref, target, generics, evidence, module, span)
     }
 
     fn push_structural_impl(
@@ -274,9 +300,23 @@ impl Checker {
                 }
                 Err(part_index) => {
                     let reason = self.structural_failure_reason(impl_id, part_index);
-                    let imp = &self.impls[impl_id as usize];
-                    if let (Ty::Named(d, _), Some(reason)) = (self.arena.get(imp.target), reason) {
-                        self.structural_failure_reasons.insert((imp.trait_ref.trait_id, d), reason.into());
+                    let (target, trait_ref, span) = {
+                        let imp = &self.impls[impl_id as usize];
+                        (imp.target, imp.trait_ref, imp.span)
+                    };
+                    if let Ty::Named(d, _) = self.arena.get(target) {
+                        if let Some(reason) = &reason {
+                            self.structural_failure_reasons.insert((trait_ref.trait_id, d), reason.as_str().into());
+                        }
+                        if self.types[d as usize].native_derives.is_some() {
+                            let trait_name = self.show_trait(&trait_ref);
+                            let type_name = self.name(self.types[d as usize].name).to_string();
+                            let msg = match reason {
+                                Some(why) => format!("native type `{type_name}` cannot derive `{trait_name}`: {why}"),
+                                None => format!("native type `{type_name}` cannot derive `{trait_name}`"),
+                            };
+                            self.error(span, msg);
+                        }
                     }
                     self.remove_structural_impl(impl_id);
                     true

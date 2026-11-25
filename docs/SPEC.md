@@ -774,8 +774,8 @@ Every JSON object key has kind `Str`.
 
 For a struct that declares `init` (§4.2), the derived decoder reads each
 parameter of `init`. It then calls `init`. The decoder sets an omitted `Option`
-parameter to `None`. For any other omitted parameter with a default, the
-decoder evaluates that default. The input can supply any `init` parameter, even
+parameter without a default to `None`. For any other omitted parameter with a
+default, the decoder evaluates that default. The input can supply any `init` parameter, even
 if that parameter declares a default. If `init` returns `Err(e)` for an `Error`
 value `e`, the decoder returns `e`. For any other error value `e`, the decoder
 returns an `"invalid"` error with the display text of `e`.
@@ -2660,8 +2660,9 @@ computed field defaults synchronously. Any attempt to wait, prompt for a
 permission, or cancel the running task inside one of those callbacks fails
 immediately with an `"invalid"` error. Unlike `json.encode`, the `Value`
 encoder wraps `Some` in `Value::Variant`. `from_value` requires the exact
-`Value` variant for each Sand type. For example, it accepts only `Value::Bytes`
-for `bytes`.
+`Value` variant for each Sand type, except that `Value::List` and `Value::Set`
+both decode lists and sets. For example, it accepts only `Value::Bytes` for
+`bytes`.
 
 The engine charges fuel and memory for each conversion against the run limits.
 If nesting exceeds 512 levels, such as on a cyclic value, the engine returns a

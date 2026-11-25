@@ -136,7 +136,7 @@ pub(crate) fn impl_key(arena: &TypeArena, t: TypeId) -> Option<(Ctor, u32)> {
 }
 
 /// Maximum recursion depth in [`Checker::resolve_evidence`].
-const MAX_EVIDENCE_DEPTH: u32 = 512;
+pub(crate) const MAX_EVIDENCE_DEPTH: u32 = 512;
 
 fn dict_expr(kind: HKind, span: Span) -> HExpr {
     mk(kind, TypeId::UNIT, span)

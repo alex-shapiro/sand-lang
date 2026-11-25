@@ -7,8 +7,8 @@
 //!   enum variant satisfies the trait bounds of its type parameter.
 //! - Every dictionary expression passed to a call matches the trait and target
 //!   type expected by the callee's hidden dictionary parameter.
-//! - Every struct field type, enum variant payload type, and `reflect` type
-//!   argument satisfies the trait bounds of its type constructors.
+//! - Every struct field type and enum variant payload type satisfies the trait
+//!   bounds of its type constructors.
 //! - Every `impl` target type satisfies all supertraits of the implemented
 //!   trait.
 //!
@@ -27,7 +27,14 @@ pub(crate) fn verify<'a>(cp: &'a CheckedProgram, bodies: impl Iterator<Item = (F
         v.check_type_def(d as TypeDefId)?;
     }
     for i in 0..cp.impls.len() {
-        v.check_impl_supertraits(i as ImplId)?;
+        let impl_id = i as ImplId;
+        if cp.impls[i].replaced {
+            continue;
+        }
+        v.check_impl_supertraits(impl_id)?;
+        if cp.is_structural_impl(impl_id) {
+            v.check_structural_impl(impl_id)?;
+        }
     }
     for (f, body) in bodies {
         v.check_body(f, body).map_err(|m| format!("in `{}`: {m}", cp.name(cp.fns[f as usize].name)))?;
@@ -53,6 +60,9 @@ struct VerifyCtx {
     dicts: HashMap<LocalId, (TypeId, TraitRef)>,
     /// Records the `Self` dictionary local and `ImplId` for an `impl` method.
     impl_dict: Option<(LocalId, ImplId)>,
+    /// True when verifying part dictionaries of a structural `impl`, whose
+    /// evidence starts after `SHAPE_SLOT`.
+    structural_dict: bool,
     /// Maps hoisted dictionary locals to their initializer expressions.
     hoisted: HashMap<LocalId, HExpr>,
 }
@@ -209,7 +219,7 @@ impl<'a> Verifier<'a> {
         if self.arena.has_vars(ty) {
             return Ok(());
         }
-        if depth > 64 {
+        if depth > super::traits::MAX_EVIDENCE_DEPTH {
             return Err(format!("too deep a proof that {} implements `{}`", self.show(ty), self.show_trait(tr)));
         }
         match self.arena.get(ty) {
@@ -419,13 +429,21 @@ impl<'a> Verifier<'a> {
                 if let Some(&s) = supers.get(field) {
                     return Ok((ty, s));
                 }
-                // After supertrait dictionaries, an impl method's `Self` dictionary
-                // stores dictionaries for the impl's own trait bounds.
+                // After supertrait dictionaries (or after `SHAPE_SLOT` in a
+                // structural impl), an impl dictionary stores dictionaries for
+                // the impl's own trait bounds.
                 match (&obj.kind, cx.impl_dict) {
                     (HKind::Local(l), Some((d0, i))) if *l == d0 => {
                         let imp = &self.cp.impls[i as usize];
                         let ev: Vec<(TypeId, TraitRef)> = imp.evidence.iter().copied().filter(|&(_, s)| self.has_dict(s)).collect();
-                        ev.get(field - supers.len()).copied().ok_or_else(|| format!("field {index} of an impl dictionary does not exist"))
+                        let ev_idx = if cx.structural_dict {
+                            (*index as usize)
+                                .checked_sub(crate::vm::bytecode::SHAPE_SLOT + 1)
+                                .ok_or_else(|| format!("field {index} of a structural dictionary does not exist"))?
+                        } else {
+                            field - supers.len()
+                        };
+                        ev.get(ev_idx).copied().ok_or_else(|| format!("field {index} of an impl dictionary does not exist"))
                     }
                     _ => Err(format!("field {index} of a dictionary does not exist")),
                 }
@@ -474,6 +492,79 @@ impl<'a> Verifier<'a> {
         for s in self.supers_of(target, tr) {
             self.check_trait(&VerifyCtx::default(), target, s, 0)
                 .map_err(|m| format!("the impl of `{}` for {}: {m}", self.show_trait(tr), self.show(target)))?;
+        }
+        Ok(())
+    }
+
+    fn check_structural_impl(&mut self, i: ImplId) -> VerifyResult {
+        let imp = self.cp.impls[i as usize].clone();
+        let (target, tr) = (imp.target, imp.trait_ref);
+        let label = format!("the structural impl of `{}` for {}", self.show_trait(tr), self.show(target));
+        let Some(structural) = imp.structural.clone() else {
+            return Err(format!("{label} has no resolved structural dictionaries"));
+        };
+        let mut cx = VerifyCtx { impl_dict: Some((0, i)), structural_dict: true, ..VerifyCtx::default() };
+        cx.dicts.insert(0, (target, tr));
+        let type_args = match self.arena.get(target) {
+            Ty::Named(_, args) => self.arena.list(args).to_vec(),
+            _ => Vec::new(),
+        };
+        let check_fn_dicts = |v: &mut Self, fn_id: FnId, dicts: &[HExpr], role: &str| -> VerifyResult {
+            let fi = &v.cp.fns[fn_id as usize];
+            if dicts.len() != fi.dicts.len() {
+                return Err(format!("{label}: {role} has {} dictionaries, expected {}", dicts.len(), fi.dicts.len()));
+            }
+            let gens = fi.generics.clone();
+            let reqs = fi.dicts.clone();
+            let args = &type_args[..gens.len().min(type_args.len())];
+            for (expr, (req_ty, req_tr)) in dicts.iter().zip(reqs) {
+                let req_ty = v.subst(req_ty, &gens, args);
+                let req_tr = v.subst_trait(req_tr, &gens, args);
+                v.check_dict(&cx, expr, req_ty, req_tr).map_err(|m| format!("{label}: {role}: {m}"))?;
+            }
+            Ok(())
+        };
+        let expected_parts: Vec<TypeId> = match self.arena.get(target) {
+            Ty::List(e) | Ty::Set(e) => vec![e],
+            Ty::Map(k, v) => vec![k, v],
+            Ty::Tuple(ts) => self.arena.list(ts).to_vec(),
+            Ty::Named(def_id, _) => {
+                let def = &self.cp.types[def_id as usize];
+                let gens = def.generics.clone();
+                if let Some((init_fn, _)) = &structural.init {
+                    let fi = &self.cp.fns[*init_fn as usize];
+                    let init_gens = fi.generics.clone();
+                    let param_tys: Vec<TypeId> = fi.params.iter().map(|p| p.ty).collect();
+                    param_tys.into_iter().map(|ty| self.subst(ty, &init_gens, &type_args)).collect()
+                } else {
+                    match &def.kind {
+                        TypeDefKind::Struct { fields } => {
+                            let tys: Vec<TypeId> = fields.iter().map(|f| f.ty).collect();
+                            tys.into_iter().map(|ty| self.subst(ty, &gens, &type_args)).collect()
+                        }
+                        TypeDefKind::Enum { variants } => {
+                            let tys: Vec<TypeId> = variants.iter().flat_map(|v| v.fields.iter().copied()).collect();
+                            tys.into_iter().map(|ty| self.subst(ty, &gens, &type_args)).collect()
+                        }
+                        TypeDefKind::Opaque(_) => Vec::new(),
+                    }
+                }
+            }
+            _ => Vec::new(),
+        };
+        if structural.parts.len() != expected_parts.len() {
+            return Err(format!("{label} has {} part dictionaries, expected {}", structural.parts.len(), expected_parts.len()));
+        }
+        for (expr, part_ty) in structural.parts.iter().zip(expected_parts) {
+            self.check_dict(&cx, expr, part_ty, tr).map_err(|m| format!("{label}: {m}"))?;
+        }
+        for fill in &structural.fills {
+            if let super::structural::StructuralFill::Helper(helper, dicts) = fill {
+                check_fn_dicts(self, *helper, dicts, "default helper")?;
+            }
+        }
+        if let Some((init_fn, dicts)) = &structural.init {
+            check_fn_dicts(self, *init_fn, dicts, "init")?;
         }
         Ok(())
     }

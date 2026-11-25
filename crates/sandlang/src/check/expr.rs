@@ -1023,30 +1023,39 @@ impl Checker {
         dicts
     }
 
-    /// Returns a use of local `local_id`, wrapping a generic local function in
-    /// a closure if it takes hidden dictionary parameters.
-    fn local_value(&mut self, local_id: LocalId, span: Span) -> HExpr {
+    /// Instantiates generic local `local_id`, returning its instantiated type
+    /// and evidence-hole arguments for its hidden dictionary parameters.
+    fn instantiate_local(&mut self, local_id: LocalId, span: Span) -> (TypeId, Vec<HExpr>) {
         let local_ty = self.fs.data[local_id as usize].ty;
         if self.fs.data[local_id as usize].scheme.is_empty() {
-            return mk(HKind::Local(local_id), local_ty, span);
+            return (local_ty, Vec::new());
         }
         let scheme = self.fs.data[local_id as usize].scheme.clone();
         let fresh: Vec<TypeId> = scheme.iter().map(|_| self.fresh()).collect();
         let dicts = self.local_fn_dicts(local_id);
         self.require_traits(&scheme, &fresh, &dicts, span);
         let local_ty = self.arena.instantiate(local_ty, &scheme, &fresh);
-        if dicts.is_empty() {
+        let dict_args = dicts
+            .into_iter()
+            .map(|(bound_ty, trait_ref)| {
+                let bound_ty = self.arena.instantiate(bound_ty, &scheme, &fresh);
+                let trait_ref = trait_ref.subst_params(&mut self.arena, &|p| scheme.iter().position(|&g| g == p).map(|i| fresh[i]));
+                self.evidence_hole(bound_ty, trait_ref, false, span)
+            })
+            .collect();
+        (local_ty, dict_args)
+    }
+
+    /// Returns a use of local `local_id`, wrapping a generic local function in
+    /// a closure if it takes hidden dictionary parameters.
+    fn local_value(&mut self, local_id: LocalId, span: Span) -> HExpr {
+        let (local_ty, mut args) = self.instantiate_local(local_id, span);
+        if args.is_empty() {
             return mk(HKind::Local(local_id), local_ty, span);
         }
         let Ty::Fn(param_list, ret) = self.ty(local_ty) else { return mk(HKind::Local(local_id), local_ty, span) };
         let param_tys = self.elems(param_list);
         let lambda_id = self.new_lambda();
-        let mut args = Vec::new();
-        for (bound_ty, trait_ref) in dicts {
-            let bound_ty = self.arena.instantiate(bound_ty, &scheme, &fresh);
-            let trait_ref = trait_ref.subst_params(&mut self.arena, &|p| scheme.iter().position(|&g| g == p).map(|i| fresh[i]));
-            args.push(self.evidence_hole(bound_ty, trait_ref, false, span));
-        }
         let mut params = Vec::new();
         for &param_ty in &param_tys {
             self.fs.locals.push(LocalInfo { name: Symbol::ARG, mutable: false, owner: lambda_id, cell: false, span });
@@ -1785,6 +1794,10 @@ impl Checker {
     }
 
     fn call_value(&mut self, callee: HExpr, args: &CallArgs, span: Span) -> HExpr {
+        self.call_value_with_prefix(callee, Vec::new(), args, span)
+    }
+
+    fn call_value_with_prefix(&mut self, callee: HExpr, mut prefix: Vec<HExpr>, args: &CallArgs, span: Span) -> HExpr {
         let ct = self.resolve(callee.ty);
         let (ptys, ret) = match self.ty(ct) {
             Ty::Fn(ps, r) => {
@@ -1819,14 +1832,16 @@ impl Checker {
         let Some(hargs) = self.bind_args(Callee::Value, &ptys, None, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        let hs = hargs
-            .into_iter()
-            .map(|a| match a {
-                HArg::Expr(e) => e,
-                HArg::Default { .. } => unreachable!(),
-            })
-            .collect();
-        mk(HKind::CallValue { callee: Box::new(callee), args: hs }, ret, span)
+        prefix.extend(hargs.into_iter().map(|a| match a {
+            HArg::Expr(e) => e,
+            HArg::Default { .. } => unreachable!(),
+        }));
+        mk(HKind::CallValue { callee: Box::new(callee), args: prefix }, ret, span)
+    }
+
+    fn call_local_fn(&mut self, local_id: LocalId, callee_span: Span, args: &CallArgs, span: Span) -> HExpr {
+        let (local_ty, dict_args) = self.instantiate_local(local_id, span);
+        self.call_value_with_prefix(mk(HKind::Local(local_id), local_ty, callee_span), dict_args, args, span)
     }
 
     fn with_call_args(&mut self, args: &[Arg], check: impl FnOnce(&mut Self, &CallArgs) -> HExpr) -> HExpr {
@@ -1841,21 +1856,27 @@ impl Checker {
 
     fn check_call(&mut self, callee: &Expr, args: &CallArgs, span: Span) -> HExpr {
         match &callee.kind {
-            ExprKind::Ident(id) if self.find_local(&id.name).is_none() => match self.lookup_global(&id.name) {
-                Some(Def::Fn(f)) => {
-                    if let FnKind::Intrinsic(i) = self.fns[f as usize].kind {
-                        return self.check_intrinsic(i, args, span);
+            ExprKind::Ident(id) => {
+                if let Some(local_id) = self.find_local(&id.name) {
+                    self.use_local(local_id);
+                    return self.call_local_fn(local_id, callee.span, args, span);
+                }
+                match self.lookup_global(&id.name) {
+                    Some(Def::Fn(f)) => {
+                        if let FnKind::Intrinsic(i) = self.fns[f as usize].kind {
+                            return self.check_intrinsic(i, args, span);
+                        }
+                        return self.call_fn(f, None, args, span);
                     }
-                    return self.call_fn(f, None, args, span);
+                    Some(Def::Variant(d, i)) => return self.call_variant(d, i, args, span),
+                    Some(Def::Type(r)) => {
+                        let t = self.fresh_tyref(r, id.span, &id.name);
+                        return self.construct(t, &id.name, args, callee.span, span);
+                    }
+                    _ if let Some(Ns::Type(t)) = self.resolve_ns(callee) => return self.construct(t, &id.name, args, callee.span, span),
+                    _ => {}
                 }
-                Some(Def::Variant(d, i)) => return self.call_variant(d, i, args, span),
-                Some(Def::Type(r)) => {
-                    let t = self.fresh_tyref(r, id.span, &id.name);
-                    return self.construct(t, &id.name, args, callee.span, span);
-                }
-                _ if let Some(Ns::Type(t)) = self.resolve_ns(callee) => return self.construct(t, &id.name, args, callee.span, span),
-                _ => {}
-            },
+            }
             ExprKind::SelfType => {
                 if let Some(Ns::Type(t)) = self.resolve_ns(callee) {
                     return self.construct(t, "Self", args, callee.span, span);

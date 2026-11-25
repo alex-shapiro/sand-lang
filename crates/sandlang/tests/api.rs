@@ -2446,6 +2446,62 @@ print((match decoded { json.Json.Obj(_) => true, _ => false }, match built { jso
 }
 
 #[test]
+fn native_encoded_dict_order_and_derive_validation() {
+    use sandlang::native::ty::{Encoded, Param, TraitDict};
+    use sandlang::types::traits;
+
+    // 1. Nested Encoded<0> is rejected at HostModules::new.
+    let mut m1 = NativeModule::new("bad1");
+    m1.source("pub native fn f<T: Encode>(x: T?) -> ()");
+    m1.function("f", |_: Option<Encoded<0>>| {});
+    let errs = host_module_errors([m1]);
+    assert!(errs.iter().any(|e| e.contains("top-level parameter")), "{errs:?}");
+
+    // 2. Default value on Encoded<0> parameter is rejected.
+    let mut m2 = NativeModule::new("bad2");
+    m2.source("pub native fn f<T: Encode>(x: T = 1) -> ()");
+    m2.function("f", |_: Encoded<0>| {});
+    let errs = host_module_errors([m2]);
+    assert!(errs.iter().any(|e| e.contains("default value")), "{errs:?}");
+
+    // 3. TraitDict follows declared bound order (Decode then Encode).
+    let mut m3_ok = NativeModule::new("ord_ok");
+    m3_ok.source("pub native fn rt<T: Decode + Encode>(x: T) -> ()");
+    m3_ok.function("rt", |_: TraitDict<0, traits::Decode>, _: TraitDict<0, traits::Encode>, _: Param<0>| {});
+    HostModules::new([m3_ok]).unwrap();
+
+    let mut m3_bad = NativeModule::new("ord_bad");
+    m3_bad.source("pub native fn rt<T: Decode + Encode>(x: T) -> ()");
+    m3_bad.function("rt", |_: TraitDict<0, traits::Encode>, _: TraitDict<0, traits::Decode>, _: Param<0>| {});
+    let errs = host_module_errors([m3_bad]);
+    assert!(!errs.is_empty(), "expected reversed TraitDict order to fail");
+
+    // 4. Invalid native derive trait name is rejected.
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "bad_derive", derive(NotATrait))]
+    struct BadDerive {
+        x: i64,
+    }
+    let mut m4 = NativeModule::new("bad_derive");
+    m4.bind::<BadDerive>();
+    let errs = host_module_errors([m4]);
+    assert!(errs.iter().any(|e| e.contains("cannot derive `NotATrait`")), "{errs:?}");
+
+    // 5. Generic native struct can derive Encode and Decode and round-trip via JSON.
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "gen_box", derive(Encode, Decode))]
+    struct GenBox<T> {
+        item: T,
+    }
+    let mut m5 = NativeModule::new("gen_box");
+    m5.bind::<GenBox<Param<0>>>();
+    let src = "import json\nimport gen_box\nlet b = gen_box.GenBox(item: [1, 2])\nlet s = json.encode(b)?\nlet back: gen_box.GenBox<[int]> = json.decode(s)?\nprint((s, back.item))";
+    let (res, out, _) = run_src(Config::new().host_modules(HostModules::new([m5]).unwrap()), src);
+    res.unwrap();
+    assert_eq!(out, "(\"{\\\"item\\\":[1,2]}\", [1, 2])\n");
+}
+
+#[test]
 fn host_functions_take_and_return_durations_and_never() {
     use jiff::SignedDuration;
     use sandlang::native::ty::Never;
