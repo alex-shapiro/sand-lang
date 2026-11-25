@@ -223,7 +223,8 @@ fn b4_workload<E: ArmEngine>(e: &mut E) {
 /// garbage while automatic collections are paused. The cap is 1.5 times the
 /// bytes that the workload tracks on an empty heap without collecting, so the
 /// run must reclaim the garbage to finish.
-pub fn b4_dead_garbage<E: ArmEngine>(generator: &str) {
+pub fn b4_dead_garbage<E: ArmEngine>(generator: &str) -> Vec<B4Run> {
+    let mut runs = Vec::new();
     for variant in [Variant::Structural, Variant::Custom] {
         let mut roomy: E = engine(variant, roomy_limits());
         b4_workload(&mut roomy);
@@ -236,23 +237,45 @@ pub fn b4_dead_garbage<E: ArmEngine>(generator: &str) {
         }
         e.pause_gc(false);
         let before = e.stats().collections;
+        let start = std::time::Instant::now();
         b4_workload(&mut e);
-        assert!(e.stats().collections > before, "{}: the run must reclaim the garbage", E::NAME);
+        let elapsed = start.elapsed();
+        let collections = e.stats().collections - before;
+        assert!(collections > 0, "{}: the run must reclaim the garbage", E::NAME);
         assert!(e.stats().tracked_bytes <= cap);
+        runs.push(B4Run { variant, cap, collections, elapsed });
     }
+    runs
+}
+
+/// What one B4 run under a cap needed.
+#[derive(Debug)]
+pub struct B4Run {
+    pub variant: Variant,
+    pub cap: usize,
+    pub collections: u64,
+    pub elapsed: std::time::Duration,
 }
 
 /// Runs a decode whose `Address.decode` allocates garbage in a loop.
-pub fn b4_garbage_callback<E: ArmEngine>() {
+pub fn b4_garbage_callback<E: ArmEngine>() -> B4Run {
     let limits = Limits { max_memory: B4_MAX_MEMORY, fuel: u64::MAX, gc_min_threshold: 4 << 20 };
     let mut e: E = engine(Variant::GarbageCallback, limits);
     call_ok(&mut e, "setup_text", &[int(B4_USERS)]);
     let before = e.stats().collections;
+    let start = std::time::Instant::now();
     assert_eq!(call_ok(&mut e, "bench_decode", &[]), HostValue::Int(B4_USERS - 1));
-    assert!(e.stats().collections > before, "{}: garbage must be collected inside the decode call", E::NAME);
+    let run = B4Run {
+        variant: Variant::GarbageCallback,
+        cap: B4_MAX_MEMORY,
+        collections: e.stats().collections - before,
+        elapsed: start.elapsed(),
+    };
+    assert!(run.collections > 0, "{}: garbage must be collected inside the decode call", E::NAME);
     call_ok(&mut e, "setup_doc", &[int(B4_USERS)]);
     let text = call_str(&mut e, "encode_doc", &[]);
     assert_eq!(call_str(&mut e, "roundtrip_text", &[]), text);
+    run
 }
 
 /// Rejects allocations larger than the cap before memory grows.

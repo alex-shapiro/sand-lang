@@ -37,3 +37,29 @@ fn nesting_depth_on_a_small_stack() {
     report::<vm_gc::arm2::Engine>();
     report::<vm_gc::arm3::Engine>();
 }
+
+fn b4_report<E: ArmEngine>() {
+    use vm_gc::shared::suite::{b4_dead_garbage, b4_garbage_callback};
+    for generator in ["make_garbage", "make_cycles"] {
+        for run in b4_dead_garbage::<E>(generator) {
+            println!(
+                "{} {generator} {:?}: cap {} bytes, {} collections, {:?}",
+                E::NAME,
+                run.variant,
+                run.cap,
+                run.collections,
+                run.elapsed
+            );
+        }
+    }
+    let run = b4_garbage_callback::<E>();
+    println!("{} garbage callback: cap {} bytes, {} collections during one decode, {:?}", E::NAME, run.cap, run.collections, run.elapsed);
+}
+
+#[test]
+#[ignore]
+fn b4_runs_under_a_cap() {
+    b4_report::<vm_gc::arm1::Engine>();
+    b4_report::<vm_gc::arm2::Engine>();
+    b4_report::<vm_gc::arm3::Engine>();
+}
