@@ -36,21 +36,50 @@ impl Drop for LongStr {
     }
 }
 
-/// An immutable object and its cycle-table slot.
-pub struct Frozen<T> {
+/// Where a container lives: its cycle-table slot and its engine.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Header {
     pub slot: u32,
+    /// The engine whose cycle table holds the slot.
+    pub engine: u32,
+}
+
+/// The values inside an object, for the cycle collector and for drops.
+pub trait Contents: Send + 'static {
+    /// Gives `f` mutable access to every value that the object holds.
+    fn each_mut(&mut self, f: &mut dyn FnMut(&mut Value));
+}
+
+/// The values inside an immutable object, which the collector reads without a lock.
+pub trait FrozenContents: Contents + Sync {
+    fn each(&self, f: &mut dyn FnMut(&Value));
+}
+
+/// A container that the cycle collector tracks.
+pub trait Container: Send + Sync {
+    fn header(&self) -> Header;
+    /// Visits the values that the container holds. Returns `false` if native
+    /// code holds the container's lock.
+    fn visit(&self, f: &mut dyn FnMut(&Value)) -> bool;
+    /// Moves the values out of a mutable container into `out`, to break a cycle.
+    fn clear(&self, out: &mut Vec<Value>);
+}
+
+/// An immutable object and its header.
+pub struct Frozen<T> {
+    pub header: Header,
     pub data: T,
 }
 
-/// A mutable object and its cycle-table slot.
+/// A mutable object and its header.
 pub struct Shared<T> {
-    pub slot: u32,
+    pub header: Header,
     data: Mutex<T>,
 }
 
 impl<T> Shared<T> {
-    pub fn new(slot: u32, data: T) -> Shared<T> {
-        Shared { slot, data: Mutex::new(data) }
+    pub fn new(header: Header, data: T) -> Shared<T> {
+        Shared { header, data: Mutex::new(data) }
     }
 
     /// Locks the object, or fails if this thread already holds the lock.
@@ -70,13 +99,38 @@ impl<T> Shared<T> {
     }
 }
 
+impl<T: FrozenContents> Container for Frozen<T> {
+    fn header(&self) -> Header {
+        self.header
+    }
+    fn visit(&self, f: &mut dyn FnMut(&Value)) -> bool {
+        self.data.each(f);
+        true
+    }
+    fn clear(&self, _out: &mut Vec<Value>) {}
+}
+
+impl<T: Contents> Container for Shared<T> {
+    fn header(&self) -> Header {
+        self.header
+    }
+    fn visit(&self, f: &mut dyn FnMut(&Value)) -> bool {
+        let Some(mut data) = self.try_lock() else { return false };
+        data.each_mut(&mut |v| f(v));
+        true
+    }
+    fn clear(&self, out: &mut Vec<Value>) {
+        if let Some(mut data) = self.try_lock() {
+            data.each_mut(&mut |v| out.push(std::mem::take(v)));
+        }
+    }
+}
+
 /// A Rust object stored in the engine.
 pub trait HostObject: Any + Send {
-    /// Visits every value that the object holds.
-    fn visit(&self, _visit: &mut dyn FnMut(&Value)) {}
-
-    /// Moves every value that the object holds into `out`, to break a cycle.
-    fn clear(&mut self, _out: &mut Vec<Value>) {}
+    /// Gives `f` mutable access to every value that the object holds. The
+    /// collector reads them, breaks cycles through them, and drops them.
+    fn values_mut(&mut self, f: &mut dyn FnMut(&mut Value));
 
     /// Bytes owned by the object, counted against the memory limit.
     fn size(&self) -> usize {
@@ -107,7 +161,61 @@ pub struct MapObj(pub Vec<(Value, Value)>);
 
 pub struct CellObj(pub Value);
 
-pub type HostBox = Box<dyn HostObject>;
+/// A host object, which drops its values without recursion.
+pub struct HostCell(pub Box<dyn HostObject>);
+
+macro_rules! fields_contents {
+    ($ty:ty, $field:ident) => {
+        impl Contents for $ty {
+            fn each_mut(&mut self, f: &mut dyn FnMut(&mut Value)) {
+                self.$field.iter_mut().for_each(f);
+            }
+        }
+        impl FrozenContents for $ty {
+            fn each(&self, f: &mut dyn FnMut(&Value)) {
+                self.$field.iter().for_each(f);
+            }
+        }
+        impl Drop for $ty {
+            fn drop(&mut self) {
+                if self.$field.iter().any(|v| v.header().is_some()) {
+                    drop_values(std::mem::take(&mut self.$field).into_vec());
+                }
+            }
+        }
+    };
+}
+
+fields_contents!(StructObj, fields);
+fields_contents!(VariantObj, fields);
+fields_contents!(ClosureObj, captures);
+
+impl Contents for ListObj {
+    fn each_mut(&mut self, f: &mut dyn FnMut(&mut Value)) {
+        self.0.iter_mut().for_each(f);
+    }
+}
+
+impl Contents for MapObj {
+    fn each_mut(&mut self, f: &mut dyn FnMut(&mut Value)) {
+        for (k, v) in &mut self.0 {
+            f(k);
+            f(v);
+        }
+    }
+}
+
+impl Contents for CellObj {
+    fn each_mut(&mut self, f: &mut dyn FnMut(&mut Value)) {
+        f(&mut self.0);
+    }
+}
+
+impl Contents for HostCell {
+    fn each_mut(&mut self, f: &mut dyn FnMut(&mut Value)) {
+        self.0.values_mut(f);
+    }
+}
 
 /// An immediate value or a reference-counted object.
 #[derive(Clone, Default)]
@@ -130,28 +238,12 @@ pub enum Value {
     List(Arc<Shared<ListObj>>),
     Map(Arc<Shared<MapObj>>),
     Cell(Arc<Shared<CellObj>>),
-    Host(Arc<Shared<HostBox>>),
+    Host(Arc<Shared<HostCell>>),
     Encoder(Arc<Shared<EncoderObj>>),
     Decoder(Arc<Shared<DecoderObj>>),
 }
 
 const _: () = assert!(size_of::<Value>() == 16);
-
-impl std::fmt::Debug for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Unit => write!(f, "Unit"),
-            Value::None => write!(f, "None"),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Int(i) => write!(f, "{i}"),
-            Value::Float(x) => write!(f, "{x}"),
-            Value::Tag(t) => write!(f, "Tag({t})"),
-            Value::Short(s) => write!(f, "{s:?}"),
-            Value::Str(s) => write!(f, "{:?}", s.text),
-            _ => write!(f, "object"),
-        }
-    }
-}
 
 impl Value {
     /// Returns whether the value owns no object.
@@ -185,22 +277,28 @@ impl Value {
         }
     }
 
-    /// Returns the cycle-table slot of a container.
+    /// Returns the container that the value refers to.
     #[inline]
-    pub fn slot(&self) -> Option<u32> {
+    pub fn container(&self) -> Option<&dyn Container> {
         Some(match self {
-            Value::Struct(o) => o.slot,
-            Value::MutStruct(o) => o.slot,
-            Value::Variant(o) => o.slot,
-            Value::Closure(o) => o.slot,
-            Value::List(o) => o.slot,
-            Value::Map(o) => o.slot,
-            Value::Cell(o) => o.slot,
-            Value::Host(o) => o.slot,
-            Value::Encoder(o) => o.slot,
-            Value::Decoder(o) => o.slot,
+            Value::Struct(o) => &**o,
+            Value::MutStruct(o) => &**o,
+            Value::Variant(o) => &**o,
+            Value::Closure(o) => &**o,
+            Value::List(o) => &**o,
+            Value::Map(o) => &**o,
+            Value::Cell(o) => &**o,
+            Value::Host(o) => &**o,
+            Value::Encoder(o) => &**o,
+            Value::Decoder(o) => &**o,
             _ => return None,
         })
+    }
+
+    /// Returns the header of a container.
+    #[inline]
+    pub fn header(&self) -> Option<Header> {
+        self.container().map(Container::header)
     }
 
     /// Returns whether two values are the same scalar, equal strings, or the same object.
@@ -213,8 +311,8 @@ impl Value {
             (Value::Tag(a), Value::Tag(b)) => a == b,
             (Value::Short(a), Value::Short(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => Arc::ptr_eq(a, b) || a.text == b.text,
-            _ => match (self.slot(), other.slot()) {
-                (Some(a), Some(b)) => a == b,
+            _ => match (self.container(), other.container()) {
+                (Some(a), Some(b)) => std::ptr::addr_eq(a, b),
                 _ => false,
             },
         }
@@ -231,89 +329,50 @@ pub fn store(slot: &mut Value, v: Value) {
     }
 }
 
-/// Moves `fields` onto `stack` if any field can own a container.
-#[inline]
-fn take_fields(fields: &mut Box<[Value]>, stack: &mut Vec<Value>) {
-    if fields.iter().any(|v| v.slot().is_some()) {
-        stack.extend(std::mem::take(fields).into_vec());
-    }
+/// Moves the values of `data` onto `stack`.
+fn take_contents(data: &mut dyn Contents, stack: &mut Vec<Value>) {
+    data.each_mut(&mut |v| {
+        if !v.is_immediate() {
+            stack.push(std::mem::take(v));
+        }
+    });
 }
 
 /// Drops `values` without recursion: each container whose last handle is
-/// dropped moves its children onto the work stack instead of dropping them.
+/// dropped moves its values onto the work stack instead of dropping them.
 pub fn drop_values(mut stack: Vec<Value>) {
+    macro_rules! frozen {
+        ($o:expr) => {
+            if let Some(mut o) = Arc::into_inner($o) {
+                take_contents(&mut o.data, &mut stack);
+            }
+        };
+    }
+    macro_rules! shared {
+        ($o:expr) => {
+            if let Some(o) = Arc::into_inner($o) {
+                take_contents(&mut o.into_inner(), &mut stack);
+            }
+        };
+    }
     while let Some(v) = stack.pop() {
         match v {
-            Value::Struct(o) => {
-                if let Some(mut o) = Arc::into_inner(o) {
-                    take_fields(&mut o.data.fields, &mut stack);
-                }
-            }
-            Value::MutStruct(o) => {
-                if let Some(o) = Arc::into_inner(o) {
-                    take_fields(&mut o.into_inner().fields, &mut stack);
-                }
-            }
-            Value::Variant(o) => {
-                if let Some(mut o) = Arc::into_inner(o) {
-                    take_fields(&mut o.data.fields, &mut stack);
-                }
-            }
-            Value::Closure(o) => {
-                if let Some(mut o) = Arc::into_inner(o) {
-                    take_fields(&mut o.data.captures, &mut stack);
-                }
-            }
-            Value::List(o) => {
-                if let Some(o) = Arc::into_inner(o) {
-                    stack.append(&mut o.into_inner().0);
-                }
-            }
-            Value::Map(o) => {
-                if let Some(o) = Arc::into_inner(o) {
-                    for (k, v) in std::mem::take(&mut o.into_inner().0) {
-                        stack.push(k);
-                        stack.push(v);
-                    }
-                }
-            }
-            Value::Cell(o) => {
-                if let Some(o) = Arc::into_inner(o) {
-                    stack.push(std::mem::take(&mut o.into_inner().0));
-                }
-            }
+            Value::Struct(o) => frozen!(o),
+            Value::Variant(o) => frozen!(o),
+            Value::Closure(o) => frozen!(o),
+            Value::MutStruct(o) => shared!(o),
+            Value::List(o) => shared!(o),
+            Value::Map(o) => shared!(o),
+            Value::Cell(o) => shared!(o),
+            Value::Host(o) => shared!(o),
             other => drop(other),
         }
     }
 }
 
-impl Drop for StructObj {
-    fn drop(&mut self) {
-        let mut stack = Vec::new();
-        take_fields(&mut self.fields, &mut stack);
-        drop_values(stack);
-    }
-}
-
-impl Drop for VariantObj {
-    fn drop(&mut self) {
-        let mut stack = Vec::new();
-        take_fields(&mut self.fields, &mut stack);
-        drop_values(stack);
-    }
-}
-
-impl Drop for ClosureObj {
-    fn drop(&mut self) {
-        let mut stack = Vec::new();
-        take_fields(&mut self.captures, &mut stack);
-        drop_values(stack);
-    }
-}
-
 impl Drop for ListObj {
     fn drop(&mut self) {
-        if self.0.iter().any(|v| v.slot().is_some()) {
+        if self.0.iter().any(|v| v.header().is_some()) {
             drop_values(std::mem::take(&mut self.0));
         }
     }
@@ -321,21 +380,24 @@ impl Drop for ListObj {
 
 impl Drop for MapObj {
     fn drop(&mut self) {
-        if self.0.iter().any(|(k, v)| k.slot().is_some() || v.slot().is_some()) {
-            let mut stack = Vec::with_capacity(self.0.len() * 2);
-            for (k, v) in std::mem::take(&mut self.0) {
-                stack.push(k);
-                stack.push(v);
-            }
-            drop_values(stack);
-        }
+        let mut stack = Vec::new();
+        take_contents(self, &mut stack);
+        drop_values(stack);
     }
 }
 
 impl Drop for CellObj {
     fn drop(&mut self) {
-        if self.0.slot().is_some() {
+        if self.0.header().is_some() {
             drop_values(vec![std::mem::take(&mut self.0)]);
         }
+    }
+}
+
+impl Drop for HostCell {
+    fn drop(&mut self) {
+        let mut stack = Vec::new();
+        take_contents(self, &mut stack);
+        drop_values(stack);
     }
 }

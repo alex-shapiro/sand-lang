@@ -11,146 +11,19 @@
 //! a register, a global, or native code) and is a root. The collector clears
 //! the mutable containers that no root reaches, which breaks every garbage
 //! cycle, because immutable objects alone cannot form a cycle. A mutable
-//! container that native code has locked counts as a root. The collector's
-//! tables grow with the slot table, so a collection never allocates.
+//! container that native code has locked counts as a root, and so does a
+//! container of another engine. The collector's
+//! tables grow with the slot table, so they never allocate during a
+//! collection. Dropping the cleared contents can grow a work stack.
 
 use super::value::*;
 use crate::shared::{Fail, GcPolicy, Limits, Result, ShortStr, Tracker};
 use std::mem::size_of;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 
-/// A `Weak` handle to a registered container.
-enum WeakObj {
-    Struct(Weak<Frozen<StructObj>>),
-    MutStruct(Weak<Shared<StructObj>>),
-    Variant(Weak<Frozen<VariantObj>>),
-    Closure(Weak<Frozen<ClosureObj>>),
-    List(Weak<Shared<ListObj>>),
-    Map(Weak<Shared<MapObj>>),
-    Cell(Weak<Shared<CellObj>>),
-    Host(Weak<Shared<HostBox>>),
-    Encoder(Weak<Shared<super::codec::EncoderObj>>),
-    Decoder(Weak<Shared<super::codec::DecoderObj>>),
-}
-
-/// How a visit of a container's children ended.
-#[derive(PartialEq)]
-enum Visit {
-    Done,
-    /// The container has no strong handles left.
-    Dead,
-    /// Native code holds the container's lock.
-    Locked,
-}
-
-impl WeakObj {
-    fn of(v: &Value) -> Option<WeakObj> {
-        Some(match v {
-            Value::Struct(o) => WeakObj::Struct(Arc::downgrade(o)),
-            Value::MutStruct(o) => WeakObj::MutStruct(Arc::downgrade(o)),
-            Value::Variant(o) => WeakObj::Variant(Arc::downgrade(o)),
-            Value::Closure(o) => WeakObj::Closure(Arc::downgrade(o)),
-            Value::List(o) => WeakObj::List(Arc::downgrade(o)),
-            Value::Map(o) => WeakObj::Map(Arc::downgrade(o)),
-            Value::Cell(o) => WeakObj::Cell(Arc::downgrade(o)),
-            Value::Host(o) => WeakObj::Host(Arc::downgrade(o)),
-            Value::Encoder(o) => WeakObj::Encoder(Arc::downgrade(o)),
-            Value::Decoder(o) => WeakObj::Decoder(Arc::downgrade(o)),
-            _ => return None,
-        })
-    }
-
-    fn strong_count(&self) -> usize {
-        match self {
-            WeakObj::Struct(w) => w.strong_count(),
-            WeakObj::MutStruct(w) => w.strong_count(),
-            WeakObj::Variant(w) => w.strong_count(),
-            WeakObj::Closure(w) => w.strong_count(),
-            WeakObj::List(w) => w.strong_count(),
-            WeakObj::Map(w) => w.strong_count(),
-            WeakObj::Cell(w) => w.strong_count(),
-            WeakObj::Host(w) => w.strong_count(),
-            WeakObj::Encoder(w) => w.strong_count(),
-            WeakObj::Decoder(w) => w.strong_count(),
-        }
-    }
-
-    /// Visits the values that the container holds.
-    fn visit(&self, f: &mut dyn FnMut(&Value)) -> Visit {
-        fn each(values: &[Value], f: &mut dyn FnMut(&Value)) -> Visit {
-            values.iter().for_each(f);
-            Visit::Done
-        }
-        macro_rules! locked {
-            ($w:expr, |$g:ident| $body:expr) => {
-                match $w.upgrade() {
-                    None => Visit::Dead,
-                    Some(o) => match o.try_lock() {
-                        Some($g) => $body,
-                        None => Visit::Locked,
-                    },
-                }
-            };
-        }
-        match self {
-            WeakObj::Struct(w) => w.upgrade().map_or(Visit::Dead, |o| each(&o.data.fields, f)),
-            WeakObj::Variant(w) => w.upgrade().map_or(Visit::Dead, |o| each(&o.data.fields, f)),
-            WeakObj::Closure(w) => w.upgrade().map_or(Visit::Dead, |o| each(&o.data.captures, f)),
-            WeakObj::MutStruct(w) => locked!(w, |g| each(&g.fields, f)),
-            WeakObj::List(w) => locked!(w, |g| each(&g.0, f)),
-            WeakObj::Map(w) => locked!(w, |g| {
-                g.0.iter().for_each(|(k, v)| {
-                    f(k);
-                    f(v);
-                });
-                Visit::Done
-            }),
-            WeakObj::Cell(w) => locked!(w, |g| {
-                f(&g.0);
-                Visit::Done
-            }),
-            WeakObj::Host(w) => locked!(w, |g| {
-                g.visit(f);
-                Visit::Done
-            }),
-            WeakObj::Encoder(w) => w.upgrade().map_or(Visit::Dead, |_| Visit::Done),
-            WeakObj::Decoder(w) => w.upgrade().map_or(Visit::Dead, |_| Visit::Done),
-        }
-    }
-
-    /// Moves the contents out of a mutable container so that its garbage
-    /// cycle falls apart, then drops them.
-    fn clear(&self) {
-        match self {
-            WeakObj::MutStruct(w) => {
-                let fields = w.upgrade().and_then(|o| o.try_lock().map(|mut g| std::mem::take(&mut g.fields)));
-                drop_values(fields.map(Vec::from).unwrap_or_default());
-            }
-            WeakObj::List(w) => {
-                let items = w.upgrade().and_then(|o| o.try_lock().map(|mut g| std::mem::take(&mut g.0)));
-                drop_values(items.unwrap_or_default());
-            }
-            WeakObj::Map(w) => drop(w.upgrade().and_then(|o| o.try_lock().map(|mut g| std::mem::take(&mut *g)))),
-            WeakObj::Cell(w) => {
-                let v = w.upgrade().and_then(|o| o.try_lock().map(|mut g| std::mem::take(&mut g.0)));
-                drop_values(v.into_iter().collect());
-            }
-            WeakObj::Host(w) => {
-                let mut out = Vec::new();
-                if let Some(o) = w.upgrade()
-                    && let Some(mut g) = o.try_lock()
-                {
-                    g.clear(&mut out);
-                }
-                drop_values(out);
-            }
-            WeakObj::Struct(_) | WeakObj::Variant(_) | WeakObj::Closure(_) | WeakObj::Encoder(_) | WeakObj::Decoder(_) => {}
-        }
-    }
-}
-
 struct Entry {
-    weak: Option<WeakObj>,
+    weak: Option<Weak<dyn Container>>,
     /// Tracked bytes of the container, released when the slot is pruned.
     bytes: usize,
 }
@@ -162,11 +35,15 @@ pub const SLOT_BYTES: usize = size_of::<Entry>() + size_of::<i64>() + 2 * size_o
 const DEAD: i64 = i64::MIN;
 const REACHABLE: i64 = i64::MAX;
 
+/// Source of the engine ids in container headers.
+static NEXT_ENGINE: AtomicU32 = AtomicU32::new(0);
+
 pub struct Heap {
     pub tracker: Arc<Tracker>,
     pub policy: GcPolicy,
     /// Tracked byte count at which `reserve` leaves its fast path.
     next_check: usize,
+    engine: u32,
     entries: Vec<Entry>,
     free: Vec<u32>,
     /// Per-slot reference counts during a collection.
@@ -181,6 +58,7 @@ impl Heap {
             tracker: Arc::new(Tracker::new(limits.max_memory)),
             policy: GcPolicy::new(limits),
             next_check: 0,
+            engine: NEXT_ENGINE.fetch_add(1, Ordering::Relaxed),
             entries: Vec::new(),
             free: Vec::new(),
             refs: Vec::new(),
@@ -253,19 +131,21 @@ impl Heap {
         Ok(())
     }
 
-    /// Returns the slot for the next container, whose bytes the caller reserved.
+    /// Returns the header for the next container, whose bytes the caller reserved.
     #[inline(always)]
-    fn next_slot(&mut self) -> u32 {
-        match self.free.last() {
+    fn next_header(&self) -> Header {
+        let slot = match self.free.last() {
             Some(&slot) => slot,
             None => self.entries.len() as u32,
-        }
+        };
+        Header { slot, engine: self.engine }
     }
 
-    /// Registers the container `v` in the slot from [`Heap::next_slot`].
+    /// Registers `container` in the slot from [`Heap::next_header`].
     #[inline(always)]
-    fn register(&mut self, v: &Value, bytes: usize) {
-        let entry = Entry { weak: WeakObj::of(v), bytes };
+    fn register<C: Container + 'static>(&mut self, container: &Arc<C>, bytes: usize) {
+        let weak: Weak<dyn Container> = Arc::downgrade(container) as Weak<C>;
+        let entry = Entry { weak: Some(weak), bytes };
         match self.free.pop() {
             Some(slot) => self.entries[slot as usize] = entry,
             None => {
@@ -276,10 +156,34 @@ impl Heap {
         self.live_containers += 1;
     }
 
-    /// Adds `bytes` to the tracked size of the container in `slot` after it grew.
+    /// Creates an immutable container whose bytes the caller reserved with
+    /// [`Heap::reserve_container`] and [`Heap::frozen_size`].
     #[inline]
-    pub fn grew(&mut self, slot: u32, bytes: usize) {
-        self.entries[slot as usize].bytes += bytes;
+    pub fn insert_frozen<T: FrozenContents>(&mut self, data: T, bytes: usize) -> Arc<Frozen<T>> {
+        let container = Arc::new(Frozen { header: self.next_header(), data });
+        self.register(&container, bytes);
+        container
+    }
+
+    /// Creates a mutable container whose bytes the caller reserved with
+    /// [`Heap::reserve_container`] and [`Heap::shared_size`].
+    #[inline]
+    pub fn insert_shared<T: Contents>(&mut self, data: T, bytes: usize) -> Arc<Shared<T>> {
+        let container = Arc::new(Shared::new(self.next_header(), data));
+        self.register(&container, bytes);
+        container
+    }
+
+    /// Creates a struct, mutable if it has `var` fields.
+    pub fn insert_struct(&mut self, ty: u16, fields: Box<[Value]>, mutable: bool, bytes: usize) -> Value {
+        let data = StructObj { ty, fields };
+        if mutable { Value::MutStruct(self.insert_shared(data, bytes)) } else { Value::Struct(self.insert_frozen(data, bytes)) }
+    }
+
+    /// Adds `bytes` to the tracked size of the container in `header` after its buffer grew.
+    #[inline]
+    pub fn add_container_bytes(&mut self, header: Header, bytes: usize) {
+        self.entries[header.slot as usize].bytes += bytes;
     }
 
     // ---------------------------------------------------------------------
@@ -320,73 +224,6 @@ impl Heap {
         buffer.saturating_add(ARC_COUNTS + size_of::<Shared<T>>())
     }
 
-    /// Creates a struct whose bytes the caller reserved with
-    /// [`Heap::reserve_container`] and [`Heap::frozen_size`] or [`Heap::shared_size`].
-    pub fn insert_struct(&mut self, ty: u16, fields: Box<[Value]>, mutable: bool, bytes: usize) -> Value {
-        let slot = self.next_slot();
-        let obj = StructObj { ty, fields };
-        let v =
-            if mutable { Value::MutStruct(Arc::new(Shared::new(slot, obj))) } else { Value::Struct(Arc::new(Frozen { slot, data: obj })) };
-        self.register(&v, bytes);
-        v
-    }
-
-    pub fn insert_variant(&mut self, tag: u16, fields: Box<[Value]>, bytes: usize) -> Value {
-        let slot = self.next_slot();
-        let v = Value::Variant(Arc::new(Frozen { slot, data: VariantObj { tag, fields } }));
-        self.register(&v, bytes);
-        v
-    }
-
-    pub fn insert_closure(&mut self, func: u16, captures: Box<[Value]>, bytes: usize) -> Value {
-        let slot = self.next_slot();
-        let v = Value::Closure(Arc::new(Frozen { slot, data: ClosureObj { func, captures } }));
-        self.register(&v, bytes);
-        v
-    }
-
-    pub fn insert_list(&mut self, items: Vec<Value>, bytes: usize) -> Value {
-        let slot = self.next_slot();
-        let v = Value::List(Arc::new(Shared::new(slot, ListObj(items))));
-        self.register(&v, bytes);
-        v
-    }
-
-    pub fn insert_map(&mut self, entries: Vec<(Value, Value)>, bytes: usize) -> Value {
-        let slot = self.next_slot();
-        let v = Value::Map(Arc::new(Shared::new(slot, MapObj(entries))));
-        self.register(&v, bytes);
-        v
-    }
-
-    pub fn insert_cell(&mut self, value: Value, bytes: usize) -> Value {
-        let slot = self.next_slot();
-        let v = Value::Cell(Arc::new(Shared::new(slot, CellObj(value))));
-        self.register(&v, bytes);
-        v
-    }
-
-    pub fn insert_host(&mut self, obj: HostBox, bytes: usize) -> Value {
-        let slot = self.next_slot();
-        let v = Value::Host(Arc::new(Shared::new(slot, obj)));
-        self.register(&v, bytes);
-        v
-    }
-
-    pub fn insert_encoder(&mut self, obj: super::codec::EncoderObj, bytes: usize) -> Value {
-        let slot = self.next_slot();
-        let v = Value::Encoder(Arc::new(Shared::new(slot, obj)));
-        self.register(&v, bytes);
-        v
-    }
-
-    pub fn insert_decoder(&mut self, obj: super::codec::DecoderObj, bytes: usize) -> Value {
-        let slot = self.next_slot();
-        let v = Value::Decoder(Arc::new(Shared::new(slot, obj)));
-        self.register(&v, bytes);
-        v
-    }
-
     // ---------------------------------------------------------------------
     // Collection
     // ---------------------------------------------------------------------
@@ -409,7 +246,7 @@ impl Heap {
         let n = self.entries.len();
         self.refs.clear();
         for i in 0..n {
-            let count = self.entries[i].weak.as_ref().map_or(0, WeakObj::strong_count);
+            let count = self.entries[i].weak.as_ref().map_or(0, Weak::strong_count);
             if count == 0 {
                 self.prune(i);
                 self.refs.push(DEAD);
@@ -417,49 +254,53 @@ impl Heap {
                 self.refs.push(count as i64);
             }
         }
-        // Subtract the references that containers hold to each other.
-        let Heap { entries, refs, worklist, .. } = self;
+        // Subtract the references that this engine's containers hold to each other.
         for i in 0..n {
-            if refs[i] == DEAD {
+            if self.refs[i] == DEAD {
                 continue;
             }
-            let weak = entries[i].weak.as_ref().expect("live slot");
-            if weak.visit(&mut |child| {
-                if let Some(slot) = child.slot() {
-                    refs[slot as usize] -= 1;
+            let Some(container) = self.entries[i].weak.as_ref().and_then(Weak::upgrade) else { continue };
+            let (refs, engine) = (&mut self.refs, self.engine);
+            let visited = container.visit(&mut |child| {
+                if let Some(h) = child.header().filter(|h| h.engine == engine) {
+                    refs[h.slot as usize] -= 1;
                 }
-            }) == Visit::Locked
-            {
+            });
+            if !visited {
                 refs[i] = REACHABLE;
             }
         }
         // Mark everything that a root reaches.
-        worklist.clear();
-        for (i, r) in refs.iter_mut().enumerate() {
-            if *r > 0 && *r != DEAD {
-                *r = REACHABLE;
-                worklist.push(i as u32);
+        self.worklist.clear();
+        for i in 0..n {
+            if self.refs[i] > 0 && self.refs[i] != DEAD {
+                self.refs[i] = REACHABLE;
+                self.worklist.push(i as u32);
             }
         }
-        while let Some(i) = worklist.pop() {
-            let weak = entries[i as usize].weak.as_ref().expect("live slot");
-            weak.visit(&mut |child| {
-                if let Some(slot) = child.slot()
-                    && refs[slot as usize] != REACHABLE
+        while let Some(i) = self.worklist.pop() {
+            let Some(container) = self.entries[i as usize].weak.as_ref().and_then(Weak::upgrade) else { continue };
+            let (refs, worklist, engine) = (&mut self.refs, &mut self.worklist, self.engine);
+            container.visit(&mut |child| {
+                if let Some(h) = child.header().filter(|h| h.engine == engine)
+                    && refs[h.slot as usize] != REACHABLE
                 {
-                    refs[slot as usize] = REACHABLE;
+                    refs[h.slot as usize] = REACHABLE;
                     debug_assert!(worklist.len() < worklist.capacity());
-                    worklist.push(slot);
+                    worklist.push(h.slot);
                 }
             });
         }
         // Break the unreachable cycles.
+        let mut cleared = Vec::new();
         for i in 0..n {
-            if refs[i] != REACHABLE
-                && refs[i] != DEAD
-                && let Some(weak) = &entries[i].weak
+            if self.refs[i] != REACHABLE
+                && self.refs[i] != DEAD
+                && let Some(container) = self.entries[i].weak.as_ref().and_then(Weak::upgrade)
             {
-                weak.clear();
+                container.clear(&mut cleared);
+                drop(container);
+                drop_values(std::mem::take(&mut cleared));
             }
         }
         for i in 0..n {

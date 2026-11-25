@@ -375,8 +375,9 @@ pub fn b5_structural<E: ArmEngine>() {
         let mut e: E = engine(Variant::Structural, Limits::default());
         assert_eq!(call_ok(&mut e, "node_roundtrip", &[int(500)]), HostValue::Int(500));
         assert_eq!(call_ok(&mut e, "node_decode", &[Arg::Str(deep_node_json(500))]), HostValue::Int(500));
-        // Dropping a much deeper list must not recurse.
+        // Dropping a much deeper list or host-object chain must not recurse.
         assert_eq!(call_ok(&mut e, "node_depth_of_built", &[int(200_000)]), HostValue::Int(200_000));
+        call_ok(&mut e, "host_chain", &[int(200_000)]);
         e.collect();
     });
 }

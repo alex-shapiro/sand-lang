@@ -99,3 +99,21 @@ fn sexpr_text() {
     native t sexpr.encode a
     ret t
 }
+
+# Builds `n` host objects, each holding the previous one, then drops the chain.
+fn host_chain(n) {
+    none prev
+    int i 0
+    int one 1
+@loop
+    lt c i n
+    jf c @done
+    native h host.new
+    native _ host.set h prev
+    mov prev h
+    add i i one
+    jmp @loop
+@done
+    unit u
+    ret u
+}

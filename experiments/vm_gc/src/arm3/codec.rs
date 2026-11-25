@@ -64,6 +64,16 @@ pub struct DecoderObj {
     walk: DecodeWalk,
 }
 
+impl Contents for EncoderObj {
+    fn each_mut(&mut self, _f: &mut dyn FnMut(&mut Value)) {}
+}
+
+impl Contents for DecoderObj {
+    fn each_mut(&mut self, f: &mut dyn FnMut(&mut Value)) {
+        f(&mut self.input);
+    }
+}
+
 /// Reserves output capacity for `need` more bytes.
 #[inline]
 fn grow_output(heap: &mut Heap, out: &mut String, need: usize) -> Result<()> {
@@ -226,7 +236,7 @@ fn encode_callback<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, func: u16
         None => {
             let bytes = Heap::shared_size::<EncoderObj>(0);
             vm.heap.reserve_container(bytes)?;
-            let e = vm.heap.insert_encoder(EncoderObj { state: None, walk: encode_entry::<W> }, bytes);
+            let e = Value::Encoder(vm.heap.insert_shared(EncoderObj { state: None, walk: encode_entry::<W> }, bytes));
             cx.encoder = Some(e.clone());
             e
         }
@@ -415,7 +425,7 @@ fn decode_list<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, src: &str, p:
         vm.release(items.capacity() * size_of::<Value>());
         return Err(e);
     }
-    Ok(vm.heap.insert_list(items, bytes))
+    Ok(Value::List(vm.heap.insert_shared(ListObj(items), bytes)))
 }
 
 #[inline(never)]
@@ -436,7 +446,7 @@ fn decode_map<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, src: &str, p: 
         vm.release(entries.capacity() * size_of::<(Value, Value)>());
         return Err(e);
     }
-    Ok(vm.heap.insert_map(entries, bytes))
+    Ok(Value::Map(vm.heap.insert_shared(MapObj(entries), bytes)))
 }
 
 /// The object that [`decode_record`] builds.
@@ -497,7 +507,7 @@ fn decode_record<'p, R: FormatReader>(
     let values = values.into_boxed_slice();
     Ok(match record {
         Record::Struct(ty) => vm.heap.insert_struct(ty, values, mutable, bytes),
-        Record::Variant(tag) => vm.heap.insert_variant(tag, values, bytes),
+        Record::Variant(tag) => Value::Variant(vm.heap.insert_frozen(VariantObj { tag, fields: values }, bytes)),
     })
 }
 
@@ -538,7 +548,7 @@ fn decode_enum<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, src: &str, p:
                 vm.release(bytes);
                 return Err(e);
             }
-            vm.heap.insert_variant(variant.tag, fields.into_boxed_slice(), bytes)
+            Value::Variant(vm.heap.insert_frozen(VariantObj { tag: variant.tag, fields: fields.into_boxed_slice() }, bytes))
         }
     };
     cx.reader.close_variant(src, &mut cx.pos)?;
@@ -562,7 +572,7 @@ fn decode_callback<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, func: u16
                 reader: cx.reader,
                 walk: decode_entry::<R>,
             };
-            let d = vm.heap.insert_decoder(obj, bytes);
+            let d = Value::Decoder(vm.heap.insert_shared(obj, bytes));
             cx.decoder = Some(d.clone());
             d
         }

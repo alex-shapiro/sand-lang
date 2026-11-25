@@ -31,7 +31,7 @@ const _: () = assert!(size_of::<Value>() == 16);
 /// A Rust object stored in the heap.
 pub trait HostObject: Any + Send {
     /// Visits every value that the object holds.
-    fn trace(&self, _visit: &mut dyn FnMut(Value)) {}
+    fn trace(&self, visit: &mut dyn FnMut(Value));
 
     /// Bytes owned by the object, counted against the memory limit.
     fn size(&self) -> usize {

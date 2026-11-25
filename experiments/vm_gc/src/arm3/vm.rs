@@ -228,14 +228,14 @@ impl Vm {
     pub fn new_list(&mut self, items: Vec<Value>) -> Result<Value> {
         let bytes = Heap::shared_size::<ListObj>(items.capacity() * size_of::<Value>());
         self.heap.reserve_container(bytes)?;
-        Ok(self.heap.insert_list(items, bytes))
+        Ok(Value::List(self.heap.insert_shared(ListObj(items), bytes)))
     }
 
     /// Creates an empty list with room for `capacity` items.
     pub fn new_list_with_capacity(&mut self, capacity: usize) -> Result<Value> {
         let bytes = Heap::shared_size::<ListObj>(capacity.saturating_mul(size_of::<Value>()));
         self.heap.reserve_container(bytes)?;
-        Ok(self.heap.insert_list(Vec::with_capacity(capacity), bytes))
+        Ok(Value::List(self.heap.insert_shared(ListObj(Vec::with_capacity(capacity)), bytes)))
     }
 
     /// Appends `v` to `list`.
@@ -246,10 +246,10 @@ impl Vm {
         }
     }
 
-    pub fn new_host(&mut self, obj: HostBox) -> Result<Value> {
-        let bytes = Heap::shared_size::<HostBox>(obj.size());
+    pub fn new_host(&mut self, obj: Box<dyn HostObject>) -> Result<Value> {
+        let bytes = Heap::shared_size::<HostCell>(obj.size());
         self.heap.reserve_container(bytes)?;
-        Ok(self.heap.insert_host(obj, bytes))
+        Ok(Value::Host(self.heap.insert_shared(HostCell(obj), bytes)))
     }
 
     pub fn call(&mut self, callee: &Value, args: &[Value]) -> Result<Value> {
@@ -479,7 +479,7 @@ impl Vm {
                         let bytes = Heap::frozen_size::<ClosureObj>(count as usize);
                         self.heap.reserve_container(bytes)?;
                         let captures = take_args!(b, count).into_boxed_slice();
-                        set!(dst, self.heap.insert_closure(func, captures, bytes));
+                        set!(dst, Value::Closure(self.heap.insert_frozen(ClosureObj { func, captures }, bytes)));
                     }
                     Op::Capture { dst, idx } => {
                         let Value::Closure(c) = &self.frames.last().expect("a frame").closure else { return Err(type_error("closure")) };
@@ -490,7 +490,7 @@ impl Vm {
                         let bytes = Heap::shared_size::<CellObj>(0);
                         self.heap.reserve_container(bytes)?;
                         let v = reg!(src).dup();
-                        set!(dst, self.heap.insert_cell(v, bytes));
+                        set!(dst, Value::Cell(self.heap.insert_shared(CellObj(v), bytes)));
                     }
                     Op::CellGet { dst, cell } => {
                         let Value::Cell(c) = &reg!(cell) else { return Err(type_error("cell")) };
@@ -532,7 +532,7 @@ impl Vm {
                         let bytes = Heap::frozen_size::<VariantObj>(count as usize);
                         self.heap.reserve_container(bytes)?;
                         let fields = take_args!(b, count).into_boxed_slice();
-                        set!(dst, self.heap.insert_variant(tag, fields, bytes));
+                        set!(dst, Value::Variant(self.heap.insert_frozen(VariantObj { tag, fields }, bytes)));
                     }
                     Op::VariantIndex { dst, src } => {
                         let tag = match &reg!(src) {
@@ -552,7 +552,7 @@ impl Vm {
                         let bytes = Heap::shared_size::<ListObj>(count as usize * size_of::<Value>());
                         self.heap.reserve_container(bytes)?;
                         let items = take_args!(b, count);
-                        set!(dst, self.heap.insert_list(items, bytes));
+                        set!(dst, Value::List(self.heap.insert_shared(ListObj(items), bytes)));
                     }
                     Op::ListWithCapacity { dst, cap } => {
                         let n = usize::try_from(int!(cap)).map_err(|_| type_error("capacity"))?;
@@ -600,7 +600,7 @@ impl Vm {
                     Op::Map { dst } => {
                         let bytes = Heap::shared_size::<MapObj>(0);
                         self.heap.reserve_container(bytes)?;
-                        set!(dst, self.heap.insert_map(Vec::new(), bytes));
+                        set!(dst, Value::Map(self.heap.insert_shared(MapObj(Vec::new()), bytes)));
                     }
                     Op::MapSet { map, key, value } => {
                         let (k, v) = (reg!(key).dup(), reg!(value).dup());
@@ -833,7 +833,7 @@ pub fn list_push(heap: &mut Heap, list: &Shared<ListObj>, v: Value) -> Result<()
         let grown = (capacity * 2).max(4);
         let bytes = (grown - capacity) * size_of::<Value>();
         heap.reserve(bytes)?;
-        heap.grew(list.slot, bytes);
+        heap.add_container_bytes(list.header, bytes);
         items.0.reserve_exact(grown - len);
     }
     items.0.push(v);
@@ -873,7 +873,7 @@ fn map_set(heap: &mut Heap, fuel: &mut u64, map: &Shared<MapObj>, key: Value, va
         let grown = (capacity * 2).max(2);
         let bytes = (grown - capacity) * size_of::<(Value, Value)>();
         heap.reserve(bytes)?;
-        heap.grew(map.slot, bytes);
+        heap.add_container_bytes(map.header, bytes);
         entries.0.reserve_exact(grown - len);
     }
     entries.0.push((key, value));

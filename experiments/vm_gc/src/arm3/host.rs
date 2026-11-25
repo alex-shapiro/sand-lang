@@ -18,12 +18,8 @@ struct CallbackHost {
 }
 
 impl HostObject for CallbackHost {
-    fn visit(&self, visit: &mut dyn FnMut(&Value)) {
-        visit(&self.callback);
-    }
-
-    fn clear(&mut self, out: &mut Vec<Value>) {
-        out.push(std::mem::take(&mut self.callback));
+    fn values_mut(&mut self, f: &mut dyn FnMut(&mut Value)) {
+        f(&mut self.callback);
     }
 }
 
@@ -44,7 +40,7 @@ fn int_arg(v: &Value) -> Result<i64> {
 fn with_host<T>(v: &Value, f: impl FnOnce(&mut CallbackHost) -> T) -> Result<T> {
     let Value::Host(h) = v else { return Err(type_error("host object")) };
     let mut guard = h.lock()?;
-    let host = (&mut **guard as &mut dyn Any).downcast_mut::<CallbackHost>().ok_or_else(|| type_error("CallbackHost"))?;
+    let host = (&mut *guard.0 as &mut dyn Any).downcast_mut::<CallbackHost>().ok_or_else(|| type_error("CallbackHost"))?;
     Ok(f(host))
 }
 
