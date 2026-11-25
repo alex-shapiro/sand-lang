@@ -1,0 +1,147 @@
+# B3: `Address` and `Status` implement `Encode` and `Decode` in bytecode.
+fn Address.encode(self, enc) {
+    int three 3
+    native _ enc.open_map enc three
+    str k "street"
+    native _ enc.key enc k
+    field v self Address.street
+    native _ enc.str enc v
+    str k "city"
+    native _ enc.key enc k
+    field v self Address.city
+    native _ enc.str enc v
+    str k "zip"
+    native _ enc.key enc k
+    field v self Address.zip
+    isnone c v
+    jf c @some
+    native _ enc.none enc
+    jmp @end
+@some
+    native _ enc.str enc v
+@end
+    native _ enc.close_map enc
+    unit u
+    ret u
+}
+
+fn Address.decode(dec) {
+    native _ dec.open_map dec
+    str street ""
+    str city ""
+    none zip
+    str street_key "street"
+    str city_key "city"
+    str zip_key "zip"
+@keys
+    native k dec.next_key dec
+    isnone c k
+    jt c @done
+    eq c k street_key
+    jf c @not_street
+    native street dec.str dec
+    jmp @keys
+@not_street
+    eq c k city_key
+    jf c @not_city
+    native city dec.str dec
+    jmp @keys
+@not_city
+    eq c k zip_key
+    jf c @skip
+    native null dec.null dec
+    jt null @keys
+    native zip dec.str dec
+    jmp @keys
+@skip
+    native _ dec.skip dec
+    jmp @keys
+@done
+    new a Address street city zip
+    ret a
+}
+
+fn Status.encode(self, enc) {
+    vindex i self
+    int one 1
+    int two 2
+    eq c i one
+    jt c @suspended
+    eq c i two
+    jt c @banned
+    str n "Active"
+    native _ enc.tag enc n
+    jmp @end
+@suspended
+    str n "Suspended"
+    native _ enc.open_variant enc n
+    native _ enc.open_map enc one
+    str k "reason"
+    native _ enc.key enc k
+    vfield r self 0
+    native _ enc.str enc r
+    native _ enc.close_map enc
+    native _ enc.close_variant enc
+    jmp @end
+@banned
+    str n "Banned"
+    native _ enc.open_variant enc n
+    native _ enc.open_list enc two
+    vfield a self 0
+    native _ enc.int enc a
+    vfield b self 1
+    native _ enc.str enc b
+    native _ enc.close_list enc
+    native _ enc.close_variant enc
+@end
+    unit u
+    ret u
+}
+
+fn Status.decode(dec) {
+    native name dec.open_variant dec
+    str s "Active"
+    eq c name s
+    jf c @not_active
+    tag v Status.Active
+    ret v
+@not_active
+    str s "Suspended"
+    eq c name s
+    jf c @not_suspended
+    native _ dec.open_map dec
+    str reason ""
+    str reason_key "reason"
+@keys
+    native k dec.next_key dec
+    isnone c k
+    jt c @suspended_done
+    eq c k reason_key
+    jf c @skip
+    native reason dec.str dec
+    jmp @keys
+@skip
+    native _ dec.skip dec
+    jmp @keys
+@suspended_done
+    native _ dec.close_variant dec
+    variant v Status.Suspended reason
+    ret v
+@not_suspended
+    str s "Banned"
+    eq c name s
+    jf c @unknown
+    native _ dec.open_list dec
+    native _ dec.next_item dec
+    native a dec.int dec
+    native _ dec.next_item dec
+    native b dec.str dec
+    native _ dec.next_item dec
+    native _ dec.close_variant dec
+    variant v Status.Banned a b
+    ret v
+@unknown
+    str m "unknown Status variant"
+    native _ vm.fail m
+    ret m
+}

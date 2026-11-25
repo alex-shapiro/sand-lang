@@ -1,0 +1,29 @@
+[package]
+name = "vm_gc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A standalone prototype outside the SandLang workspace.
+[workspace]
+
+[dependencies]
+itoa = "1"
+ryu = "1"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "footprint"
+path = "src/bin/footprint.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+# Matches the SandLang workspace, whose small-stack tests run at opt-level 1.
+[profile.test]
+opt-level = 1

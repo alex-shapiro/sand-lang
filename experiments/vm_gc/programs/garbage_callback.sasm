@@ -1,0 +1,41 @@
+# B4: `Address.decode` allocates temporary garbage before it decodes.
+fn Address.decode(dec) {
+    int i 0
+    int one 1
+    int count 200
+@garbage
+    lt c i count
+    jf c @decode
+    list x i i i i
+    add i i one
+    jmp @garbage
+@decode
+    native _ dec.open_map dec
+    str street ""
+    str city ""
+    none zip
+    str street_key "street"
+    str city_key "city"
+    str zip_key "zip"
+@keys
+    native k dec.next_key dec
+    isnone c k
+    jt c @done
+    eq c k street_key
+    jf c @not_street
+    native street dec.str dec
+    jmp @keys
+@not_street
+    eq c k city_key
+    jf c @not_city
+    native city dec.str dec
+    jmp @keys
+@not_city
+    native null dec.null dec
+    jt null @keys
+    native zip dec.str dec
+    jmp @keys
+@done
+    new a Address street city zip
+    ret a
+}

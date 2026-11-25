@@ -1,0 +1,43 @@
+# B4: garbage generators and oversized allocations.
+fn make_garbage(k) {
+    int i 0
+    int one 1
+@loop
+    lt c i k
+    jf c @done
+    list x i i i i
+    add i i one
+    jmp @loop
+@done
+    unit u
+    ret u
+}
+
+fn make_cycles(k) {
+    int i 0
+    int one 1
+@loop
+    lt c i k
+    jf c @done
+    list a i i
+    list b a i
+    push a b
+    add i i one
+    jmp @loop
+@done
+    unit u
+    ret u
+}
+
+fn huge_string(n) {
+    str s "x"
+    repeat r s n
+    len l r
+    ret l
+}
+
+fn huge_list(n) {
+    listcap xs n
+    len l xs
+    ret l
+}

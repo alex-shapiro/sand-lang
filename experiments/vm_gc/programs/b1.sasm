@@ -1,0 +1,122 @@
+# B1: pure bytecode workloads. Requires dataset.sasm.
+struct Point { x: int, y: int }
+
+fn score_above(u) {
+    cap threshold 0
+    field s u User.score
+    lt c threshold s
+    ret c
+}
+
+# Builds `n` users, walks their fields, and filters them with a closure.
+fn build_walk(n) {
+    call doc make n
+    field users doc Doc.users
+    len count users
+    int zero 0
+    int one 1
+    float total 0.0
+    int active 0
+    int tags 0
+    int logins 0
+    int cities 0
+    int statuses 0
+    int metas 0
+    tofloat threshold n
+    float quarter 0.25
+    fmul threshold threshold quarter
+    closure pred score_above threshold
+    list high
+    int i 0
+@loop
+    lt c i count
+    jf c @done
+    index u users i
+    field s u User.score
+    fadd total total s
+    field a u User.active
+    jf a @inactive
+    add active active one
+@inactive
+    field t u User.tags
+    len tl t
+    add tags tags tl
+    field l u User.logins
+    index l0 l zero
+    add logins logins l0
+    field ad u User.address
+    field city ad Address.city
+    len cl city
+    add cities cities cl
+    field st u User.status
+    vindex sv st
+    add statuses statuses sv
+    field m u User.meta
+    mapval mv m one
+    add metas metas mv
+    callc keep pred u
+    jf keep @skip
+    push high u
+@skip
+    add i i one
+    jmp @loop
+@done
+    gset out doc
+    len hc high
+    add sum active tags
+    add sum sum logins
+    add sum sum cities
+    add sum sum statuses
+    add sum sum metas
+    add sum sum hc
+    ret sum
+}
+
+fn add_captured(x) {
+    cap k 0
+    add r x k
+    ret r
+}
+
+# Register copies, field reads, list pushes, and closure calls.
+fn micro(iters) {
+    int one 1
+    int two 2
+    int i 0
+    int sum 0
+    new p Point one two
+    int k 3
+    closure f add_captured k
+    list xs
+@loop
+    lt c i iters
+    jf c @done
+    mov a i
+    mov b a
+    field px p Point.x
+    add sum sum px
+    push xs b
+    callc r f b
+    add sum sum r
+    add i i one
+    jmp @loop
+@done
+    gset out xs
+    len n xs
+    add sum sum n
+    ret sum
+}
+
+fn spin() {
+@top
+    jmp @top
+}
+
+struct Small { a: int }
+
+fn decode_small(text) {
+    ty t Small
+    native s json.decode text t
+    field a s Small.a
+    ret a
+}

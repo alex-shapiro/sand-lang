@@ -1,0 +1,20 @@
+# B6: fiber 1 waits in an async native while fiber 2 collects garbage.
+fn holder(i) {
+    native r async.hold_user i
+    ret r
+}
+
+fn churn(k) {
+    int i 0
+    int one 1
+@loop
+    lt c i k
+    jf c @done
+    call u make_user i
+    add i i one
+    jmp @loop
+@done
+    native _ vm.collect
+    unit u
+    ret u
+}

@@ -1,0 +1,68 @@
+# B5: a linked list of nodes.
+struct Node { value: int, next: Node? }
+
+fn build_nodes(n) {
+    none next
+    int i 0
+    int one 1
+@loop
+    lt c i n
+    jf c @done
+    new node Node i next
+    mov next node
+    add i i one
+    jmp @loop
+@done
+    ret next
+}
+
+fn node_depth(node) {
+    int depth 0
+    int one 1
+@loop
+    isnone c node
+    jt c @done
+    add depth depth one
+    field node node Node.next
+    jmp @loop
+@done
+    ret depth
+}
+
+# Encodes, decodes, and re-encodes an `n`-node list; returns the decoded depth
+# if both encodings match, or -1.
+fn node_roundtrip(n) {
+    call node build_nodes n
+    native t json.encode node
+    ty ty Node
+    native back json.decode t ty
+    native t2 json.encode back
+    eq same t t2
+    jf same @mismatch
+    call d node_depth back
+    ret d
+@mismatch
+    int m -1
+    ret m
+}
+
+fn node_encode(n) {
+    call node build_nodes n
+    native t json.encode node
+    len l t
+    ret l
+}
+
+fn node_decode(text) {
+    ty ty Node
+    native back json.decode text ty
+    call d node_depth back
+    ret d
+}
+
+# Builds an `n`-node list and returns its depth. The list becomes garbage.
+fn node_depth_of_built(n) {
+    call node build_nodes n
+    call d node_depth node
+    ret d
+}

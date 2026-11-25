@@ -1,0 +1,38 @@
+# B5: `Node` implements `Encode` and `Decode` by recursing through the codec.
+fn Node.encode(self, enc) {
+    int two 2
+    native _ enc.open_map enc two
+    str k "value"
+    native _ enc.key enc k
+    field v self Node.value
+    native _ enc.int enc v
+    str k "next"
+    native _ enc.key enc k
+    field n self Node.next
+    native _ enc.value enc n
+    native _ enc.close_map enc
+    unit u
+    ret u
+}
+
+fn Node.decode(dec) {
+    native _ dec.open_map dec
+    int value 0
+    none next
+    str value_key "value"
+    ty t Node?
+@keys
+    native k dec.next_key dec
+    isnone c k
+    jt c @done
+    eq c k value_key
+    jf c @next
+    native value dec.int dec
+    jmp @keys
+@next
+    native next dec.value dec t
+    jmp @keys
+@done
+    new node Node value next
+    ret node
+}

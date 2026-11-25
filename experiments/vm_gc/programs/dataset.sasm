@@ -1,0 +1,232 @@
+# The B2 dataset schema and generator, matching benches/codec.rs on origin/main.
+struct Address { street: str, city: str, zip: str? }
+enum Status { Active, Suspended(reason: str), Banned(int, str) }
+struct User { id: int, name: str, email: str, score: float, active: bool, tags: [str], address: Address, status: Status, logins: [int], meta: [str: int] }
+struct Doc { users: [User] }
+global doc
+global text
+global addr
+global atext
+# Keeps a benchmark output alive until `clear_out` so that cleanup is timed separately.
+global out
+
+fn make_user(i) {
+    int zero 0
+    int one 1
+    int two 2
+    int three 3
+    rem m i three
+    eq c m zero
+    jf c @not_active
+    tag status Status.Active
+    jmp @status_done
+@not_active
+    eq c m one
+    jf c @banned
+    str r "r"
+    itos is i
+    concat reason r is
+    variant status Status.Suspended reason
+    jmp @status_done
+@banned
+    str b "b"
+    variant status Status.Banned i b
+@status_done
+    int four 4
+    rem m i four
+    eq c m zero
+    jf c @has_zip
+    none zip
+    jmp @zip_done
+@has_zip
+    int thousand 1000
+    rem m i thousand
+    itos ms m
+    str z "0"
+    concat zip z ms
+@zip_done
+    itos is i
+    str main_st " Main St"
+    concat street is main_st
+    str city "Springfield"
+    new address Address street city zip
+    str user_ "user "
+    concat name user_ is
+    str u "u"
+    str at "@example.com"
+    concat email u is
+    concat email email at
+    tofloat fi i
+    float half 0.5
+    fmul score fi half
+    rem m i two
+    eq active m zero
+    str a "a"
+    str b_ "b"
+    int five 5
+    rem m i five
+    itos ms m
+    concat tag2 b_ ms
+    list tags a tag2
+    add i1 i one
+    add i2 i two
+    list logins i i1 i2
+    map meta
+    str k "k"
+    mapset meta k i
+    str j "j"
+    mul i2x i two
+    mapset meta j i2x
+    new user User i name email score active tags address status logins meta
+    ret user
+}
+
+fn make(n) {
+    list users
+    int i 0
+    int one 1
+@loop
+    lt c i n
+    jf c @done
+    call user make_user i
+    push users user
+    add i i one
+    jmp @loop
+@done
+    new doc Doc users
+    ret doc
+}
+
+fn make_address() {
+    str street "1 Main St"
+    str city "Springfield"
+    str zip "01234"
+    new a Address street city zip
+    ret a
+}
+
+fn setup_doc(n) {
+    call d make n
+    gset doc d
+    unit u
+    ret u
+}
+
+fn setup_text(n) {
+    call d make n
+    native t json.encode d
+    gset text t
+    unit u
+    ret u
+}
+
+fn setup_address() {
+    call a make_address
+    gset addr a
+    native t json.encode a
+    gset atext t
+    unit u
+    ret u
+}
+
+fn encode_doc() {
+    gget d doc
+    native t json.encode d
+    ret t
+}
+
+fn bench_encode() {
+    gget d doc
+    native t json.encode d
+    len n t
+    ret n
+}
+
+fn bench_decode() {
+    gget t text
+    ty ty Doc
+    native d json.decode t ty
+    gset out d
+    field users d Doc.users
+    len n users
+    int one 1
+    sub n n one
+    index u users n
+    field id u User.id
+    ret id
+}
+
+fn roundtrip_text() {
+    gget t text
+    ty ty Doc
+    native d json.decode t ty
+    native t2 json.encode d
+    ret t2
+}
+
+fn bench_small_encode(iters) {
+    gget a addr
+    int i 0
+    int one 1
+    int total 0
+@loop
+    lt c i iters
+    jf c @done
+    native t json.encode a
+    len n t
+    add total total n
+    add i i one
+    jmp @loop
+@done
+    ret total
+}
+
+fn bench_small_decode(iters) {
+    gget t atext
+    ty ty Address
+    int i 0
+    int one 1
+    int total 0
+@loop
+    lt c i iters
+    jf c @done
+    native a json.decode t ty
+    field city a Address.city
+    len n city
+    add total total n
+    add i i one
+    jmp @loop
+@done
+    ret total
+}
+
+# Decodes `text` as type `ty` and encodes the result again.
+fn reencode(text, ty) {
+    native v json.decode text ty
+    native t json.encode v
+    ret t
+}
+
+fn clear_globals() {
+    unit u
+    gset doc u
+    gset text u
+    gset addr u
+    gset atext u
+    ret u
+}
+
+fn clear_out() {
+    unit u
+    gset out u
+    ret u
+}
+
+fn roundtrip_text_of_doc() {
+    gget d doc
+    native t json.encode d
+    ty ty Doc
+    native back json.decode t ty
+    native t2 json.encode back
+    ret t2
+}

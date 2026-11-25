@@ -1,0 +1,84 @@
+# B8: host integrations.
+fn double_and_shrink(x) {
+    cap xs 0
+    int three 3
+    len n xs
+    lt c three n
+    jf c @keep
+    pop _ xs
+@keep
+    int zero 0
+    setindex xs zero x
+    int two 2
+    mul r x two
+    ret r
+}
+
+# Maps [1, 2, 3, 4] with a closure that shrinks the list on its first call.
+# Returns the sum of the mapped list times 100 plus the final input length.
+fn map_mutating() {
+    int one 1
+    int two 2
+    int three 3
+    int four 4
+    list xs one two three four
+    closure f double_and_shrink xs
+    native ys list.map xs f
+    len n ys
+    int i 0
+    int sum 0
+@loop
+    lt c i n
+    jf c @done
+    index y ys i
+    add sum sum y
+    add i i one
+    jmp @loop
+@done
+    int hundred 100
+    mul sum sum hundred
+    len xn xs
+    add sum sum xn
+    ret sum
+}
+
+fn fire_self(x) {
+    cap h 0
+    native calls host.calls h
+    add r x calls
+    ret r
+}
+
+# Stores a closure that captures its host object in that host object, then
+# fires it twice. The host object and closure become a garbage cycle.
+fn host_cycle() {
+    native h host.new
+    closure f fire_self h
+    native _ host.set h f
+    int five 5
+    native a host.fire h five
+    native b host.fire h five
+    add r a b
+    ret r
+}
+
+fn sexpr_roundtrip() {
+    gget d doc
+    native t sexpr.encode d
+    ty ty Doc
+    native back sexpr.decode t ty
+    native t2 sexpr.encode back
+    eq same t t2
+    jf same @mismatch
+    len l t
+    ret l
+@mismatch
+    int m -1
+    ret m
+}
+
+fn sexpr_text() {
+    call a make_address
+    native t sexpr.encode a
+    ret t
+}
