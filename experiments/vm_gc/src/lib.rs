@@ -4,4 +4,5 @@
 #![forbid(unsafe_code)]
 
 pub mod arm1;
+pub mod arm3;
 pub mod shared;

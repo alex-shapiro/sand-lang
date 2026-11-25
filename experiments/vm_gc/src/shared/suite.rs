@@ -257,6 +257,7 @@ pub fn b4_oversized<E: ArmEngine>() {
     let limits = Limits { max_memory: B4_MAX_MEMORY, fuel: u64::MAX, gc_min_threshold: 4 << 20 };
     let mut e: E = engine(Variant::Structural, limits);
     call_ok(&mut e, "huge_string", &[int(1000)]);
+    call_ok(&mut e, "huge_list", &[int(10)]);
     let before = e.stats().tracked_bytes;
     assert_eq!(e.call("huge_string", &[int(B4_MAX_MEMORY as i64 + 1)]), Err(Fail::OutOfMemory));
     assert_eq!(e.call("huge_list", &[int((B4_MAX_MEMORY / 16) as i64 + 1)]), Err(Fail::OutOfMemory));

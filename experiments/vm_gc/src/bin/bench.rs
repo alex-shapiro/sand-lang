@@ -24,4 +24,5 @@ fn main() {
     println!("ns per item: fastest of {runs} engines x {reps} repetitions");
     println!("{:<5} {:<3} {:<13} {:>9} {:>9} {:>9}", "arm", "", "operation", "op", "cleanup", "total");
     arm::<vm_gc::arm1::Engine>(runs, reps, &filter);
+    arm::<vm_gc::arm3::Engine>(runs, reps, &filter);
 }
