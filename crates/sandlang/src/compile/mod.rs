@@ -2746,12 +2746,9 @@ impl<'a> Compiler<'a> {
         let cp = self.cp;
         let imp = &cp.impls[impl_id as usize];
         let builds_values = cp.traits[imp.trait_ref.trait_id as usize].structural == Some(StructView::Constructor);
-        let structural: &'a StructuralImpl = match imp.structural.as_deref() {
-            Some(c) => c,
-            None => {
-                self.errors.push(Diag::error(imp.span, "internal error: a structural impl has no parts"));
-                return Shape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None, slot_index: None };
-            }
+        let Some(structural): Option<&'a StructuralImpl> = imp.structural.as_deref() else {
+            self.errors.push(Diag::error(imp.span, "internal error: a structural impl has no parts"));
+            return Shape { kind: ShapeKind::Never, parts: Vec::new(), fills: Vec::new(), init: None, slot_index: None };
         };
         let parts = structural.parts.iter().map(|dict_expr| self.part_template(dict_expr)).collect();
         let kind = match cp.arena.get(imp.target) {
@@ -2768,40 +2765,29 @@ impl<'a> Compiler<'a> {
             Ty::Set(_) => ShapeKind::Set,
             Ty::Map(..) => ShapeKind::Map,
             Ty::Tuple(_) => ShapeKind::Tuple,
-            Ty::Named(def_id, _) => {
-                let def = &cp.types[def_id as usize];
-                match &def.kind {
-                    _ if def_id == cp.wk.option => ShapeKind::Option,
-                    TypeDefKind::Opaque(Opaque::Value(info)) => ShapeKind::Native(def_id, info.parse),
-                    TypeDefKind::Enum { .. } => {
-                        let first_variant = self.prog.variants.iter().position(|v| v.def == def_id).unwrap_or(0) as u32;
-                        ShapeKind::Enum { def: def_id, first_variant }
-                    }
-                    _ => ShapeKind::Struct(def_id),
+            Ty::Named(def_id, _) if def_id == cp.wk.option => ShapeKind::Option,
+            Ty::Named(def_id, _) => match &cp.types[def_id as usize].kind {
+                TypeDefKind::Opaque(Opaque::Value(info)) => ShapeKind::Native(def_id, info.parse),
+                TypeDefKind::Enum { .. } => {
+                    let first_variant = self.prog.variants.iter().position(|v| v.def == def_id).unwrap_or(0) as u32;
+                    ShapeKind::Enum { def: def_id, first_variant }
                 }
-            }
+                _ => ShapeKind::Struct(def_id),
+            },
             _ => {
                 self.errors.push(Diag::error(imp.span, "internal error: a structural impl has a type without a shape"));
                 ShapeKind::Never
             }
         };
-        let field_consts: Vec<Option<&crate::types::ConstVal>> = match &kind {
-            ShapeKind::Struct(def_id) if structural.init.is_none() => {
-                cp.types[*def_id as usize].fields().iter().map(|f| f.const_default.as_deref()).collect()
-            }
-            _ => Vec::new(),
-        };
         let fills = structural
             .fills
             .iter()
-            .enumerate()
-            .map(|(i, fill)| match (field_consts.get(i).copied().flatten(), fill) {
-                (Some(c), _) | (None, StructuralFill::Const(c)) => PartFill::Const(c.clone()),
-                (None, StructuralFill::Helper(helper, dicts)) => {
+            .map(|fill| match fill {
+                StructuralFill::Helper(helper, dicts) => {
                     let dicts = dicts.iter().map(|dict_expr| self.part_template(dict_expr)).collect();
                     PartFill::Call(self.fn_const(*helper), dicts)
                 }
-                (None, StructuralFill::Required) => PartFill::Required,
+                StructuralFill::Required => PartFill::Required,
             })
             .collect();
         let init = structural.init.as_ref().map(|(func, dicts)| {

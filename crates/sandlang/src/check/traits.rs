@@ -603,6 +603,11 @@ impl Checker {
         for other in self.impls_by.get(&key).map(|v| v.to_vec()).unwrap_or_default() {
             if self.impls_overlap(trait_ref, &generics, other) {
                 if self.impls[other as usize].module == self.cur_mod && self.defined_by_earlier_input(self.impls[other as usize].span) {
+                    if self.impls[other as usize].derived && self.is_structural_impl(other) {
+                        // Earlier session structs may already cache this derived impl in their shapes.
+                        self.error(span, format!("an impl of {} must be declared in the same input as its type", shown(self)));
+                        return None;
+                    }
                     // Replace an overlapping `impl` from an earlier REPL input.
                     remove_impl(&mut self.impls_by, &key, other);
                     remove_impl(&mut self.impls_by_ctor, &(ctor, arity), other);

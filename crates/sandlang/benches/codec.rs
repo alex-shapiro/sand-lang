@@ -55,7 +55,7 @@ struct Operation {
 
 const DOC: &str = "let doc = make({n})\n";
 const DOC_TEXT: &str = "let text = json.encode(make({n}))?\n";
-const DOC_JSON: &str = "let value = json.to_json(make({n}))\n";
+const DOC_JSON: &str = "let value = json.to_json(make({n}))?\n";
 const ADDRESS: &str = "let addr = Address(street: \"1 Main St\", city: \"Springfield\", zip: Some(\"01234\"))\n";
 const ADDRESS_TEXT: &str = "let atext = json.encode(Address(street: \"1 Main St\", city: \"Springfield\", zip: Some(\"01234\")))?\n";
 const DEEP: &str = r#"var nested = json.Json.Int(1)
@@ -83,7 +83,7 @@ const OPERATIONS: &[Operation] = &[
 }"#,
         runs_per_call: None,
     },
-    Operation { name: "to_json", inputs: DOC, closure: "() => [json.to_json(doc)].len()", runs_per_call: None },
+    Operation { name: "to_json", inputs: DOC, closure: "() => [json.to_json(doc).unwrap()].len()", runs_per_call: None },
     Operation {
         name: "decode_json",
         inputs: DOC_TEXT,
@@ -115,7 +115,7 @@ const OPERATIONS: &[Operation] = &[
         closure: r#"() => {
     var t = 0
     for _ in 0..20000 {
-        t += [json.to_json(addr)].len()
+        t += [json.to_json(addr).unwrap()].len()
     }
     t
 }"#,
@@ -197,10 +197,10 @@ let text = json.encode(doc)?
 let p: json.Json = json.decode(text).unwrap()
 let t: Doc = json.decode(text).unwrap()
 let pretty: Doc = json.decode(json.encode(doc, indent: 2)?).unwrap()
-print("check json.decode(text) == json.to_json(doc): \(p == json.to_json(doc))")
+print("check json.decode(text) == json.to_json(doc): \(p == json.to_json(doc)?)")
 print("check json.decode(text) == doc: \(t == doc)")
 print("check json.decode(indented text) == doc: \(pretty == doc)")
-print("check host.json_members(json.to_json(doc)) == 1: \(host.json_members(json.to_json(doc)) == 1)")
+print("check host.json_members(json.to_json(doc)) == 1: \(host.json_members(json.to_json(doc)?) == 1)")
 print("check host.copied_fields(doc) == 1: \(host.copied_fields(doc) == 1)")
 print("check text length: \(text.len())")
 "#;

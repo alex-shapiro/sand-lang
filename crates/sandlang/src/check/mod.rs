@@ -1933,6 +1933,33 @@ impl Checker {
                 }
                 ConstVal::Variant(rt_id, out)
             }
+            (value, Ty::Named(def, _)) if self.matches_type_name(def, "json.Json") => {
+                let tag = |checker: &Self, name: &str| {
+                    checker.types[def as usize].variants().iter().find(|v| checker.name(v.name) == name).map(|v| v.rt_id)
+                };
+                match value {
+                    Value::Unit => ConstVal::Variant(tag(self, "Null")?, vec![]),
+                    Value::Bool(b) => ConstVal::Variant(tag(self, "Bool")?, vec![ConstVal::Bool(*b)]),
+                    Value::Int(i) => ConstVal::Variant(tag(self, "Int")?, vec![ConstVal::Int(*i)]),
+                    Value::Float(f) => ConstVal::Variant(tag(self, "Float")?, vec![ConstVal::Float(*f)]),
+                    Value::Str(s) => ConstVal::Variant(tag(self, "Str")?, vec![ConstVal::Str(s.clone())]),
+                    Value::List(items) => {
+                        let arr_id = tag(self, "Arr")?;
+                        let items = items.iter().map(|item| self.resolve_const_val(item, ty)).collect::<Option<_>>()?;
+                        ConstVal::Variant(arr_id, vec![ConstVal::List(items)])
+                    }
+                    Value::Map(entries) => {
+                        let obj_id = tag(self, "Obj")?;
+                        let mut out = Vec::with_capacity(entries.len());
+                        for (key, value) in entries {
+                            let Value::Str(key) = key else { return None };
+                            out.push((ConstVal::Str(key.clone()), self.resolve_const_val(value, ty)?));
+                        }
+                        ConstVal::Variant(obj_id, vec![ConstVal::Map(out)])
+                    }
+                    _ => return None,
+                }
+            }
             _ => return None,
         })
     }
@@ -2417,11 +2444,23 @@ impl Checker {
             if self.diags.len() > mark {
                 return accepted_dicts;
             }
+            let mut seen_encoded = false;
             for (ast_param, rust_ty) in f.params.iter().zip(value_params) {
-                if matches!(rust_ty, Type::Encoded(_)) && ast_param.default.is_some() {
+                if matches!(rust_ty, Type::Encoded(_)) {
+                    seen_encoded = true;
+                    if ast_param.default.is_some() {
+                        self.error(
+                            span,
+                            format!("{owner} cannot use `Encoded` on parameter `{}` because it has a default value", ast_param.name.name),
+                        );
+                    }
+                } else if seen_encoded && ast_param.default.as_ref().is_some_and(|d| closed_const(d).is_none()) {
                     self.error(
                         span,
-                        format!("{owner} cannot use `Encoded` on parameter `{}` because it has a default value", ast_param.name.name),
+                        format!(
+                            "{owner} cannot use a computed default on parameter `{}` after an `Encoded` parameter",
+                            ast_param.name.name
+                        ),
                     );
                 }
             }
@@ -2841,7 +2880,7 @@ impl Checker {
                 DefaultRule::None => false,
             };
             if let Some(d) = p.default.as_ref().filter(kept) {
-                let default = if closed_const(d).is_some() {
+                let default = if closed_const(d).is_some() && !(f.name.name == "init" && self_ty.is_some()) {
                     DefaultArg::Inline(Arc::new(d.clone()))
                 } else {
                     let helper_params: Vec<ParamSig> = self.fns[id as usize].params[..i].to_vec();

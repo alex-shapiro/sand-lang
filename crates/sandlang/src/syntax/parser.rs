@@ -1993,7 +1993,10 @@ fn expand_data(mac: &DataMacro, d: &Data) -> Expr {
     };
     match d {
         Data::Null(_) => path(mac.null),
-        Data::Value(e) => call(path(mac.value), e.clone()),
+        Data::Value(e) => {
+            let receiver = Box::new(call(path(mac.value), e.clone()));
+            Expr { kind: ExprKind::MethodCall { receiver, method: Ident { name: "unwrap".to_string(), span }, args: vec![] }, span }
+        }
         Data::List(xs, _) => call(path(mac.list), Expr { kind: ExprKind::List(xs.iter().map(|x| expand_data(mac, x)).collect()), span }),
         Data::Object(kvs, _) => {
             let pairs = kvs.iter().map(|(k, v)| (k.clone(), expand_data(mac, v))).collect();

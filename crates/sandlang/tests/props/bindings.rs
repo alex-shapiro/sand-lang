@@ -374,7 +374,7 @@ proptest! {
         m.function("make", move || made.clone());
         let src = format!(
             "import doc\nimport json\nlet j = doc.make()\nlet back = json.parse(json.encode(j, indent: {indent})?)?\nprint(back == j)\n\
-             print(json.to_json(j) == j)\ndoc.keep(back)\nlet d: json.Json = json.decode(json.encode(j)?)?\ndoc.keep(d)"
+             print(json.to_json(j)? == j)\ndoc.keep(back)\nlet d: json.Json = json.decode(json.encode(j)?)?\ndoc.keep(d)"
         );
         let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");

@@ -444,7 +444,7 @@ impl<const N: u8> crate::native::convert::FromVmValue for Encoded<N> {
 ///
 /// A `VmVal` is valid only until the call returns or suspends. Garbage
 /// collection during a wait can free an unrooted heap object. `VmVal`,
-/// [`Param`], [`Num`], and [`Reflect`] are therefore `!Send`. The compiler
+/// [`Param`], [`Num`], and [`TraitDict`] are therefore `!Send`. The compiler
 /// rejects these VM handles in three places:
 ///
 /// - a [`NativeObject`](super::NativeObject)

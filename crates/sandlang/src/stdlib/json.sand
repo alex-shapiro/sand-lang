@@ -174,5 +174,5 @@ pub native fn decode<T: Decode>(text: str) -> Result<T>
 /// Converts `value` into a `Json` value with the same representation as
 /// `encode`.
 ///
-/// Aborts with the error that `encode(value)` would return.
-pub native fn to_json<T: Encode>(value: T) -> Json
+/// Fails with the same errors as `encode`.
+pub native fn to_json<T: Encode>(value: T) -> Result<Json>

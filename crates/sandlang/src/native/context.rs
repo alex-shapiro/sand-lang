@@ -65,7 +65,7 @@ pub struct NativeContext {
 ///
 /// Read it back from the same context with `value()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RootedValue(u32);
+pub struct RootedValue(pub(crate) u32);
 
 /// State shared between a [`NativeContext`] and the scheduler.
 #[derive(Default)]
@@ -337,6 +337,11 @@ impl<'a> CallContext<'a> {
         CallContext { vm, fiber, roots_start, callback_state: None, run_ending: None }
     }
 
+    #[cold]
+    pub(crate) fn collect_garbage(&mut self) {
+        self.vm.collect_all_garbage(Some(self.fiber));
+    }
+
     /// Returns shared read access to the [`Vm`].
     ///
     /// Use [`CallContext::step`] for `&mut Vm` and [`CallContext::root`] to
@@ -409,15 +414,6 @@ impl<'a> CallContext<'a> {
     /// fails immediately with an `"invalid"` error.
     pub fn to_value<const N: u8>(&mut self, value: VmValue, encode_dict: TraitDict<N, traits::Encode>) -> Result<Value, HostError<Fail>> {
         crate::stdlib::codec::to_value(self, value, encode_dict.raw())
-    }
-
-    /// Decodes host `value` into a Sand value using `decode_dict`.
-    ///
-    /// Runs custom Sand `Decode.decode` methods, `init` constructors, and
-    /// computed defaults synchronously. The returned [`VmValue`] stays valid
-    /// until the next `call` or `step`.
-    pub fn from_value<const N: u8>(&mut self, value: Value, decode_dict: TraitDict<N, traits::Decode>) -> Result<VmValue, HostError<Fail>> {
-        crate::stdlib::codec::from_value(self, value, decode_dict.raw())
     }
 
     /// Calls Sand function `callee` with `args` on the calling task.

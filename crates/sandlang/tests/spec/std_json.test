@@ -122,7 +122,7 @@ for _ in 0..511 {
 }
 print(json.parse(json.encode(a)?)? == a)
 print(json.parse(json.encode(o)?)? == o)
-print(json.to_json(a) == a)
+print(json.to_json(a)? == a)
 --- stdout
 true
 true
@@ -149,8 +149,8 @@ for _ in 0..170 {
     t = T.Wrap([t])
 }
 let text = json.encode(t)?
-print(json.encode(json.to_json(t))? == text)
-print(json.parse(text)? == json.to_json(t))
+print(json.encode(json.to_json(t)?)? == text)
+print(json.parse(text)? == json.to_json(t)?)
 --- stdout
 true
 true
@@ -165,7 +165,7 @@ var t = T.Leaf(x: 1)
 for _ in 0..170 {
     t = T.Wrap([t])
 }
-print(json.to_json([t]))
+print(json.to_json([t])?)
 --- fail
 value too deeply nested to encode or decode
 
@@ -301,7 +301,7 @@ let r: Range = json.decode("{\"end\": 3, \"start\": 1, \"step\": 9}")?
 print(r)
 let i: Range = json.decode(json.encode(0..=0)?)?
 print(i)
-print(json.to_json(0..2))
+print(json.to_json(0..2)?)
 let bad: Result<Range> = json.decode("{\"start\": 1}")
 print(bad)
 --- stdout
@@ -361,10 +361,12 @@ true
 
 === to_json
 import json
-let j = json.to_json(["a": [1, 2]])
+let j = json.to_json(["a": [1, 2]])?
 print(j.path("a.1"))
+print(json.to_json(0.0 / 0.0))
 --- stdout
 Some(Int(2))
+Err(Error(message: "JSON cannot represent the float NaN", kind: "invalid"))
 
 === json values print readably
 import json
@@ -428,7 +430,7 @@ let xs: Result<[int?]> = json.decode("[1, null, 3]")
 print(xs)
 let sh: Result<Shape> = json.decode(r#"{"Nested": [{"Circle": [2.0]}]}"#)
 print(sh)
-print(json.to_json(Some([1, 2])))
+print(json.to_json(Some([1, 2]))?)
 --- stdout
 {"name":"d","tag":"t","shape":{"Nested":[{"Circle":[1.5]}]},"shapes":[{"Label":["x"]},{"Pair":[1,2]},"Empty",{"Nested":["Empty"]}],"count":null,"flags":[true,null]}
 Ok(Doc(name: "d", tag: Some("t"), shape: Nested(Circle(1.5)), shapes: [Label("x"), Pair(1, 2), Empty, Nested(Empty)], count: None, flags: [Some(true), None]))
@@ -524,6 +526,11 @@ let a = yaml!({})
 let a = json!({"f": (x: int) => x})
 --- error
 1: fn(int) -> int does not implement `Encode`
+
+=== json macro fails the run on non-finite float
+let _ = json!({"x": 0.0 / 0.0})
+--- fail
+JSON cannot represent the float NaN
 
 === encode rejects functions at compile time
 import json

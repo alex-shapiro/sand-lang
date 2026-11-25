@@ -45,7 +45,6 @@ impl<T> Default for StructuralImpl<T> {
 pub enum StructuralFill<T> {
     /// Input must supply a value unless the target type is `Option`.
     Required,
-    Const(ConstVal),
     /// Default helper function and its required dictionaries.
     Helper(FnId, Vec<T>),
 }
@@ -53,9 +52,9 @@ pub enum StructuralFill<T> {
 impl<T> StructuralImpl<T> {
     /// Iterates over all dictionary entries across parts, default helpers, and `init`.
     fn dicts(&self) -> impl Iterator<Item = &T> {
-        let fills = self.fills.iter().flat_map(|f| match f {
+        let fills = self.fills.iter().flat_map(|fill| match fill {
             StructuralFill::Helper(_, dicts) => dicts.as_slice(),
-            _ => &[],
+            StructuralFill::Required => &[],
         });
         self.parts.iter().chain(fills).chain(self.init.iter().flat_map(|(_, dicts)| dicts))
     }
@@ -66,8 +65,7 @@ impl<T> StructuralImpl<T> {
             .into_iter()
             .map(|fill| match fill {
                 StructuralFill::Required => StructuralFill::Required,
-                StructuralFill::Const(c) => StructuralFill::Const(c),
-                StructuralFill::Helper(h, dicts) => StructuralFill::Helper(h, dicts.into_iter().map(&mut *f).collect()),
+                StructuralFill::Helper(helper, dicts) => StructuralFill::Helper(helper, dicts.into_iter().map(&mut *f).collect()),
             })
             .collect();
         let parts = self.parts.into_iter().map(&mut *f).collect();
@@ -162,26 +160,27 @@ impl Checker {
     fn init_matches_fields(&mut self, def_id: TypeDefId) -> bool {
         let Some(init) = self.init_method(Ctor::Def(def_id)) else { return true };
         let (init_fn, def) = (self.fns[init as usize].clone(), self.types[def_id as usize].clone());
+        let Some(init_generics) = init_param_order(&self.arena, &init_fn) else { return false };
         let fields = def.fields();
         let type_params: Vec<TypeId> = def.generics.iter().map(|&p| self.arena.param(p)).collect();
-        init_fn.generics.len() == def.generics.len()
+        init_generics.len() == def.generics.len()
             && init_fn.params.len() == fields.len()
-            && init_fn.params.iter().all(|p| {
-                let ty = self.arena.instantiate(p.ty, &init_fn.generics, &type_params);
-                fields.iter().any(|f| p.name == f.name && ty == f.ty)
+            && init_fn.params.iter().all(|param| {
+                let param_ty = self.arena.instantiate(param.ty, &init_generics, &type_params);
+                fields.iter().any(|field| param.name == field.name && param_ty == field.ty)
             })
     }
 
     fn add_structural_impl(&mut self, trait_ref: TraitRef, def_id: TypeDefId) -> ImplId {
         let old_generics = self.types[def_id as usize].generics.clone();
         let mut generics = Vec::with_capacity(old_generics.len());
-        for &p in &old_generics {
-            generics.push(self.new_param(self.params[p as usize].name));
+        for &param in &old_generics {
+            generics.push(self.new_param(self.params[param as usize].name));
         }
-        let args: Vec<TypeId> = generics.iter().map(|&p| self.param_ty(p)).collect();
+        let args: Vec<TypeId> = generics.iter().map(|&param| self.param_ty(param)).collect();
         let mut evidence = Vec::new();
-        for (&old_p, (&new_p, &arg_ty)) in old_generics.iter().zip(generics.iter().zip(&args)) {
-            let bounds: Vec<TraitRef> = self.params[old_p as usize]
+        for (&old_param, (&new_param, &arg_ty)) in old_generics.iter().zip(generics.iter().zip(&args)) {
+            let bounds: Vec<TraitRef> = self.params[old_param as usize]
                 .traits
                 .clone()
                 .into_iter()
@@ -190,7 +189,7 @@ impl Checker {
             for &bound in &bounds {
                 evidence.push((arg_ty, bound));
             }
-            self.params[new_p as usize].traits = bounds;
+            self.params[new_param as usize].traits = bounds;
         }
         let target = self.arena.named(def_id, &args);
         let (module, span) = (self.types[def_id as usize].module, self.types[def_id as usize].span);
@@ -264,10 +263,10 @@ impl Checker {
         let mut dependent_candidates: HashMap<TypeDefId, Vec<usize>> = HashMap::new();
         for (i, &impl_id) in impl_ids.iter().enumerate() {
             let imp = self.impls[impl_id as usize].clone();
-            for &(t, _) in self.unresolved_structural(&imp).unwrap_or_default().dicts() {
-                self.arena.any(t, &mut |x| {
-                    if let Ty::Named(d, _) = x {
-                        let users = dependent_candidates.entry(d).or_default();
+            for &(ty, _) in self.unresolved_structural(&imp).unwrap_or_default().dicts() {
+                self.arena.any(ty, &mut |sub| {
+                    if let Ty::Named(def_id, _) = sub {
+                        let users = dependent_candidates.entry(def_id).or_default();
                         if users.last() != Some(&i) {
                             users.push(i);
                         }
@@ -304,13 +303,13 @@ impl Checker {
                         let imp = &self.impls[impl_id as usize];
                         (imp.target, imp.trait_ref, imp.span)
                     };
-                    if let Ty::Named(d, _) = self.arena.get(target) {
+                    if let Ty::Named(def_id, _) = self.arena.get(target) {
                         if let Some(reason) = &reason {
-                            self.structural_failure_reasons.insert((trait_ref.trait_id, d), reason.as_str().into());
+                            self.structural_failure_reasons.insert((trait_ref.trait_id, def_id), reason.as_str().into());
                         }
-                        if self.types[d as usize].native_derives.is_some() {
+                        if self.types[def_id as usize].native_derives.is_some() {
                             let trait_name = self.show_trait(&trait_ref);
-                            let type_name = self.name(self.types[d as usize].name).to_string();
+                            let type_name = self.name(self.types[def_id as usize].name).to_string();
                             let msg = match reason {
                                 Some(why) => format!("native type `{type_name}` cannot derive `{trait_name}`: {why}"),
                                 None => format!("native type `{type_name}` cannot derive `{trait_name}`"),
@@ -322,8 +321,8 @@ impl Checker {
                     true
                 }
             };
-            if changed && let Ty::Named(d, _) = self.arena.get(self.impls[impl_id as usize].target) {
-                for &candidate_idx in dependent_candidates.get(&d).map(Vec::as_slice).unwrap_or_default() {
+            if changed && let Ty::Named(def_id, _) = self.arena.get(self.impls[impl_id as usize].target) {
+                for &candidate_idx in dependent_candidates.get(&def_id).map(Vec::as_slice).unwrap_or_default() {
                     if !std::mem::replace(&mut queued[candidate_idx], true) {
                         todo.push(candidate_idx);
                     }
@@ -447,7 +446,7 @@ impl Checker {
         match self.ty(target) {
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Duration | Ty::Unit | Ty::Range | Ty::Never => {}
             Ty::List(elem) | Ty::Set(elem) => structural.parts.push((elem, trait_ref)),
-            Ty::Map(key, value) => structural.parts.extend([(key, trait_ref), (value, trait_ref)]),
+            Ty::Map(key, val) => structural.parts.extend([(key, trait_ref), (val, trait_ref)]),
             Ty::Tuple(elems) => structural.parts.extend(self.elems(elems).into_iter().map(|part_ty| (part_ty, trait_ref))),
             Ty::Named(def_id, args) => {
                 let args = self.elems(args);
@@ -468,41 +467,35 @@ impl Checker {
                             })
                             .collect()
                     };
+                let fill_for = |checker: &mut Checker, helper: Option<FnId>, generics: &[ParamId]| match helper {
+                    Some(helper) => {
+                        let helper_dicts = checker.fns[helper as usize].dicts.clone();
+                        StructuralFill::Helper(helper, instantiate_dicts(checker, &helper_dicts, generics))
+                    }
+                    None => StructuralFill::Required,
+                };
                 match &def.kind {
                     TypeDefKind::Struct { fields } => match self.init_method(Ctor::Def(def_id)).filter(|_| builds_values) {
                         Some(init) => {
                             let init_fn = self.fns[init as usize].clone();
-                            if init_fn.generics.len() != def.generics.len() {
-                                return None;
-                            }
+                            let init_generics = init_param_order(&self.arena, &init_fn).filter(|g| g.len() == def.generics.len())?;
                             for param in &init_fn.params {
-                                let part_ty = instantiate_ty(self, param.ty, &init_fn.generics);
+                                let part_ty = instantiate_ty(self, param.ty, &init_generics);
                                 structural.parts.push((part_ty, trait_ref));
-                                structural.fills.push(match &param.default {
-                                    Some(DefaultArg::Helper(helper)) => {
-                                        let helper_dicts = self.fns[*helper as usize].dicts.clone();
-                                        StructuralFill::Helper(*helper, instantiate_dicts(self, &helper_dicts, &init_fn.generics))
-                                    }
-                                    Some(DefaultArg::Inline(expr)) => {
-                                        closed_const(expr).map_or(StructuralFill::Required, StructuralFill::Const)
-                                    }
-                                    None => StructuralFill::Required,
-                                });
+                                let helper = match &param.default {
+                                    Some(DefaultArg::Helper(helper)) => Some(*helper),
+                                    _ => None,
+                                };
+                                structural.fills.push(fill_for(self, helper, &init_generics));
                             }
-                            structural.init = Some((init, instantiate_dicts(self, &init_fn.dicts, &init_fn.generics)));
+                            structural.init = Some((init, instantiate_dicts(self, &init_fn.dicts, &init_generics)));
                         }
                         None => {
                             for field in fields {
                                 let part_ty = instantiate_ty(self, field.ty, &def.generics);
                                 structural.parts.push((part_ty, trait_ref));
                                 if builds_values {
-                                    structural.fills.push(match field.default {
-                                        Some(helper) => {
-                                            let helper_dicts = self.fns[helper as usize].dicts.clone();
-                                            StructuralFill::Helper(helper, instantiate_dicts(self, &helper_dicts, &def.generics))
-                                        }
-                                        None => StructuralFill::Required,
-                                    });
+                                    structural.fills.push(fill_for(self, field.default, &def.generics));
                                 }
                             }
                         }
@@ -523,6 +516,12 @@ impl Checker {
         }
         Some(structural)
     }
+}
+
+/// Returns `init_fn`'s type parameters ordered to match its owner struct's header.
+pub(crate) fn init_param_order(arena: &TypeArena, init_fn: &FnInfo) -> Option<Vec<ParamId>> {
+    let Ty::Named(_, self_args) = arena.get(init_fn.self_ty?) else { return None };
+    arena.list(self_args).iter().map(|&arg| if let Ty::Param(param) = arena.get(arg) { Some(param) } else { None }).collect()
 }
 
 /// Returns `true` if `imp` keeps its trait's native default method.

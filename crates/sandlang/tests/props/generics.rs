@@ -83,7 +83,7 @@ fn rtp<X: Encode + Decode + Eq>(x: X) -> str {
     let r: Result<X> = json.decode(json.encode(x).unwrap())
     \"\\(r == Ok(x))\"
 }
-fn jsonp<X: Encode>(x: X) -> str { \"\\(json.encode(json.to_json(x)).unwrap() == json.encode(x).unwrap())\" }
+fn jsonp<X: Encode>(x: X) -> str { \"\\(json.encode(json.to_json(x).unwrap()).unwrap() == json.encode(x).unwrap())\" }
 fn countb<X: Eq + Ord + Hash + Encode>(xs: [X]) -> int { xs.len() }
 ";
 

@@ -1,6 +1,5 @@
 //! Native module registration and Rust-to-Sand type bindings.
 
-pub mod codec;
 pub mod context;
 pub mod convert;
 pub mod func;

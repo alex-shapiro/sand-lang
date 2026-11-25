@@ -1092,7 +1092,7 @@ fn show<T: Encode>(name: str, x: T) {
     let f1 = probe.fuel()
     let indented = json.encode(x, indent: 2).unwrap()
     let f2 = probe.fuel()
-    let value = json.to_json(x)
+    let value = json.to_json(x).unwrap()
     let f3 = probe.fuel()
     probe.take_json(value)
     let f4 = probe.fuel()
@@ -1161,7 +1161,7 @@ let copy_bound = links(512)
 let d0 = probe.fuel()
 let text = json.encode(json_bound)?
 let d1 = probe.fuel()
-let value = json.to_json(json_bound)
+let value = json.to_json(json_bound)?
 let d2 = probe.fuel()
 probe.take_json(arrays)
 let d3 = probe.fuel()
@@ -1173,81 +1173,81 @@ print("512 variants: to_value \(d4 - d3 - call)")
 "#;
 
 const FUEL_OF_EACH_KIND: &str = r#"unit: null
-    encode 2, indent 2 for 4 bytes, to_json 0, Json parameter 1, to_value 1
+    encode 2, indent 2 for 4 bytes, to_json 4, Json parameter 1, to_value 1
 bool: true
-    encode 2, indent 2 for 4 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 2, indent 2 for 4 bytes, to_json 4, Json parameter 1, to_value 1
 int: -7
-    encode 2, indent 2 for 2 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 2, indent 2 for 2 bytes, to_json 4, Json parameter 1, to_value 1
 float: 1.5
-    encode 2, indent 2 for 3 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 2, indent 2 for 3 bytes, to_json 4, Json parameter 1, to_value 1
 duration: 1500000000
-    encode 2, indent 2 for 10 bytes, to_json 2, Json parameter 1, to_value 1
+    encode 2, indent 2 for 10 bytes, to_json 5, Json parameter 1, to_value 1
 str: "plain"
-    encode 2, indent 2 for 7 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 2, indent 2 for 7 bytes, to_json 4, Json parameter 1, to_value 1
 str with escapes: "q\"b\\n\n\t\u0001é"
-    encode 2, indent 2 for 21 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 2, indent 2 for 21 bytes, to_json 6, Json parameter 1, to_value 1
 str of 3000 bytes: 3002 bytes
-    encode 48, indent 48 for 3002 bytes, to_json 1, Json parameter 47, to_value 47
+    encode 48, indent 48 for 3002 bytes, to_json 471, Json parameter 47, to_value 47
 bytes: "AP8H"
-    encode 2, indent 2 for 6 bytes, to_json 2, Json parameter 1, to_value 1
+    encode 2, indent 2 for 6 bytes, to_json 4, Json parameter 1, to_value 1
 bytes of 3000 bytes: 4002 bytes
-    encode 377, indent 377 for 4002 bytes, to_json 439, Json parameter 63, to_value 376
+    encode 377, indent 377 for 4002 bytes, to_json 941, Json parameter 63, to_value 376
 list: [1,2,3]
-    encode 5, indent 5 for 17 bytes, to_json 8, Json parameter 7, to_value 4
+    encode 5, indent 5 for 17 bytes, to_json 10, Json parameter 7, to_value 4
 empty list: []
-    encode 2, indent 2 for 2 bytes, to_json 2, Json parameter 1, to_value 1
+    encode 2, indent 2 for 2 bytes, to_json 4, Json parameter 1, to_value 1
 tuple: [1,"a",2.5]
-    encode 5, indent 5 for 21 bytes, to_json 8, Json parameter 7, to_value 4
+    encode 5, indent 5 for 21 bytes, to_json 10, Json parameter 7, to_value 4
 pair of ints: [1,2]
-    encode 4, indent 4 for 12 bytes, to_json 6, Json parameter 5, to_value 3
+    encode 4, indent 4 for 12 bytes, to_json 8, Json parameter 5, to_value 3
 set: [3,1,2]
-    encode 5, indent 5 for 17 bytes, to_json 8, Json parameter 7, to_value 4
+    encode 6, indent 6 for 17 bytes, to_json 11, Json parameter 7, to_value 5
 map with str keys: {"k":[1],"j":[]}
-    encode 8, indent 8 for 33 bytes, to_json 11, Json parameter 7, to_value 7
+    encode 8, indent 8 for 33 bytes, to_json 13, Json parameter 7, to_value 7
 map with int keys: {"2":"two","1":"one"}
-    encode 6, indent 6 for 30 bytes, to_json 8, Json parameter 5, to_value 5
+    encode 7, indent 7 for 30 bytes, to_json 12, Json parameter 5, to_value 6
 map with bool keys: {"true":1,"false":2}
-    encode 6, indent 6 for 29 bytes, to_json 8, Json parameter 5, to_value 5
+    encode 7, indent 7 for 29 bytes, to_json 13, Json parameter 5, to_value 6
 map with duration keys: {"5000000":"d"}
-    encode 4, indent 4 for 20 bytes, to_json 5, Json parameter 3, to_value 3
+    encode 5, indent 5 for 20 bytes, to_json 9, Json parameter 3, to_value 4
 map with variant keys: {"Right":1.5,"Left":2.5}
-    encode 7, indent 7 for 33 bytes, to_json 9, Json parameter 5, to_value 6
+    encode 7, indent 7 for 33 bytes, to_json 13, Json parameter 5, to_value 6
 map with date keys: {"2024-03-10":1}
-    encode 4, indent 4 for 21 bytes, to_json 5, Json parameter 3, to_value 3
+    encode 5, indent 5 for 21 bytes, to_json 9, Json parameter 3, to_value 4
 map with a key of 3000 bytes: 3006 bytes
-    encode 50, indent 50 for 3011 bytes, to_json 97, Json parameter 49, to_value 49
+    encode 51, indent 51 for 3011 bytes, to_json 521, Json parameter 49, to_value 50
 range: {"start":0,"end":3}
-    encode 2, indent 2 for 28 bytes, to_json 4, Json parameter 5, to_value 1
+    encode 2, indent 2 for 28 bytes, to_json 8, Json parameter 5, to_value 1
 inclusive range: {"start":-1,"end":1,"inclusive":true}
-    encode 2, indent 2 for 50 bytes, to_json 5, Json parameter 7, to_value 1
+    encode 2, indent 2 for 50 bytes, to_json 10, Json parameter 7, to_value 1
 struct: {"id":1,"note":"gift","tags":["a"]}
-    encode 7, indent 7 for 56 bytes, to_json 11, Json parameter 9, to_value 6
+    encode 7, indent 7 for 56 bytes, to_json 15, Json parameter 9, to_value 6
 variant without payload: "Active"
-    encode 2, indent 2 for 8 bytes, to_json 2, Json parameter 1, to_value 1
+    encode 2, indent 2 for 8 bytes, to_json 5, Json parameter 1, to_value 1
 variant with named payload: {"Suspended":{"reason":"late"}}
-    encode 3, indent 3 for 45 bytes, to_json 5, Json parameter 5, to_value 2
+    encode 3, indent 3 for 45 bytes, to_json 10, Json parameter 5, to_value 2
 variant with positional payload: {"Banned":[3,"spam"]}
-    encode 4, indent 4 for 39 bytes, to_json 7, Json parameter 7, to_value 3
+    encode 4, indent 4 for 39 bytes, to_json 11, Json parameter 7, to_value 3
 variant with one int: {"One":[1]}
-    encode 3, indent 3 for 24 bytes, to_json 5, Json parameter 5, to_value 2
+    encode 3, indent 3 for 24 bytes, to_json 7, Json parameter 5, to_value 2
 nested Some: 1
-    encode 4, indent 4 for 1 bytes, to_json 4, Json parameter 1, to_value 3
+    encode 4, indent 4 for 1 bytes, to_json 6, Json parameter 1, to_value 3
 None: null
-    encode 2, indent 2 for 4 bytes, to_json 2, Json parameter 1, to_value 1
+    encode 2, indent 2 for 4 bytes, to_json 4, Json parameter 1, to_value 1
 Err: {"Err":[{"message":"closed","kind":"io"}]}
-    encode 5, indent 5 for 76 bytes, to_json 9, Json parameter 9, to_value 4
+    encode 5, indent 5 for 76 bytes, to_json 14, Json parameter 9, to_value 4
 date: "2024-03-10"
-    encode 2, indent 2 for 12 bytes, to_json 2, Json parameter 1, to_value 1
+    encode 2, indent 2 for 12 bytes, to_json 5, Json parameter 1, to_value 1
 span: "P1MT23H"
-    encode 2, indent 2 for 9 bytes, to_json 2, Json parameter 1, to_value 1
+    encode 2, indent 2 for 9 bytes, to_json 5, Json parameter 1, to_value 1
 Json scalars: [null,true,3,2.5,"x"]
-    encode 17, indent 17 for 37 bytes, to_json 22, Json parameter 11, to_value 16
+    encode 17, indent 17 for 37 bytes, to_json 24, Json parameter 11, to_value 16
 Json array and object: {"a":[1,null,{"b":{}}],"c":"s"}
-    encode 10, indent 10 for 71 bytes, to_json 7, Json parameter 13, to_value 9
+    encode 10, indent 10 for 71 bytes, to_json 19, Json parameter 13, to_value 9
 struct with Json fields: {"json":[null],"maybe":1}
-    encode 10, indent 10 for 42 bytes, to_json 13, Json parameter 7, to_value 9
+    encode 10, indent 10 for 42 bytes, to_json 17, Json parameter 7, to_value 9
 list of structs: [{"id":1,"note":"gift","tags":["a","b"]},{"id":2,"note":null,"tags":[]}]
-    encode 13, indent 13 for 140 bytes, to_json 23, Json parameter 21, to_value 12
+    encode 13, indent 13 for 140 bytes, to_json 29, Json parameter 21, to_value 12
 {
   "id": 1,
   "note": null,
@@ -1255,7 +1255,7 @@ list of structs: [{"id":1,"note":"gift","tags":["a","b"]},{"id":2,"note":null,"t
     "a"
   ]
 }
-256 variants, which are 512 levels of JSON: encode 257 for 2821 bytes, to_json 770
+256 variants, which are 512 levels of JSON: encode 257 for 2821 bytes, to_json 1091
 512 Json arrays: Json parameter 1025
 512 variants: to_value 513
 "#;

@@ -6,12 +6,13 @@
 //! - `#[sand(name = "<Name>")]`: overrides the Sand type name.
 //! - `#[sand(private)]`: makes the type private.
 //! - `#[sand(crate = <path>)]`: overrides the `::sandlang` crate path.
+//! - `#[sand(derive(<Trait>, ...))]`: derives structural traits like `Encode`
+//!   and `Decode` for a `SandStruct`, `SandEnum`, or `SandValue`.
 //! - `#[sand(manual_conversion)]`: omits the `FromVmValue` and `IntoVmValue`
 //!   implementations. If the VM representation differs from the Rust struct or
-//!   enum, also add `#[sand(no_value)]` or implement `Encode` manually to match
-//!   `Vm::to_value`.
-//! - `#[sand(no_value)]`: omits the `Encode` implementation. Use this attribute
-//!   if a field type such as `VmVal` does not implement `Encode`.
+//!   enum, also add `#[sand(no_value)]` or implement `ToValue` manually.
+//! - `#[sand(no_value)]`: omits the `ToValue` implementation. Use this attribute
+//!   if a field type such as `VmVal` does not implement `ToValue`.
 //!
 //! The macros copy Rust doc comments into Sand documentation.
 
@@ -820,7 +821,7 @@ mod tests {
 
     #[test]
     fn invalid_derives_are_rejected() {
-        let cases: [(Derive, &str, &str); 17] = [
+        let cases: [(Derive, &str, &str); 16] = [
             (sand_struct, "#[sand(module = \"m\")] struct S(i64);", "`SandStruct` requires named fields"),
             (sand_struct, "#[sand(module = \"m\")] enum S { A }", "`SandStruct` can only be derived for structs"),
             (sand_struct, "#[sand(module = \"m\")] struct S<'a> { x: &'a str }", "lifetime or const parameters"),
@@ -848,7 +849,6 @@ mod tests {
             ),
             (sand_object, "#[sand(module = \"m\", manual_conversion)] struct O;", "expected `module`, `name`, `private` or `crate`"),
             (sand_object, "#[sand(module = \"m\", derive(Encode))] struct O;", "`SandObject` cannot derive traits"),
-            (sand_struct, "#[sand(module = \"m\", derive(Decode))] struct S<T> { x: T }", "a generic native type cannot derive traits"),
             (sand_struct, "#[sand(module = \"m\", derive(a::B))] struct S;", "expected a trait name"),
         ];
         for (f, src, msg) in cases {

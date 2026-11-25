@@ -514,7 +514,7 @@ impl<'a> Verifier<'a> {
             if dicts.len() != fi.dicts.len() {
                 return Err(format!("{label}: {role} has {} dictionaries, expected {}", dicts.len(), fi.dicts.len()));
             }
-            let gens = fi.generics.clone();
+            let gens = super::structural::init_param_order(&v.arena, fi).unwrap_or_else(|| fi.generics.clone());
             let reqs = fi.dicts.clone();
             let args = &type_args[..gens.len().min(type_args.len())];
             for (expr, (req_ty, req_tr)) in dicts.iter().zip(reqs) {
@@ -533,7 +533,7 @@ impl<'a> Verifier<'a> {
                 let gens = def.generics.clone();
                 if let Some((init_fn, _)) = &structural.init {
                     let fi = &self.cp.fns[*init_fn as usize];
-                    let init_gens = fi.generics.clone();
+                    let init_gens = super::structural::init_param_order(&self.arena, fi).unwrap_or_else(|| fi.generics.clone());
                     let param_tys: Vec<TypeId> = fi.params.iter().map(|p| p.ty).collect();
                     param_tys.into_iter().map(|ty| self.subst(ty, &init_gens, &type_args)).collect()
                 } else {

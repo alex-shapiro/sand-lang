@@ -1124,9 +1124,6 @@ pub const CALLBACK_PROTO: u32 = 0;
 /// Maximum argument count for a Sand callback in a native call.
 pub const MAX_CALLBACK_ARGS: usize = u8::MAX as usize;
 
-/// Prototype name for helper functions that evaluate field defaults and populate sets during `json.decode` (omitted from stack traces).
-pub const FILL_PROTO: &str = "<fill>";
-
 #[derive(Clone, Debug)]
 pub struct Proto {
     pub name: String,
@@ -1360,7 +1357,6 @@ pub enum PartTemplate {
 #[derive(Clone, Debug)]
 pub enum PartFill {
     Required,
-    Const(crate::types::ConstVal),
     Call(u32, Vec<PartTemplate>),
 }
 

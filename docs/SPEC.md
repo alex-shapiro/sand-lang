@@ -765,12 +765,9 @@ value, or writes after returning.
 
 A `decode` method reads at most a single value from its `Decoder`. If `decode`
 returns without reading, the decoder skips the input value. Before reading,
-`decoder.kind()` returns the `InputKind` of the unread input value:
-
-- JSON and `Value` inputs: `Null`, `Bool`, `Int`, `Float`, `Str`, `List`, `Map`
-- `Value`-only inputs (§16.7): `Duration`, `Bytes`, `Tuple`, `Struct`, `Range`, `Variant`, `Native`
-
-Every JSON object key has kind `Str`.
+`decoder.kind()` returns the `InputKind` of the unread input value. For JSON
+inputs, `decoder.kind()` returns `Null`, `Bool`, `Int`, `Float`, `Str`, `List`,
+or `Map`, and every JSON object key has kind `Str`.
 
 For a struct that declares `init` (§4.2), the derived decoder reads each
 parameter of `init`. It then calls `init`. The decoder sets an omitted `Option`
@@ -2332,11 +2329,7 @@ optional type attributes:
 - `#[sand(crate = <path>)]`: specifies a renamed `sandlang` dependency.
 - `#[sand(derive(<Trait>, ...))]`: derives each named trait from the type's
   structure, as in `derive(Encode, Decode)` (§5.7). Each trait must have a
-  native default method. `SandObject` and generic native types cannot derive
-  traits. For a custom `Encode` or `Decode` implementation, the module source
-  declares an `impl` block with a native method. Its Rust function writes
-  through `native::codec::Encoder::write` or reads through
-  `native::codec::Decoder::read`.
+  native default method. `SandObject` cannot derive traits.
 - `#[sand(manual_conversion)]`: on `SandEnum` and `SandStruct`, omits the
   derived `FromVmValue` and `IntoVmValue` implementations.
 - `#[sand(no_value)]`: on `SandEnum` and `SandStruct`, omits the derived
@@ -2459,11 +2452,10 @@ supertraits. Native functions can require only built-in traits.
 
 If a `native fn` declaration requires a trait `B` with methods on its `N`-th
 type parameter, the Rust function can accept a `TraitDict<N, B>` argument.
-`TraitDict` arguments precede value arguments in ascending type-parameter
-order. `Num<N>` provides `Num::zero` and `Num::one`. Synchronous native
-functions taking `&mut CallContext` pass `Encode` and `Decode` dictionaries to
-`CallContext::to_value` and `CallContext::from_value` (§16.7). Native `impl`
-methods cannot accept `TraitDict` arguments.
+`TraitDict` arguments precede value arguments in declared order. `Num<N>`
+provides `Num::zero` and `Num::one`. Synchronous native functions taking
+`&mut CallContext` pass `Encode` dictionaries to `CallContext::to_value`
+(§16.7). Native `impl` methods cannot accept `TraitDict` arguments.
 
 If a `native fn` declaration requires `Encode` on its `N`-th type parameter,
 the Rust function can accept an `Encoded<N>` argument in place of the value.
@@ -2651,18 +2643,13 @@ prefix distinguishes script types from host types with the same base name.
 `None` if the type or text does not match.
 
 A native function converts a Sand value into a `Value` with its `Encode`
-implementation (§5.7). It converts a `Value` into a Sand value with its `Decode`
-implementation. Native functions can accept `Encoded<N>` arguments (§16.3).
-Synchronous native functions taking `&mut CallContext` call
-`CallContext::to_value` and `CallContext::from_value`. During conversion, the
-VM runs custom Sand `encode` and `decode` methods, `init` constructors, and
-computed field defaults synchronously. Any attempt to wait, prompt for a
-permission, or cancel the running task inside one of those callbacks fails
-immediately with an `"invalid"` error. Unlike `json.encode`, the `Value`
-encoder wraps `Some` in `Value::Variant`. `from_value` requires the exact
-`Value` variant for each Sand type, except that `Value::List` and `Value::Set`
-both decode lists and sets. For example, it accepts only `Value::Bytes` for
-`bytes`.
+implementation (§5.7). Native functions can accept `Encoded<N>` arguments
+(§16.3). Synchronous native functions taking `&mut CallContext` call
+`CallContext::to_value`. During conversion, the VM runs custom Sand `encode`
+methods synchronously. Any attempt to wait, prompt for a permission, or cancel
+the running task inside a custom `encode` method fails immediately with an
+`"invalid"` error. Unlike `json.encode`, the `Value` encoder wraps `Some` in
+`Value::Variant`.
 
 The engine charges fuel and memory for each conversion against the run limits.
 If nesting exceeds 512 levels, such as on a cyclic value, the engine returns a

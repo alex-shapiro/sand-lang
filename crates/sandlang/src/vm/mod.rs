@@ -1756,7 +1756,7 @@ impl Vm {
     /// from innermost inlined call to outermost.
     fn trace_frame(&self, proto_id: u32, at: u32, out: &mut Vec<TraceFrame>) {
         let proto = &self.prog.protos[proto_id as usize];
-        if proto_id == CALLBACK_PROTO || proto.name == "<entry>" || proto.name == FILL_PROTO {
+        if proto_id == CALLBACK_PROTO || proto.name == "<entry>" {
             return;
         }
         let idx = (at as usize).saturating_sub(1).min(proto.lines.len().saturating_sub(1));
