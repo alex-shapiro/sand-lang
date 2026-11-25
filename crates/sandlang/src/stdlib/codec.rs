@@ -413,17 +413,16 @@ impl WalkPlan {
             DictSpec::Tuple(items) => {
                 context.vm().charge(1)?;
                 let len = items.len();
-                let mut slot_roots = Vec::with_capacity(len);
-                for &item_spec in items.iter() {
+                let base = context.push_roots(len + 1, VmValue::Unit)?;
+                for (i, &item_spec) in items.iter().enumerate() {
                     let val = self.materialize_dag(context, item_spec, memo)?;
-                    let slot = context.push_roots(1, val)?;
-                    slot_roots.push(slot);
+                    context.set_root(base + i, val);
                 }
                 context.step(|vm| vm.check_memory(NODE_BYTES + len * size_of::<VmValue>()))?;
-                let values: Vec<VmValue> = slot_roots.iter().map(|&idx| context.root_at(idx)).collect();
-                let tuple = context.vm_mut().heap.alloc(Obj::Tuple(values.into_boxed_slice()));
-                let memo_root = context.push_roots(1, tuple)?;
-                memo.insert(spec_id, memo_root);
+                let (vm, roots) = context.vm_and_roots();
+                let tuple = vm.heap.alloc(Obj::Tuple(roots[base..base + len].into()));
+                context.set_root(base + len, tuple);
+                memo.insert(spec_id, base + len);
                 Ok(tuple)
             }
         }
@@ -520,51 +519,63 @@ impl<S: DecodeSource + 'static> ErasedSource for S {
     }
 }
 
-trait WalkSink: Sized {
-    type Target: EncodeSink + ?Sized;
-    fn target_mut(&mut self) -> &mut Self::Target;
-    fn into_erased(self) -> Box<dyn ErasedSink>;
-    fn from_erased(erased: Box<dyn ErasedSink>) -> Result<Self, Fail>;
+trait WalkIo<D: SessionDirection>: Sized {
+    fn into_io(self) -> D::Io;
+    fn from_io(io: D::Io) -> Result<Self, Fail>;
 }
 
+trait WalkSink: WalkIo<Encoder> {
+    type Target: EncodeSink + ?Sized;
+    fn target_mut(&mut self) -> &mut Self::Target;
+}
+
+impl<S: EncodeSink + 'static> WalkIo<Encoder> for S {
+    fn into_io(self) -> Box<dyn ErasedSink> {
+        Box::new(self)
+    }
+    fn from_io(io: Box<dyn ErasedSink>) -> Result<Self, Fail> {
+        io.into_any().downcast::<S>().map(|s| *s).map_err(|_| Fail::internal("encode: sink type mismatch"))
+    }
+}
 impl<S: EncodeSink + 'static> WalkSink for S {
     type Target = S;
     #[inline(always)]
     fn target_mut(&mut self) -> &mut S {
         self
     }
-    fn into_erased(self) -> Box<dyn ErasedSink> {
-        Box::new(self)
-    }
-    fn from_erased(erased: Box<dyn ErasedSink>) -> Result<Self, Fail> {
-        erased.into_any().downcast::<S>().map(|s| *s).map_err(|_| Fail::internal("encode: sink type mismatch"))
-    }
 }
 
 struct ErasedSinkRef(Box<dyn ErasedSink>);
-
+impl WalkIo<Encoder> for ErasedSinkRef {
+    fn into_io(self) -> Box<dyn ErasedSink> {
+        self.0
+    }
+    fn from_io(io: Box<dyn ErasedSink>) -> Result<Self, Fail> {
+        Ok(ErasedSinkRef(io))
+    }
+}
 impl WalkSink for ErasedSinkRef {
     type Target = dyn EncodeSink + 'static;
     #[inline(always)]
     fn target_mut(&mut self) -> &mut (dyn EncodeSink + 'static) {
         &mut *self.0
     }
-    fn into_erased(self) -> Box<dyn ErasedSink> {
-        self.0
-    }
-    fn from_erased(erased: Box<dyn ErasedSink>) -> Result<Self, Fail> {
-        Ok(ErasedSinkRef(erased))
-    }
 }
 
-trait WalkSource: Sized {
+trait WalkSource: WalkIo<Decoder> {
     type Target: DecodeSource + ?Sized;
     fn target_mut(&mut self) -> &mut Self::Target;
     fn target(&self) -> &Self::Target;
-    fn into_erased(self) -> Box<dyn ErasedSource>;
-    fn from_erased(erased: Box<dyn ErasedSource>) -> Result<Self, Fail>;
 }
 
+impl<S: DecodeSource + 'static> WalkIo<Decoder> for S {
+    fn into_io(self) -> Box<dyn ErasedSource> {
+        Box::new(self)
+    }
+    fn from_io(io: Box<dyn ErasedSource>) -> Result<Self, Fail> {
+        io.into_any().downcast::<S>().map(|s| *s).map_err(|_| Fail::internal("decode: source type mismatch"))
+    }
+}
 impl<S: DecodeSource + 'static> WalkSource for S {
     type Target = S;
     #[inline(always)]
@@ -575,16 +586,17 @@ impl<S: DecodeSource + 'static> WalkSource for S {
     fn target(&self) -> &S {
         self
     }
-    fn into_erased(self) -> Box<dyn ErasedSource> {
-        Box::new(self)
-    }
-    fn from_erased(erased: Box<dyn ErasedSource>) -> Result<Self, Fail> {
-        erased.into_any().downcast::<S>().map(|s| *s).map_err(|_| Fail::internal("decode: source type mismatch"))
-    }
 }
 
 struct ErasedSourceRef(Box<dyn ErasedSource>);
-
+impl WalkIo<Decoder> for ErasedSourceRef {
+    fn into_io(self) -> Box<dyn ErasedSource> {
+        self.0
+    }
+    fn from_io(io: Box<dyn ErasedSource>) -> Result<Self, Fail> {
+        Ok(ErasedSourceRef(io))
+    }
+}
 impl WalkSource for ErasedSourceRef {
     type Target = dyn DecodeSource + 'static;
     #[inline(always)]
@@ -594,12 +606,6 @@ impl WalkSource for ErasedSourceRef {
     #[inline(always)]
     fn target(&self) -> &(dyn DecodeSource + 'static) {
         &*self.0
-    }
-    fn into_erased(self) -> Box<dyn ErasedSource> {
-        self.0
-    }
-    fn from_erased(erased: Box<dyn ErasedSource>) -> Result<Self, Fail> {
-        Ok(ErasedSourceRef(erased))
     }
 }
 
@@ -639,13 +645,15 @@ impl SessionDirection for Decoder {
     }
 }
 
+type SandErr = (String, String);
+
 struct Session<IO> {
     io: Option<IO>,
     active_turn: u64,
     used: bool,
     depth: usize,
     misuse: Option<String>,
-    stream_error: Option<(String, String)>,
+    stream_error: Option<SandErr>,
 }
 
 impl<IO> Session<IO> {
@@ -689,14 +697,14 @@ struct SavedTurn {
     used: bool,
     depth: usize,
     misuse: Option<String>,
-    stream_error: Option<(String, String)>,
+    stream_error: Option<SandErr>,
 }
 
 struct TurnOutcome<IO> {
     io: Option<IO>,
     unused: bool,
     misuse: Option<String>,
-    stream_error: Option<(String, String)>,
+    stream_error: Option<SandErr>,
 }
 
 impl<IO> SessionMap<IO> {
@@ -726,28 +734,21 @@ impl<IO> SessionMap<IO> {
     }
 
     fn pop_turn(&mut self, id: u64, turn: u64, saved: Option<SavedTurn>) -> TurnOutcome<IO> {
+        let take = |s: &mut Session<IO>| TurnOutcome {
+            io: s.io.take(),
+            unused: s.active_turn == turn && !s.used,
+            misuse: s.misuse.take(),
+            stream_error: s.stream_error.take(),
+        };
         match saved {
             Some(prev) => {
                 let s = self.map.get_mut(&id).expect("outer codec session");
-                let out = TurnOutcome {
-                    io: s.io.take(),
-                    unused: s.active_turn == turn && !s.used,
-                    misuse: s.misuse.take(),
-                    stream_error: s.stream_error.take(),
-                };
+                let out = take(s);
                 (s.active_turn, s.used, s.depth, s.misuse, s.stream_error) =
                     (prev.turn, prev.used, prev.depth, prev.misuse, prev.stream_error);
                 out
             }
-            None => {
-                let mut s = self.map.remove(&id).expect("top codec session");
-                TurnOutcome {
-                    io: s.io.take(),
-                    unused: s.active_turn == turn && !s.used,
-                    misuse: s.misuse.take(),
-                    stream_error: s.stream_error.take(),
-                }
-            }
+            None => take(&mut self.map.remove(&id).expect("top codec session")),
         }
     }
 }
@@ -816,35 +817,6 @@ impl Decoder {
     }
 }
 
-trait WalkIo<D: SessionDirection>: Sized {
-    fn into_io(self) -> D::Io;
-    fn from_io(io: D::Io) -> Result<Self, Fail>;
-}
-
-impl<S: WalkSink> WalkIo<Encoder> for S {
-    fn into_io(self) -> Box<dyn ErasedSink> {
-        self.into_erased()
-    }
-    fn from_io(io: Box<dyn ErasedSink>) -> Result<Self, Fail> {
-        Self::from_erased(io)
-    }
-}
-
-impl<S: WalkSource> WalkIo<Decoder> for S {
-    fn into_io(self) -> Box<dyn ErasedSource> {
-        self.into_erased()
-    }
-    fn from_io(io: Box<dyn ErasedSource>) -> Result<Self, Fail> {
-        Self::from_erased(io)
-    }
-}
-
-struct CustomCallResult {
-    value: VmValue,
-    unused: bool,
-    stream_error: Option<(String, String)>,
-}
-
 /// Runs a custom Sand or native codec callback with automatic session cleanup.
 #[cold]
 #[inline(never)]
@@ -855,7 +827,7 @@ fn run_custom_callback<D: SessionDirection, S: WalkIo<D>>(
     extra_arg: Option<VmValue>,
     io_slot: &mut Option<S>,
     outer: (Option<u64>, usize),
-) -> CodecResult<CustomCallResult> {
+) -> CodecResult<(VmValue, bool, Option<SandErr>)> {
     let mark = context.root_mark();
     let extra_root = extra_arg.map(|v| context.root(v));
     let dict_val = plan.materialize(context, spec_id)?;
@@ -884,7 +856,7 @@ fn run_custom_callback<D: SessionDirection, S: WalkIo<D>>(
     if let Some(message) = outcome.misuse {
         return Err(HostError::new("invalid", message));
     }
-    Ok(CustomCallResult { value, unused: outcome.unused, stream_error: outcome.stream_error })
+    Ok((value, outcome.unused, outcome.stream_error))
 }
 
 // ------------------------------------------------------------------
@@ -1043,14 +1015,15 @@ impl<S: WalkSink> EncodeWalk<'_, '_, S> {
     #[cold]
     #[inline(never)]
     fn visit_custom(&mut self, value: VmValue, spec_id: u32, depth: usize) -> CodecResult {
-        let out = run_custom_callback::<Encoder, S>(self.context, self.plan, spec_id, Some(value), self.sink, (self.outer_session, depth))?;
-        match self.context.vm().as_result(out.value) {
+        let (value, unused, stream_error) =
+            run_custom_callback::<Encoder, S>(self.context, self.plan, spec_id, Some(value), self.sink, (self.outer_session, depth))?;
+        match self.context.vm().as_result(value) {
             Err(err_val) => Err(host_error_from_sand(self.context.vm(), err_val)?),
             Ok(_) => {
-                if let Some((kind, message)) = out.stream_error {
+                if let Some((kind, message)) = stream_error {
                     return Err(HostError::new(kind, message));
                 }
-                if out.unused {
+                if unused {
                     return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
                 }
                 Ok(())
@@ -1370,11 +1343,12 @@ impl<S: WalkSource> DecodeWalk<'_, '_, S> {
     #[cold]
     #[inline(never)]
     fn visit_custom(&mut self, spec_id: u32, depth: usize) -> CodecResult<VmValue> {
-        let out = run_custom_callback::<Decoder, S>(self.context, self.plan, spec_id, None, self.source, (self.outer_session, depth))?;
-        match self.context.vm().as_result(out.value) {
+        let (value, unused, stream_error) =
+            run_custom_callback::<Decoder, S>(self.context, self.plan, spec_id, None, self.source, (self.outer_session, depth))?;
+        match self.context.vm().as_result(value) {
             Err(err_val) => {
                 let err = host_error_from_sand(self.context.vm(), err_val)?;
-                if let Some((kind, message)) = &out.stream_error
+                if let Some((kind, message)) = &stream_error
                     && err.sand_error() == Some((kind.as_str(), message.as_str()))
                 {
                     return Err(err);
@@ -1383,10 +1357,10 @@ impl<S: WalkSource> DecodeWalk<'_, '_, S> {
                 Err(with_source_path(err, source))
             }
             Ok(ok_val) => {
-                if let Some((kind, message)) = out.stream_error {
+                if let Some((kind, message)) = stream_error {
                     return Err(HostError::new(kind, message));
                 }
-                if out.unused {
+                if unused {
                     self.source()?.skip()?;
                 }
                 Ok(ok_val)

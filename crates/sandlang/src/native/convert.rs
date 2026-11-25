@@ -159,16 +159,6 @@ impl<C: From<Fail>> HostError<C> {
     }
 }
 
-impl HostError<Fail> {
-    /// Converts `self` into a synchronous native call error.
-    pub(crate) fn into_ctl_error(self) -> HostError<Ctl> {
-        match *self.0 {
-            HostErrorKind::Error { kind, message } => HostError::new(kind, message),
-            HostErrorKind::Abort(fail) => HostError(Box::new(HostErrorKind::Abort(fail.into()))),
-        }
-    }
-}
-
 impl<C> From<std::io::Error> for HostError<C> {
     fn from(e: std::io::Error) -> HostError<C> {
         HostError::new(crate::stdlib::io_kind(&e), e.to_string())

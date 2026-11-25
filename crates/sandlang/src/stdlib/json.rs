@@ -17,7 +17,7 @@ use crate::vm::compare::str_hash;
 use crate::vm::heap::Staging;
 use crate::vm::iomem::{IoMemory, Reservation};
 use crate::vm::meter::{BYTES_PER_FUEL_UNIT, SLOW_BYTES_PER_FUEL_UNIT, VmMeter, WorkerMeter};
-use crate::vm::value::{KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, VmValue, slot_fits};
+use crate::vm::value::{KeyIndex, MAP_ENTRY_SIZE, MapObj, Obj, VmValue, slot_fits};
 use crate::vm::{Fail, Vm, fail, internal};
 use hashbrown::HashTable;
 use std::borrow::Cow;
@@ -88,17 +88,18 @@ impl JsonIds {
 pub(crate) fn module() -> NativeModule {
     let mut module = NativeModule::std("json", ModKind::Std, include_str!("json.sand"));
     module.bind::<Json>();
-    module.function("parse", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Json>, HostError> {
-        let mut source = JsonSource::new(vm, text.raw())?;
-        let json = decode_json(vm, &mut source).and_then(|json| source.finish().map(|()| json));
-        vm.charge(1 + (source.take_consumed_bytes() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
-        Ok(VmVal::from_raw(json.map_err(HostError::into_ctl_error)?))
+    module.function("parse", |context: &mut CallContext, text: VmVal<String>| -> CodecResult<VmVal<Json>> {
+        let mut source = context.step(|vm| JsonSource::new(vm, text.raw()))?;
+        let json = decode_json(context, &mut source)?;
+        source.finish()?;
+        context.vm().charge(1 + (source.take_consumed_bytes() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
+        Ok(VmVal::from_raw(json))
     });
     module.function("Json.encode", |context: &mut CallContext, value: VmVal<Json>, encoder: VmVal<Encoder>| {
         Encoder::write(context, encoder, |context, sink| encode_json(context.vm(), value.raw(), sink))
     });
     module.function("Json.decode", |context: &mut CallContext, decoder: VmVal<Decoder>| {
-        Decoder::read(context, decoder, |context, source| decode_json_context(context, source).map(VmVal::<Json>::from_raw))
+        Decoder::read(context, decoder, |context, source| decode_json(context, source).map(VmVal::<Json>::from_raw))
     });
     module.function(
         "encode",
@@ -147,46 +148,27 @@ pub(crate) fn module() -> NativeModule {
 
 const MAX_SHARED_KEY_LEN: usize = 64;
 const MAX_SHARED_KEYS: usize = 4096;
-const SCANNED_KEYS: usize = 16;
 
 struct Builder<'a, 's, 'h> {
     st: &'s mut Staging<'h>,
     meter: &'a VmMeter,
     pending: usize,
-    /// Shared key strings with their hashes and text.
-    keys: HashTable<(u64, KeyText, VmValue)>,
+    /// Shared key strings with their hashes and text spans.
+    keys: HashTable<(u64, u32, u32, VmValue)>,
     entries: Vec<Entry>,
-    /// Text of the keys in `keys` and `entries`.
+    /// Text of interned short keys in `keys`.
     key_text: String,
-}
-
-/// Byte range of a key in [`Builder::key_text`].
-#[derive(Clone, Copy)]
-struct KeyText {
-    start: u32,
-    len: u32,
 }
 
 struct Entry {
     hash: u64,
-    /// Key text for equality checks before staged strings are committed to the heap.
-    text: Option<KeyText>,
     key: VmValue,
     value: VmValue,
-}
-
-struct MapBuilder {
-    base: usize,
-    index: Option<Box<KeyTable>>,
 }
 
 impl<'a, 's, 'h> Builder<'a, 's, 'h> {
     fn new(st: &'s mut Staging<'h>, meter: &'a VmMeter) -> Self {
         Builder { st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new(), key_text: String::new() }
-    }
-
-    fn text(&self, key: KeyText) -> &str {
-        &self.key_text[key.start as usize..(key.start + key.len) as usize]
     }
 
     #[inline]
@@ -217,94 +199,41 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
         Ok(str_hash(text))
     }
 
-    /// Returns the key string for `key` and the range of its text.
-    ///
-    /// Shares the string and the text of a short key across the whole value.
-    fn key(&mut self, key: &str, hash: u64) -> (VmValue, KeyText) {
+    /// Returns the key string for `key`, sharing short keys across the value.
+    fn key(&mut self, key: &str, hash: u64) -> VmValue {
         let key_text = &self.key_text;
-        if let Some(&(_, text, v)) = self.keys.find(hash, |e| &key_text[e.1.start as usize..(e.1.start + e.1.len) as usize] == key) {
-            return (v, text);
+        if let Some(&(_, _, _, v)) = self.keys.find(hash, |e| &key_text[e.1 as usize..(e.1 + e.2) as usize] == key) {
+            return v;
         }
-        let text = KeyText { start: self.key_text.len() as u32, len: key.len() as u32 };
-        self.key_text.push_str(key);
-        self.pending += key.len();
         let v = self.st.new_str(key);
         if key.len() <= MAX_SHARED_KEY_LEN && self.keys.len() < MAX_SHARED_KEYS {
-            self.pending += 2 * NODE_BYTES;
-            self.keys.insert_unique(hash, (hash, text, v), |e| e.0);
+            let start = self.key_text.len() as u32;
+            self.key_text.push_str(key);
+            self.pending += 2 * NODE_BYTES + key.len();
+            self.keys.insert_unique(hash, (hash, start, key.len() as u32, v), |e| e.0);
         }
-        (v, text)
+        v
     }
 
-    fn start_map(&self) -> MapBuilder {
-        MapBuilder { base: self.entries.len(), index: None }
-    }
-
-    fn put(&mut self, m: &mut MapBuilder, hash: u64, text: Option<KeyText>, key: VmValue, value: VmValue) -> Result<(), Fail> {
-        let segment = &self.entries[m.base..];
-        let same = |e: &Entry| {
-            e.hash == hash
-                && match (e.text, text) {
-                    (Some(x), Some(y)) => self.text(x) == self.text(y),
-                    _ => e.key == key,
-                }
-        };
-        let found = match &m.index {
-            Some(index) => index.find(hash, |slot| same(&segment[slot])),
-            None => segment.iter().position(same),
-        };
-        if let Some(slot) = found {
-            let e = &mut self.entries[m.base + slot];
-            (e.key, e.value) = (key, value);
-            return Ok(());
-        }
-        let slot = segment.len();
-        if !slot_fits(slot) {
+    /// Appends a unique key and value to the map starting at `base`.
+    fn append(&mut self, base: usize, hash: u64, key: VmValue, value: VmValue) -> Result<(), Fail> {
+        if !slot_fits(self.entries.len() - base) {
             return fail("limit", "map too large");
         }
         self.pending += ENTRY_PENDING;
-        self.entries.push(Entry { hash, text, key, value });
-        match &mut m.index {
-            Some(index) => {
-                let before = index.bytes();
-                index.insert(hash, slot);
-                self.pending = (self.pending + index.bytes()).saturating_sub(before);
-            }
-            None if slot >= SCANNED_KEYS => {
-                let mut index = Box::<KeyTable>::default();
-                index.reserve(2 * SCANNED_KEYS);
-                for (i, e) in self.entries[m.base..].iter().enumerate() {
-                    index.insert(e.hash, i);
-                }
-                self.pending += index.bytes();
-                m.index = Some(index);
-            }
-            None => {}
-        }
+        self.entries.push(Entry { hash, key, value });
         Ok(())
     }
 
-    /// Appends a unique key and value to `m`. Do not call with duplicate keys
-    /// or mix with [`Builder::put`] on the same [`MapBuilder`].
-    fn append(&mut self, m: &MapBuilder, hash: u64, key: VmValue, value: VmValue) -> Result<(), Fail> {
-        if !slot_fits(self.entries.len() - m.base) {
-            return fail("limit", "map too large");
-        }
-        self.pending += ENTRY_PENDING;
-        self.entries.push(Entry { hash, text: None, key, value });
-        Ok(())
-    }
-
-    fn map(&mut self, m: MapBuilder) -> VmValue {
-        let n = self.entries.len() - m.base;
-        let index = KeyIndex::for_keys(n, self.entries[m.base..].iter().map(|e| e.key));
+    fn map(&mut self, base: usize) -> VmValue {
+        let n = self.entries.len() - base;
+        let index = KeyIndex::for_keys(n, self.entries[base..].iter().map(|e| e.key));
         let mut map = MapObj { entries: Vec::with_capacity(n), live: n, index, ..MapObj::default() };
-        for (slot, e) in self.entries.drain(m.base..).enumerate() {
+        for (slot, e) in self.entries.drain(base..).enumerate() {
             map.index.insert(e.key, e.hash, slot);
             map.entries.push(Some((e.key, e.value)));
         }
-        let index = m.index.map_or(0, |ix| ix.bytes());
-        self.pending = self.pending.saturating_sub(n * ENTRY_PENDING + index);
+        self.pending = self.pending.saturating_sub(n * ENTRY_PENDING);
         self.st.alloc(Obj::Map(Box::new(map)))
     }
 }
@@ -415,9 +344,9 @@ fn rust_string(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<String, Fai
 /// Open Rust [`Json`] array or object during conversion to Sand `Json`.
 enum WriteFrame<'j> {
     Arr(std::slice::Iter<'j, Json>, Vec<VmValue>),
-    /// Remaining members, map builder, and the key and hash of the current
+    /// Remaining members, map start offset, and the key and hash of the current
     /// member.
-    Obj(indexmap::map::Iter<'j, String, Json>, MapBuilder, &'j str, u64),
+    Obj(indexmap::map::Iter<'j, String, Json>, usize, &'j str, u64),
 }
 
 impl Builder<'_, '_, '_> {
@@ -444,7 +373,7 @@ impl Builder<'_, '_, '_> {
                     None
                 }
                 Json::Obj(members) => {
-                    stack.push(WriteFrame::Obj(members.iter(), self.start_map(), "", 0));
+                    stack.push(WriteFrame::Obj(members.iter(), self.entries.len(), "", 0));
                     None
                 }
             };
@@ -462,10 +391,10 @@ impl Builder<'_, '_, '_> {
                             break item;
                         }
                     }
-                    Some(WriteFrame::Obj(members, map, key, hash)) => {
+                    Some(WriteFrame::Obj(members, base, key, hash)) => {
                         if let Some(value) = value.take() {
-                            let (key, _) = self.key(key, *hash);
-                            self.append(map, *hash, key, value)?;
+                            let key = self.key(key, *hash);
+                            self.append(*base, *hash, key, value)?;
                         }
                         if let Some((next_key, member)) = members.next() {
                             *hash = self.hash(next_key)?;
@@ -479,8 +408,8 @@ impl Builder<'_, '_, '_> {
                         let list = self.list(values);
                         self.st.new_variant(ids.arr, &[list])
                     }
-                    WriteFrame::Obj(_, map, ..) => {
-                        let map = self.map(map);
+                    WriteFrame::Obj(_, base, ..) => {
+                        let map = self.map(base);
                         self.st.new_variant(ids.obj, &[map])
                     }
                 });
@@ -551,106 +480,9 @@ fn encode_json(vm: &Vm, value: VmValue, sink: &mut dyn EncodeSink) -> CodecResul
     }
 }
 
-fn decode_json(vm: &mut Vm, source: &mut dyn DecodeSource) -> CodecResult<VmValue> {
-    enum DecodeJsonFrame {
-        Arr(Vec<VmValue>),
-        /// Map builder, and the hash, string, and text of the pending key.
-        Obj(MapBuilder, u64, VmValue, KeyText),
-    }
-    let ids = JsonIds::new(&vm.prog)?;
-    let meter = &vm.meter;
-    let mut stack: Vec<DecodeJsonFrame> = Vec::new();
-    vm.heap.staged(|_, staging| {
-        let mut builder = Builder::new(staging, meter);
-        loop {
-            builder.reserve()?;
-            meter.charge(1 + (source.take_consumed_bytes() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
-            let mut value = match source.kind()? {
-                InputKind::Null => {
-                    source.unit()?;
-                    Some(VmValue::Tag(ids.null))
-                }
-                InputKind::Bool => Some(builder.st.new_variant(ids.bool_, &[VmValue::Bool(source.bool()?)])),
-                InputKind::Int => Some(builder.st.new_variant(ids.int, &[VmValue::Int(source.int()?)])),
-                InputKind::Float => Some(builder.st.new_variant(ids.float, &[VmValue::Float(source.float()?)])),
-                InputKind::Str => {
-                    let text = source.str()?;
-                    builder.st.check_memory((NODE_BYTES + builder.pending).saturating_add(text.len()))?;
-                    meter.charge_bytes(text.len())?;
-                    let str_val = builder.st.new_str(&*text);
-                    Some(builder.st.new_variant(ids.str_, &[str_val]))
-                }
-                InputKind::List => {
-                    source.begin_list()?;
-                    stack.push(DecodeJsonFrame::Arr(Vec::new()));
-                    None
-                }
-                InputKind::Map => {
-                    source.begin_map()?;
-                    stack.push(DecodeJsonFrame::Obj(builder.start_map(), 0, VmValue::Unit, KeyText { start: 0, len: 0 }));
-                    None
-                }
-                InputKind::Duration
-                | InputKind::Bytes
-                | InputKind::Tuple
-                | InputKind::Struct
-                | InputKind::Range
-                | InputKind::Native
-                | InputKind::Variant => {
-                    return Err(HostError::new("parse", format!("{}: expected JSON data", source.path())));
-                }
-            };
-            if stack.len() > MAX_NESTING_DEPTH {
-                return codec::nesting_limit_error();
-            }
-            loop {
-                let next = match stack.last_mut() {
-                    None => return value.ok_or_else(|| missing_root_error().into()),
-                    Some(DecodeJsonFrame::Arr(items)) => {
-                        if let Some(item) = value.take() {
-                            builder.push(items, item)?;
-                        }
-                        source.next()?
-                    }
-                    Some(DecodeJsonFrame::Obj(map, hash, key, text)) => {
-                        if let Some(entry_val) = value.take() {
-                            builder.put(map, *hash, Some(*text), *key, entry_val)?;
-                        }
-                        match source.next()? {
-                            true => {
-                                let key_text = source.str()?;
-                                *hash = builder.hash(&key_text)?;
-                                (*key, *text) = builder.key(&key_text, *hash);
-                                true
-                            }
-                            false => false,
-                        }
-                    }
-                };
-                if next {
-                    break;
-                }
-                source.end()?;
-                value = Some(match stack.pop() {
-                    Some(DecodeJsonFrame::Arr(items)) => {
-                        let list = builder.list(items);
-                        builder.st.new_variant(ids.arr, &[list])
-                    }
-                    Some(DecodeJsonFrame::Obj(map, ..)) => {
-                        let map = builder.map(map);
-                        builder.st.new_variant(ids.obj, &[map])
-                    }
-                    None => return Err(missing_root_error().into()),
-                });
-            }
-        }
-    })
-}
-
-/// Decodes a Sand `Json` value from `source` on a [`CallContext`], rooting open
-/// containers so garbage collection can run before any allocation hits
-/// `max_memory`.
-fn decode_json_context(context: &mut CallContext, source: &mut dyn DecodeSource) -> CodecResult<VmValue> {
+/// Decodes a Sand `Json` value from `source`, rooting open containers so
+/// garbage collection can run before any allocation hits `max_memory`.
+fn decode_json(context: &mut CallContext, source: &mut dyn DecodeSource) -> CodecResult<VmValue> {
     enum Frame {
         /// Root index of the open `Obj::List`.
         Arr(usize),
@@ -702,28 +534,29 @@ fn decode_json_context(context: &mut CallContext, source: &mut dyn DecodeSource)
                     Some(val)
                 }
                 InputKind::List => {
+                    source.begin_list()?;
                     if stack.len() >= MAX_NESTING_DEPTH {
                         return codec::nesting_limit_error();
                     }
-                    source.begin_list()?;
+                    let base = context.push_roots(1, VmValue::Unit)?;
                     let list = context.step(|vm| {
                         vm.check_memory(NODE_BYTES)?;
                         Ok::<_, Fail>(vm.heap.new_list(Vec::new()))
                     })?;
-                    let base = context.push_roots(1, list)?;
+                    context.set_root(base, list);
                     stack.push(Frame::Arr(base));
                     None
                 }
                 InputKind::Map => {
+                    source.begin_map()?;
                     if stack.len() >= MAX_NESTING_DEPTH {
                         return codec::nesting_limit_error();
                     }
-                    source.begin_map()?;
+                    let base = context.push_roots(2, VmValue::Unit)?;
                     let map = context.step(|vm| {
                         vm.check_memory(NODE_BYTES)?;
                         Ok::<_, Fail>(vm.heap.alloc(Obj::Map(Box::<MapObj>::default())))
                     })?;
-                    let base = context.push_roots(2, VmValue::Unit)?;
                     context.set_root(base, map);
                     stack.push(Frame::Obj(base, base + 1));
                     None
