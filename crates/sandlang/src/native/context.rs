@@ -3,8 +3,12 @@
 //! Synchronous native functions call Sand through [`CallContext`].
 //! [`Later::new`](super::func::Later::new) futures use [`NativeContext`].
 
+use super::convert::HostError;
 use super::func::{NativeError, NativeReturn};
+use super::ty::TraitDict;
 use crate::policy::Capability;
+use crate::types::traits;
+use crate::value::Value;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::sched::ProgramCode;
 use crate::vm::value::VmValue;
@@ -61,7 +65,7 @@ pub struct NativeContext {
 ///
 /// Read it back from the same context with `value()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RootedValue(u32);
+pub struct RootedValue(pub(crate) u32);
 
 /// State shared between a [`NativeContext`] and the scheduler.
 #[derive(Default)]
@@ -333,12 +337,83 @@ impl<'a> CallContext<'a> {
         CallContext { vm, fiber, roots_start, callback_state: None, run_ending: None }
     }
 
+    #[cold]
+    pub(crate) fn collect_garbage(&mut self) {
+        self.vm.collect_all_garbage(Some(self.fiber));
+    }
+
     /// Returns shared read access to the [`Vm`].
     ///
     /// Use [`CallContext::step`] for `&mut Vm` and [`CallContext::root`] to
     /// keep heap values alive across `call` or `step`.
     pub fn vm(&self) -> &Vm {
         self.vm
+    }
+
+    /// Returns mutable access to the [`Vm`] for crate-internal codec paths that
+    /// manage memory checks and rooting explicitly.
+    pub(crate) fn vm_mut(&mut self) -> &mut Vm {
+        self.vm
+    }
+
+    /// Returns the current root stack depth so scoped roots can be released
+    /// with [`CallContext::truncate_roots`].
+    pub(crate) fn root_mark(&self) -> usize {
+        self.fiber.native_roots.len()
+    }
+
+    /// Releases roots pushed after `mark`.
+    pub(crate) fn truncate_roots(&mut self, mark: usize) {
+        self.fiber.native_roots.truncate(mark);
+    }
+
+    /// Pushes `count` copies of `value` onto the fiber root stack and returns
+    /// their starting index.
+    pub(crate) fn push_roots(&mut self, count: usize, value: VmValue) -> Result<usize, Fail> {
+        let start = self.fiber.native_roots.len();
+        let old_cap = self.fiber.native_roots.capacity();
+        if start + count > old_cap {
+            let need = (start + count - old_cap) * std::mem::size_of::<VmValue>();
+            self.step(|vm| vm.check_memory(need))?;
+        }
+        let roots = &mut self.fiber.native_roots;
+        let old_cap = roots.capacity();
+        roots.resize(start + count, value);
+        self.vm.heap.fiber_bytes += (roots.capacity() - old_cap) * std::mem::size_of::<VmValue>();
+        Ok(start)
+    }
+
+    /// Updates rooted slot `index` on the fiber root stack.
+    #[inline]
+    pub(crate) fn set_root(&mut self, index: usize, value: VmValue) {
+        self.fiber.native_roots[index] = value;
+    }
+
+    /// Returns rooted slot `index` from the fiber root stack.
+    #[inline]
+    pub(crate) fn root_at(&self, index: usize) -> VmValue {
+        self.fiber.native_roots[index]
+    }
+
+    /// Returns a slice of rooted slots from the fiber root stack.
+    #[inline]
+    pub(crate) fn roots_slice(&self, range: std::ops::Range<usize>) -> &[VmValue] {
+        &self.fiber.native_roots[range]
+    }
+
+    /// Returns mutable VM access alongside the fiber's root slice.
+    #[inline]
+    pub(crate) fn vm_and_roots(&mut self) -> (&mut Vm, &[VmValue]) {
+        (self.vm, &self.fiber.native_roots)
+    }
+
+    /// Encodes `value` into a host [`Value`] using `encode_dict`.
+    ///
+    /// Runs custom Sand `Encode.encode` methods synchronously. Any attempt to
+    /// wait, prompt for permissions, or self-cancel inside a custom method
+    /// fails immediately with an `"invalid"` error.
+    pub fn to_value<const N: u8>(&mut self, value: VmValue, encode_dict: TraitDict<N, traits::Encode>) -> Result<Value, HostError<Fail>> {
+        crate::stdlib::codec::to_value(self, value, encode_dict.raw())
     }
 
     /// Calls Sand function `callee` with `args` on the calling task.
@@ -349,13 +424,12 @@ impl<'a> CallContext<'a> {
     ///
     /// A terminal run ending from `callee` is recorded, returned from this and
     /// all later `call` or `step` calls, and applied after the native call returns.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `args.len()` exceeds 255.
+    /// Returns a `"limit"` error if `args.len()` exceeds 255.
     #[inline]
     pub fn call(&mut self, callee: VmValue, args: &[VmValue]) -> Result<VmValue, Fail> {
-        assert!(args.len() <= MAX_CALLBACK_ARGS, "a callback takes at most {MAX_CALLBACK_ARGS} arguments");
+        if args.len() > MAX_CALLBACK_ARGS {
+            return Err(Fail::runtime_error("limit", format!("a callback takes at most {MAX_CALLBACK_ARGS} arguments")));
+        }
         if let Some(ending) = &self.run_ending {
             return Err(ending.clone().into());
         }

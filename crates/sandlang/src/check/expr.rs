@@ -615,18 +615,8 @@ impl Checker {
             let mut scope = self.fs.generics.clone();
             let self_ty = self.fs.self_ty;
             let own = self.declare_params(&f.generics, &scope, self_ty);
-            for (g, &p) in f.generics.iter().zip(&own) {
+            for &p in &own {
                 scope.push((self.params[p as usize].name, p));
-                let with_dicts: Vec<TraitRef> = self.params[p as usize].traits.iter().copied().filter(|tr| self.has_dict(tr)).collect();
-                if !with_dicts.is_empty() {
-                    self.error(g.name.span, "local functions cannot require traits with methods; declare the function at the top level");
-                    // Insert error evidence so the body can use the traits without cascading errors.
-                    let pt = self.param_ty(p);
-                    self.fs.evidence.extend(with_dicts.into_iter().map(|tr| (pt, tr, mk(HKind::Error, TypeId::UNIT, g.name.span))));
-                }
-                if g.reflect {
-                    self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
-                }
             }
             let mut ptys = Vec::new();
             self.check_param_names(f.params.iter().map(|p| &p.name));
@@ -659,6 +649,15 @@ impl Checker {
             self.fs.ctx.push(FnCtx { ret, kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
             self.push_scope();
             let mut params = Vec::new();
+            let dicts = self.local_fn_dicts(self_local);
+            for &(bound_ty, trait_ref) in &dicts {
+                let dict_local = self.declare_local_sym(Symbol::DICT, TypeId::UNIT, false, f.name.span, true);
+                self.fs.data[dict_local as usize].used = true;
+                // Each local function owns distinct `ParamId`s, so its dictionary
+                // parameters stay valid in `fs.evidence` across the enclosing function.
+                self.fs.evidence.push((bound_ty, trait_ref, mk(HKind::Local(dict_local), TypeId::UNIT, f.name.span)));
+                params.push(dict_local);
+            }
             for (p, &t) in f.params.iter().zip(&ptys) {
                 params.push(self.declare_local(&p.name.name, t, false, p.name.span, true));
             }
@@ -672,7 +671,7 @@ impl Checker {
             self.fs.ctx.pop();
             self.fs.generics = saved_generics;
             lambdas.push(mk(
-                HKind::Lambda(Box::new(HLambda { id, name: f.name.name.clone(), params, body, self_local: Some(self_local) })),
+                HKind::Lambda(Box::new(HLambda { id, name: f.name.name.clone(), params, dicts, body, self_local: Some(self_local) })),
                 fty,
                 f.span,
             ));
@@ -942,7 +941,7 @@ impl Checker {
                 self.fs.ctx.pop();
                 let lam_ty = self.fn_ty(&[], ret);
                 let lam = mk(
-                    HKind::Lambda(Box::new(HLambda { id, name: "<spawn>".into(), params: vec![], body, self_local: None })),
+                    HKind::Lambda(Box::new(HLambda { id, name: "<spawn>".into(), params: vec![], dicts: vec![], body, self_local: None })),
                     lam_ty,
                     span,
                 );
@@ -1007,15 +1006,68 @@ impl Checker {
     // ------------------------------------------------------------------
     // Names
 
-    fn instantiate_local(&mut self, l: LocalId, span: Span) -> TypeId {
-        let t = self.fs.data[l as usize].ty;
-        if self.fs.data[l as usize].scheme.is_empty() {
-            return t;
+    /// Returns the trait bounds on local function `local_id` that need runtime
+    /// dictionaries.
+    fn local_fn_dicts(&mut self, local_id: LocalId) -> Vec<(TypeId, TraitRef)> {
+        let mut dicts = Vec::new();
+        for param in self.fs.data[local_id as usize].scheme.clone() {
+            let param_ty = self.arena.param(param);
+            dicts.extend(
+                self.params[param as usize]
+                    .traits
+                    .iter()
+                    .filter(|trait_ref| self.has_dict(trait_ref))
+                    .map(|&trait_ref| (param_ty, trait_ref)),
+            );
         }
-        let scheme = self.fs.data[l as usize].scheme.clone();
+        dicts
+    }
+
+    /// Instantiates generic local `local_id`, returning its instantiated type
+    /// and evidence-hole arguments for its hidden dictionary parameters.
+    fn instantiate_local(&mut self, local_id: LocalId, span: Span) -> (TypeId, Vec<HExpr>) {
+        let local_ty = self.fs.data[local_id as usize].ty;
+        if self.fs.data[local_id as usize].scheme.is_empty() {
+            return (local_ty, Vec::new());
+        }
+        let scheme = self.fs.data[local_id as usize].scheme.clone();
         let fresh: Vec<TypeId> = scheme.iter().map(|_| self.fresh()).collect();
-        self.require_traits(&scheme, &fresh, &[], span);
-        self.arena.instantiate(t, &scheme, &fresh)
+        let dicts = self.local_fn_dicts(local_id);
+        self.require_traits(&scheme, &fresh, &dicts, span);
+        let local_ty = self.arena.instantiate(local_ty, &scheme, &fresh);
+        let dict_args = dicts
+            .into_iter()
+            .map(|(bound_ty, trait_ref)| {
+                let bound_ty = self.arena.instantiate(bound_ty, &scheme, &fresh);
+                let trait_ref = trait_ref.subst_params(&mut self.arena, &|p| scheme.iter().position(|&g| g == p).map(|i| fresh[i]));
+                self.evidence_hole(bound_ty, trait_ref, false, span)
+            })
+            .collect();
+        (local_ty, dict_args)
+    }
+
+    /// Returns a use of local `local_id`, wrapping a generic local function in
+    /// a closure if it takes hidden dictionary parameters.
+    fn local_value(&mut self, local_id: LocalId, span: Span) -> HExpr {
+        let (local_ty, mut args) = self.instantiate_local(local_id, span);
+        if args.is_empty() {
+            return mk(HKind::Local(local_id), local_ty, span);
+        }
+        let Ty::Fn(param_list, ret) = self.ty(local_ty) else { return mk(HKind::Local(local_id), local_ty, span) };
+        let param_tys = self.elems(param_list);
+        let lambda_id = self.new_lambda();
+        let mut params = Vec::new();
+        for &param_ty in &param_tys {
+            self.fs.locals.push(LocalInfo { name: Symbol::ARG, mutable: false, owner: lambda_id, cell: false, span });
+            self.fs.data.push(LocalData { ty: param_ty, scheme: vec![], used: true, assigned: false, is_param: true, decl_span: span });
+            let param_local = (self.fs.locals.len() - 1) as LocalId;
+            params.push(param_local);
+            args.push(mk(HKind::Local(param_local), param_ty, span));
+        }
+        let callee = Box::new(mk(HKind::Local(local_id), local_ty, span));
+        let body = mk(HKind::CallValue { callee, args }, ret, span);
+        let name = self.name(self.fs.locals[local_id as usize].name).to_string();
+        mk(HKind::Lambda(Box::new(HLambda { id: lambda_id, name, params, dicts: vec![], body, self_local: None })), local_ty, span)
     }
 
     fn check_ident(&mut self, id: &ast::Ident, hint: Option<TypeId>) -> HExpr {
@@ -1024,10 +1076,9 @@ impl Checker {
             self.error(span, "`_` cannot be used as a value");
             return err(span);
         }
-        if let Some(l) = self.find_local(&id.name) {
-            self.use_local(l);
-            let t = self.instantiate_local(l, span);
-            return mk(HKind::Local(l), t, span);
+        if let Some(local_id) = self.find_local(&id.name) {
+            self.use_local(local_id);
+            return self.local_value(local_id, span);
         }
         match self.lookup_global(&id.name) {
             Some(def) => self.def_value(def, &id.name, hint, span),
@@ -1119,14 +1170,14 @@ impl Checker {
         }
     }
 
-    fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
-        let fi = &self.fns[f as usize];
-        if !fi.dicts.is_empty() || fi.generics.iter().any(|&p| self.params[p as usize].reflect) {
-            return self.wrapper_value(f, &[], span);
+    fn fn_value(&mut self, fn_id: FnId, span: Span) -> HExpr {
+        let fi = &self.fns[fn_id as usize];
+        if !fi.dicts.is_empty() || self.takes_encoded_arg(fn_id) {
+            return self.wrapper_value(fn_id, &[], span);
         }
-        let inst = self.instantiate_fn_with(f, span, &[]);
+        let inst = self.instantiate_fn_with(fn_id, span, &[]);
         let t = self.fn_ty(&inst.params, inst.ret);
-        mk(HKind::FnValue { func: f, targs: inst.fresh }, t, span)
+        mk(HKind::FnValue { func: fn_id, targs: inst.fresh }, t, span)
     }
 
     /// Returns the type arguments for constructing `d`, reusing `hint` if it is
@@ -1550,18 +1601,56 @@ impl Checker {
         let Some(mut hargs) = self.bind_args(Callee::Fn(f), &ptys, recv, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        let mut hidden = self.hidden_args(f, &fresh, &dicts, "call", &|_, _| false, span);
+        let mut hidden = self.hidden_args(&dicts, &|_, _| false, span);
         if !hidden.is_empty() {
-            let k = hidden.len();
+            let dict_count = hidden.len();
             for a in &mut hargs {
                 if let HArg::Default { inputs, .. } = a {
-                    *inputs = (0..k).chain(inputs.iter().map(|i| i + k)).collect();
+                    *inputs = (0..dict_count).chain(inputs.iter().map(|i| i + dict_count)).collect();
                 }
             }
             hidden.extend(hargs);
             hargs = hidden;
         }
+        let first_value_arg = hargs.len() - ptys.len();
+        self.encode_native_args(f, &ptys, &mut hargs[first_value_arg..], span);
         mk(self.call_kind(f, fresh, hargs), ret, span)
+    }
+
+    /// Returns `true` if native function `fn_id` accepts an
+    /// [`Encoded`](crate::native::ty::Encoded) parameter.
+    fn takes_encoded_arg(&self, fn_id: FnId) -> bool {
+        let FnKind::Native(n) = self.fns[fn_id as usize].kind else { return false };
+        self.natives.fns.get(n as usize).is_some_and(|d| d.sig.params.iter().any(|t| matches!(t, Type::Encoded(_))))
+    }
+
+    /// Wraps each [`Encoded`](crate::native::ty::Encoded) argument of native
+    /// function `fn_id` in a `prelude.encode_arg` call.
+    pub(crate) fn encode_native_args(&mut self, fn_id: FnId, param_tys: &[TypeId], args: &mut [HArg], span: Span) {
+        let FnKind::Native(n) = self.fns[fn_id as usize].kind else { return };
+        let Some(decl) = self.natives.fns.get(n as usize) else { return };
+        let is_encoded_param: Vec<bool> =
+            decl.sig.params.iter().filter(|t| !matches!(t, Type::TraitDict(..))).map(|t| matches!(t, Type::Encoded(_))).collect();
+        if !is_encoded_param.contains(&true) {
+            return;
+        }
+        let (Some(encode_fn), Some(encode_trait)) = (self.natives.id("prelude.encode_arg"), self.builtin_trait(Builtin::Encode)) else {
+            return;
+        };
+        for ((arg, &param_ty), _) in args.iter_mut().zip(param_tys).zip(&is_encoded_param).filter(|(_, is_encoded)| **is_encoded) {
+            let HArg::Expr(expr) = arg else { continue };
+            let value = std::mem::replace(expr, mk(HKind::Unit, TypeId::UNIT, span));
+            let dict = self.evidence_hole(param_ty, encode_trait, false, span);
+            let call = HKind::CallNative { native: encode_fn, targs: vec![param_ty], args: vec![HArg::Expr(dict), HArg::Expr(value)] };
+            *expr = mk(call, self.encoded_arg_ty(), span);
+        }
+    }
+
+    fn encoded_arg_ty(&mut self) -> TypeId {
+        match self.prelude.and_then(|p| self.lookup_module_def(p, "EncodedArg")) {
+            Some(Def::Type(TyRef::Def(d))) => self.arena.named(d, &[]),
+            _ => TypeId::ERROR,
+        }
     }
 
     pub(crate) fn call_kind(&self, f: FnId, targs: Vec<TypeId>, args: Vec<HArg>) -> HKind {
@@ -1705,6 +1794,10 @@ impl Checker {
     }
 
     fn call_value(&mut self, callee: HExpr, args: &CallArgs, span: Span) -> HExpr {
+        self.call_value_with_prefix(callee, Vec::new(), args, span)
+    }
+
+    fn call_value_with_prefix(&mut self, callee: HExpr, mut prefix: Vec<HExpr>, args: &CallArgs, span: Span) -> HExpr {
         let ct = self.resolve(callee.ty);
         let (ptys, ret) = match self.ty(ct) {
             Ty::Fn(ps, r) => {
@@ -1739,14 +1832,16 @@ impl Checker {
         let Some(hargs) = self.bind_args(Callee::Value, &ptys, None, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        let hs = hargs
-            .into_iter()
-            .map(|a| match a {
-                HArg::Expr(e) => e,
-                HArg::Default { .. } => unreachable!(),
-            })
-            .collect();
-        mk(HKind::CallValue { callee: Box::new(callee), args: hs }, ret, span)
+        prefix.extend(hargs.into_iter().map(|a| match a {
+            HArg::Expr(e) => e,
+            HArg::Default { .. } => unreachable!(),
+        }));
+        mk(HKind::CallValue { callee: Box::new(callee), args: prefix }, ret, span)
+    }
+
+    fn call_local_fn(&mut self, local_id: LocalId, callee_span: Span, args: &CallArgs, span: Span) -> HExpr {
+        let (local_ty, dict_args) = self.instantiate_local(local_id, span);
+        self.call_value_with_prefix(mk(HKind::Local(local_id), local_ty, callee_span), dict_args, args, span)
     }
 
     fn with_call_args(&mut self, args: &[Arg], check: impl FnOnce(&mut Self, &CallArgs) -> HExpr) -> HExpr {
@@ -1761,21 +1856,27 @@ impl Checker {
 
     fn check_call(&mut self, callee: &Expr, args: &CallArgs, span: Span) -> HExpr {
         match &callee.kind {
-            ExprKind::Ident(id) if self.find_local(&id.name).is_none() => match self.lookup_global(&id.name) {
-                Some(Def::Fn(f)) => {
-                    if let FnKind::Intrinsic(i) = self.fns[f as usize].kind {
-                        return self.check_intrinsic(i, args, span);
+            ExprKind::Ident(id) => {
+                if let Some(local_id) = self.find_local(&id.name) {
+                    self.use_local(local_id);
+                    return self.call_local_fn(local_id, callee.span, args, span);
+                }
+                match self.lookup_global(&id.name) {
+                    Some(Def::Fn(f)) => {
+                        if let FnKind::Intrinsic(i) = self.fns[f as usize].kind {
+                            return self.check_intrinsic(i, args, span);
+                        }
+                        return self.call_fn(f, None, args, span);
                     }
-                    return self.call_fn(f, None, args, span);
+                    Some(Def::Variant(d, i)) => return self.call_variant(d, i, args, span),
+                    Some(Def::Type(r)) => {
+                        let t = self.fresh_tyref(r, id.span, &id.name);
+                        return self.construct(t, &id.name, args, callee.span, span);
+                    }
+                    _ if let Some(Ns::Type(t)) = self.resolve_ns(callee) => return self.construct(t, &id.name, args, callee.span, span),
+                    _ => {}
                 }
-                Some(Def::Variant(d, i)) => return self.call_variant(d, i, args, span),
-                Some(Def::Type(r)) => {
-                    let t = self.fresh_tyref(r, id.span, &id.name);
-                    return self.construct(t, &id.name, args, callee.span, span);
-                }
-                _ if let Some(Ns::Type(t)) = self.resolve_ns(callee) => return self.construct(t, &id.name, args, callee.span, span),
-                _ => {}
-            },
+            }
             ExprKind::SelfType => {
                 if let Some(Ns::Type(t)) = self.resolve_ns(callee) {
                     return self.construct(t, "Self", args, callee.span, span);
@@ -2190,7 +2291,18 @@ impl Checker {
             let v = match (given, &base, self.types[d as usize].fields()[i].default) {
                 (Some(h), _, _) => h,
                 (None, Some(b), _) => mk(HKind::Field { obj: Box::new(b.clone()), index: i as u32 }, fty, span),
-                (None, None, Some(helper)) => mk(HKind::Call { func: helper, targs: targs.clone(), args: vec![] }, fty, span),
+                (None, None, Some(helper)) => {
+                    let generics = self.types[d as usize].generics.clone();
+                    let mut args = Vec::new();
+                    for (bound_ty, trait_ref) in self.fns[helper as usize].dicts.clone() {
+                        let bound_ty = self.arena.instantiate(bound_ty, &generics, &targs);
+                        let trait_ref = trait_ref.subst_params(&mut self.arena, &|param| {
+                            generics.iter().position(|&generic| generic == param).map(|idx| targs[idx])
+                        });
+                        args.push(HArg::Expr(self.evidence_hole(bound_ty, trait_ref, false, span)));
+                    }
+                    mk(HKind::Call { func: helper, targs: targs.clone(), args }, fty, span)
+                }
                 (None, None, None) => {
                     let field = self.name(self.types[d as usize].fields()[i].name);
                     self.error(span, format!("missing field `{field}` in `{name}(...)`"));
@@ -2949,7 +3061,11 @@ impl Checker {
             b
         };
         let fty = self.fn_ty(&ptys, ret);
-        mk(HKind::Lambda(Box::new(HLambda { id, name: "<lambda>".into(), params: locals, body: body_h, self_local: None })), fty, span)
+        mk(
+            HKind::Lambda(Box::new(HLambda { id, name: "<lambda>".into(), params: locals, dicts: vec![], body: body_h, self_local: None })),
+            fty,
+            span,
+        )
     }
 }
 

@@ -24,14 +24,14 @@ Structs and enums can also be generic (see [Structs and enums](/guide/structs-an
 
 An unconstrained type parameter `T` supports only storage, passing, and formatting. Require a trait (`T: Trait`) to compare, hash, or perform arithmetic on values of type `T`. Combine several traits with `+`, as in `T: Ord + Hash`.
 
-| Trait    | Operations                       | Supporting types                                                |
-| -------- | -------------------------------- | --------------------------------------------------------------- |
-| `Eq`     | `==`, `!=`                       | all types except functions                                      |
-| `Ord`    | `<`, `>`, `sorted()`, `max()`    | numbers, `str`, lists, tuples                                   |
-| `Hash`   | map keys and set elements        | `int`, `bool`, `str`, tuples                                    |
-| `Num`    | `+`, `-`, `*`, `/`, `T.zero()`   | `int`, `float`                                                  |
-| `Encode` | `json.encode()`                  | all types except functions, tasks, channels, and native objects |
-| `Decode` | `json.decode()`                  | `Encode` types except structs that declare `init`               |
+| Trait    | Operations                     | Supporting types                        |
+| -------- | ------------------------------ | --------------------------------------- |
+| `Eq`     | `==`, `!=`                     | all types except functions              |
+| `Ord`    | `<`, `>`, `sorted()`, `max()`  | numbers, `str`, lists, tuples           |
+| `Hash`   | map keys and set elements      | `int`, `bool`, `str`, tuples            |
+| `Num`    | `+`, `-`, `*`, `/`, `T.zero()` | `int`, `float`                          |
+| `Encode` | `json.encode()`                | data types and native types that opt in |
+| `Decode` | `json.decode()`                | data types and native types that opt in |
 
 ```sand
 fn largest<T: Ord>(xs: [T]) -> T? {
@@ -61,7 +61,7 @@ print(total([1.5, 2.5]))
 print(counts(["a", "b", "a"]))
 ```
 
-The compiler derives `Eq`, `Ord`, `Hash`, and `Encode` for each struct, enum, and tuple whose fields implement them. A struct with a `var` field does not implement `Hash`. `help(Type)` lists the traits that a type implements. For complete rules, see [§5.6 of the specification](/spec/#56-built-in-traits).
+The compiler derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode` for each struct, enum, and tuple whose components implement them. Immutable structs derive `Hash`. A custom `impl` block for `Encode` or `Decode` overrides the derived implementation. `help(Type)` lists the traits that a type implements. For complete rules, see [§5.6](/spec/#56-built-in-traits) and [§5.7](/spec/#57-encode-and-decode) of the specification.
 
 If a function uses an operation of a trait that its type parameter does not require, the compiler reports the missing trait:
 

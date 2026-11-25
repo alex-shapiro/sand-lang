@@ -444,18 +444,54 @@ let l = List()
 4: `int` does not declare `init`
 5: `List` does not declare `init`
 
-=== a struct that declares init does not implement Decode
+=== structs that declare init are decoded through init
 import json
 struct Port {
     n: int
-    fn init(n: int) -> Result<Port> { Ok(Self(n)) }
+    fn init(n: int) -> Result<Port> {
+        if n < 0 {
+            return Err(Error(message: "negative port", kind: "invalid"))
+        }
+        Ok(Self(n))
+    }
 }
-struct Config { port: Port }
-print(json.encode(Port(80)?))
-let c: Result<Config> = json.decode("{}")
+struct Config { port: Port, backup: Port? }
+print(json.encode(Port(80)?)?)
+let c: Config = json.decode("{\"port\": {\"n\": 8080}}")?
+print(c)
+let bad: Result<Config> = json.decode("{\"port\": {\"n\": -1}}")
+print(bad)
+let missing: Result<Config> = json.decode("{\"port\": {}}")
+print(missing)
+--- stdout
+{"n":80}
+Config(port: Port(n: 8080), backup: None)
+Err(Error(message: "$.port: negative port", kind: "invalid"))
+Err(Error(message: "$.port: missing field `n`", kind: "parse"))
+
+=== decoding through init with parameter defaults and trait bounds
+import json
+trait Unit { fn unit() -> Self }
+impl Unit for str { fn unit() -> str { "u" } }
+fn count() -> int { 3 }
+struct Interval<T: Unit> {
+    lo: int
+    hi: int
+    label: T
+    fn init(lo: int, note: str?, span: int = count(), label: T = T.unit()) -> Interval<T> {
+        Self(lo: lo, hi: lo + span, label: label)
+    }
+}
+let r: Interval<str> = json.decode("{\"lo\": 1}")?
+print(r)
+let s: Interval<str> = json.decode("{\"lo\": 1, \"span\": 9, \"label\": \"x\", \"note\": \"n\"}")?
+print(s)
+print(json.encode(r))
+--- stdout
+Interval(lo: 1, hi: 4, label: "u")
+Interval(lo: 1, hi: 10, label: "x")
 --- error
-8: Config does not implement `Decode`
-8: `Port` declares `init`, which decoding does not call
+17: Interval<str> does not implement `Encode`
 
 === `..base` and `..` must come last
 struct P { x: int, y: int }

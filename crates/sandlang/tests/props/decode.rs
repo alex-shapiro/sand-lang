@@ -15,8 +15,10 @@ enum Ty {
     UnitEnum,
     Rec,
     Keyed,
-    /// `struct Valid { a: int }` with an `init` method (which does not implement `Decode`).
+    /// `struct Valid { a: int }`. Declares an `init` constructor.
     Valid,
+    /// `struct Custom { n: int }`. Implements custom `Encode` and `Decode`.
+    Custom,
     Fn,
     Task,
     Range,
@@ -27,7 +29,7 @@ enum Ty {
     Tuple(Vec<Ty>),
     Wrap(Box<Ty>),
     Tree(Box<Ty>),
-    /// `struct Bag<T> { s: Set<T> }`, which requires `T: Hash`.
+    /// `struct Bag<T> { s: Set<T> }`. Requires `T: Hash`.
     Bag(Box<Ty>),
     Param,
 }
@@ -47,6 +49,7 @@ impl Ty {
             Ty::Rec => "Rec".into(),
             Ty::Keyed => "Keyed".into(),
             Ty::Valid => "Valid".into(),
+            Ty::Custom => "Custom".into(),
             Ty::Fn => "(fn() -> int)".into(),
             Ty::Task => "Task<int>".into(),
             Ty::Range => "Range".into(),
@@ -90,7 +93,7 @@ impl Ty {
 
     fn decodable(&self) -> bool {
         match self {
-            Ty::Fn | Ty::Task | Ty::Valid => false,
+            Ty::Fn | Ty::Task => false,
             Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.decodable(),
             Ty::Map(k, v) => k.decodable() && v.decodable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::decodable),
@@ -101,7 +104,17 @@ impl Ty {
     /// Returns `true` if the type implements `Hash`.
     fn hashable(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Unit | Ty::Duration | Ty::UnitEnum | Ty::Rec | Ty::Valid | Ty::Range => true,
+            Ty::Int
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::Unit
+            | Ty::Duration
+            | Ty::UnitEnum
+            | Ty::Rec
+            | Ty::Valid
+            | Ty::Custom
+            | Ty::Range => true,
             Ty::Option(t) | Ty::Wrap(t) => t.hashable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::hashable),
             _ => false,
@@ -142,14 +155,16 @@ fn ty() -> impl Strategy<Value = Ty> {
     ty_with(0, 1)
 }
 
-/// Generates types with type parameter `T` weighted by `param`, and non-`Hash`
-/// or non-`Decode` types weighted by `bad`.
+/// Generates random types for `Decode` checks.
+///
+/// `param` weights occurrences of type parameter `T`. `bad` weights types
+/// without `Decode` or `Hash`.
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
-        4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec)],
+        4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec), Just(Ty::Valid), Just(Ty::Custom)],
         1 => prop_oneof![Just(Ty::Range), Just(Ty::Keyed)],
-        bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task), Just(Ty::Valid)],
+        bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task)],
         param => Just(Ty::Param),
     ];
     leaf.prop_recursive(3, 12, 3, move |inner| {
@@ -169,7 +184,10 @@ fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
 
 const TYPES: &str = "enum Unit { A, B }\nstruct Rec { a: int, b: str? }\nstruct Key { a: int }\nstruct Keyed { m: [Key: int]? }\nstruct Wrap<T> { v: T }\n\
                      struct Tree<T> { v: T, kids: [Tree<T>] = [] }\nstruct Bag<T> { s: Set<T> }\n\
-                     struct Valid {\n    a: int\n    fn init(a: int) -> Valid { Self(a) }\n}";
+                     struct Valid {\n    a: int\n    fn init(a: int) -> Valid { Self(a) }\n}\n\
+                     struct Custom { n: int }\n\
+                     impl Encode for Custom {\n    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.n) }\n}\n\
+                     impl Decode for Custom {\n    fn decode(decoder: Decoder) -> Result<Custom> {\n        match decoder.kind()? {\n            InputKind.Int => Ok(Custom(n: decoder.decode()?))\n            InputKind.Str => {\n                let s: str = decoder.decode()?\n                Ok(Custom(n: s.len()))\n            }\n            _ => Err(Error(message: \"expected int or str\", kind: \"parse\"))\n        }\n    }\n}";
 
 const INPUTS: [&str; 14] = [
     "null",
@@ -219,8 +237,16 @@ proptest! {
                     else { None }
                 };
                 prop_assert!(ds.iter().all(|d| trait_of(d).is_some()), "{ds:?}\n{src}");
-                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(true)), !t.decodable(), "{:?}\n{}", ds, src);
-                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(false)), !t.well_formed(), "{:?}\n{}", ds, src);
+                // The checker stops at the first unsatisfied bound on an `impl` block.
+                // Either missing trait diagnostic can therefore suppress the other.
+                let (missing_decode, missing_hash) =
+                    (ds.iter().any(|diag| trait_of(diag) == Some(true)), ds.iter().any(|diag| trait_of(diag) == Some(false)));
+                if t.well_formed() {
+                    prop_assert!(missing_decode && !missing_hash, "{:?}\n{}", ds, src);
+                }
+                if t.decodable() {
+                    prop_assert!(missing_hash && !missing_decode, "{:?}\n{}", ds, src);
+                }
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),
@@ -263,6 +289,7 @@ fn json_text(t: &Ty, rng: &mut Rng, depth: u32, wrong: u64) -> String {
         Ty::Rec => ["{\"a\": 1, \"b\": \"x\"}", "{\"a\": 2}"][rng.below(2) as usize].into(),
         Ty::Keyed => ["{}", "{\"m\": null}"][rng.below(2) as usize].into(),
         Ty::Valid => "{\"a\": 1}".into(),
+        Ty::Custom => ["1", "\"ab\""][rng.below(2) as usize].into(),
         Ty::Range => ["{\"start\": 1, \"end\": 3}", "{\"start\": 0, \"end\": 0, \"inclusive\": true}"][rng.below(2) as usize].into(),
         Ty::Fn | Ty::Task | Ty::Param => "null".into(),
         Ty::List(e) | Ty::Set(e) => format!("[{}]", many(e, rng).join(", ")),
@@ -302,14 +329,14 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn reflect_type_parameters_build_descriptions_of_types_that_contain_them(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
+    fn decode_dictionaries_are_built_from_type_parameter_dictionaries(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
         let full = ctx.subst(&arg);
         let mut rng = Rng(seed);
         let texts: Vec<String> = (0..8).map(|i| format!("{:?}", json_text(&full, &mut rng, 0, [1000, 12][i % 2]))).collect();
         let src = format!(
             "import json\n{TYPES}\n\
              fn direct(s: str) -> Result<{}> {{ json.decode(s) }}\n\
-             fn via<reflect T: Decode>(s: str) -> Result<{}> {{ json.decode(s) }}\n\
+             fn via<T: Decode>(s: str) -> Result<{}> {{ json.decode(s) }}\n\
              fn read(s: str) -> Result<{}> {{ via(s) }}\n\
              for s in [{}] {{\n    print(direct(s))\n    print(read(s))\n}}",
             full.sand(),
@@ -380,7 +407,7 @@ proptest! {
     fn json_decode_fills_missing_fields_with_constant_defaults(fields in prop::collection::vec(constant_default(), 1..6)) {
         let decls: Vec<String> = fields.iter().enumerate().map(|(i, (ty, e))| format!("    f{i}: {ty} = {e}")).collect();
         let src = format!(
-            "import json\n{CONSTANT_TYPES}\nstruct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nprint(s == S())\nprint(json.encode(s) == json.encode(S()))",
+            "import json\n{CONSTANT_TYPES}\nstruct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nprint(s == S())\nprint(json.encode(s)? == json.encode(S())?)",
             decls.join("\n")
         );
         check(&src, "true\ntrue\n", None)?;
@@ -399,7 +426,7 @@ proptest! {
         let src = format!(
             "import json\n{CONSTANT_TYPES}\nvar calls: [int] = []\nfn note<T>(i: int, x: T) -> T {{\n    calls.push(i)\n    x\n}}\n\
              struct S {{\n{}\n}}\nlet s: S = json.decode(\"{{}}\")?\nlet decoded = calls\ncalls = []\nlet literal = S()\n\
-             print(s == literal)\nprint(decoded == calls)\ncalls = []\nlet full: S = json.decode(json.encode(literal))?\nprint(json.encode(full) == json.encode(literal))\nprint(calls)\nprint(decoded)",
+             print(s == literal)\nprint(decoded == calls)\ncalls = []\nlet full: S = json.decode(json.encode(literal)?)?\nprint(json.encode(full)? == json.encode(literal)?)\nprint(calls)\nprint(decoded)",
             decls.join("\n")
         );
         let order: Vec<String> = fields.iter().enumerate().filter(|(_, (_, computed))| *computed).map(|(i, _)| i.to_string()).collect();
@@ -511,7 +538,41 @@ proptest! {
         for i in 1..chain {
             src += &format!("struct S{i} {{ next: S{} = S{}() }}\n", i + 1, i + 1);
         }
-        src += &format!("struct S{chain} {{ v: int = 1 }}\nlet s: S0 = json.decode(\"{{}}\")?\nprint(s == S0())\nprint(json.encode(s) == json.encode(S0()))\n");
+        src += &format!("struct S{chain} {{ v: int = 1 }}\nlet s: S0 = json.decode(\"{{}}\")?\nprint(s == S0())\nprint(json.encode(s)? == json.encode(S0())?)\n");
         check(&src, "true\ntrue\n", None)?;
+    }
+
+    #[test]
+    fn codec_roundtrip_agrees_across_modes(
+        t in ty_with(0, 0).prop_filter("valid map keys", |t| t.decodable() && t.well_formed() && t.keys_decodable()),
+        seed in 1..u64::MAX,
+    ) {
+        let mut rng = Rng(seed);
+        let texts: Vec<String> = (0..6).map(|_| format!("{:?}", json_text(&t, &mut rng, 0, 1000))).collect();
+        let src = format!(
+            "import json\n{TYPES}\n\
+             fn roundtrip<T: Encode + Decode + Eq>(s: str) -> (Result<T>, str) {{\n\
+                 let r: Result<T> = json.decode(s)\n\
+                 match r {{\n\
+                     Ok(v) => {{\n\
+                         let compact = json.encode(v).unwrap()\n\
+                         let pretty = json.encode(v, indent: 2).unwrap()\n\
+                         let j = json.to_json(v).unwrap()\n\
+                         let a: T = json.decode(compact).unwrap()\n\
+                         let b: T = json.decode(pretty).unwrap()\n\
+                         (Ok(v), \"\\(a == v) \\(b == v) \\(json.parse(compact).unwrap() == j) \\(json.encode(j).unwrap() == compact)\")\n\
+                     }}\n\
+                     Err(e) => (Err(e), e.kind)\n\
+                 }}\n\
+             }}\n\
+             for s in [{}] {{\n    let (_, out): (Result<{}>, str) = roundtrip(s)\n    print(out)\n}}",
+            texts.join(", "),
+            t.sand()
+        );
+        let run = super::run_modes(&src, &[super::Mode::Optimized, super::Mode::Unoptimized, super::Mode::GcStress])?;
+        prop_assert!(run.failure.is_none(), "{:?}\n{}", run.failure, src);
+        for line in run.stdout.lines() {
+            prop_assert!(line == "true true true true" || line == "parse", "unexpected `{line}`\n{src}");
+        }
     }
 }

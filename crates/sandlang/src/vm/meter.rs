@@ -293,6 +293,20 @@ impl WorkerMeter {
         if self.stopped { Err(WorkerStopped) } else { Ok(()) }
     }
 
+    /// Charges fuel for work and returns a [`Fail`] matching the stop reason.
+    pub fn charge_fail(&mut self, units: u64) -> Result<(), Fail> {
+        if self.charge(units).is_ok() {
+            return Ok(());
+        }
+        if self.interrupt_flag.load(Ordering::Relaxed) {
+            Err(Fail::interrupted())
+        } else if self.fuel_used > self.fuel_limit {
+            Err(Fail::limit(LimitKind::Instructions))
+        } else {
+            Err(Fail::limit(LimitKind::WallTime))
+        }
+    }
+
     /// Charges fuel for bulk memory work on a worker thread.
     pub fn charge_bytes(&mut self, byte_count: usize) -> Result<(), WorkerStopped> {
         self.charge((byte_count / BYTES_PER_FUEL_UNIT) as u64)

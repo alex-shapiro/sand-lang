@@ -187,12 +187,6 @@ pub enum BoxedNativeFn {
 /// ```
 ///
 /// ```compile_fail,E0277
-/// # use sandlang::native::ty::Reflect;
-/// fn assert_send<T: Send>() {}
-/// assert_send::<Reflect<0>>();
-/// ```
-///
-/// ```compile_fail,E0277
 /// # use sandlang::native::ty::VmVal;
 /// #[derive(sandlang::SandObject)]
 /// #[sand(module = "db")]
@@ -511,7 +505,6 @@ macro_rules! fn_impls {
             fn into_native_fn(self) -> BoxedNativeFn {
                 BoxedNativeFn::Context(Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args: std::ops::Range<usize>| -> Result<VmValue, Ctl> {
                     read_params!(vm, &fiber.stack[args], $($param),*);
-                    vm.arm_retry_stress();
                     let mut context = CallContext::new(vm, fiber);
                     let output = self(&mut context, $($param),*);
                     context.finish(output)

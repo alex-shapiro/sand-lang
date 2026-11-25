@@ -59,7 +59,7 @@ fn nanos(d: SignedDuration) -> i64 {
 /// Standard error record with a human-readable `message` and a
 /// machine-readable `kind` tag that defaults to `"error"`.
 #[derive(Clone, Debug, PartialEq, crate::SandStruct)]
-#[sand(module = "prelude")]
+#[sand(module = "prelude", derive(Encode, Decode))]
 pub(crate) struct Error {
     /// Human-readable error description.
     pub message: String,
@@ -73,6 +73,7 @@ pub(crate) fn prelude() -> NativeModule {
     m.builtin_type("Task", "Handle to a concurrent task started with `spawn`.", &["T"]);
     m.builtin_type("Channel", "FIFO message queue for communicating between tasks.", &["T"]);
     m.bind::<Error>();
+    super::codec::register(&mut m);
 
     // Globals.
     m.function("print", |vm: &mut Vm, x: Param<0>| {

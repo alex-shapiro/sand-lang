@@ -74,7 +74,7 @@ macro_rules! bind_jiff_types {
             const DOC: &'static str = $doc;
             const PUBLIC: bool = true;
             fn binding() -> Binding<Self> {
-                Binding::of_value()
+                Binding::of_value().derives(&["Encode", "Decode"])
             }
         }
         crate::__value_type_impls!($rust);
@@ -152,7 +152,7 @@ fn zone_key(tz: &tz::TimeZone) -> ZoneKey<'_> {
 /// `2024-03-10T03:30:00-04:00[America/New_York]`, ordered by instant and then
 /// by zone ID.
 #[derive(Clone, Debug, crate::SandValue)]
-#[sand(module = "time")]
+#[sand(module = "time", derive(Encode, Decode))]
 pub struct ZonedDateTime(Zoned);
 
 impl ZonedDateTime {
@@ -216,7 +216,7 @@ fn write_year(f: &mut fmt::Formatter<'_>, year: i16) -> fmt::Result {
 
 /// A calendar year and month without a day, such as `2024-03`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandValue)]
-#[sand(module = "time")]
+#[sand(module = "time", derive(Encode, Decode))]
 pub struct PlainYearMonth(Date);
 
 impl PlainYearMonth {
@@ -253,7 +253,7 @@ const MONTH_DAY_YEAR: i16 = 1972;
 
 /// A calendar month and day without a year, such as `03-10`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandValue)]
-#[sand(module = "time")]
+#[sand(module = "time", derive(Encode, Decode))]
 pub struct PlainMonthDay(Date);
 
 impl PlainMonthDay {
@@ -299,7 +299,7 @@ impl ValueType for PlainMonthDay {
 /// `Span` does not implement `Ord` because calendar units have variable length;
 /// use `Span.compare` to order spans.
 #[derive(Clone, Copy, Debug, crate::SandValue)]
-#[sand(module = "time")]
+#[sand(module = "time", derive(Encode, Decode))]
 pub struct Span(jiff::Span);
 
 impl Span {
@@ -377,7 +377,7 @@ impl ValueType for Span {
 /// Two zones are equal if their canonical IDs match
 /// (`TimeZone("Etc/UTC")? != UTC`).
 #[derive(Clone, Debug, crate::SandValue)]
-#[sand(module = "time")]
+#[sand(module = "time", derive(Encode, Decode))]
 pub struct TimeZone(tz::TimeZone);
 
 impl TimeZone {
@@ -532,7 +532,7 @@ impl Difference for Date {
 pub mod enums {
     /// A calendar or clock unit, ordered from largest to smallest.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]
-    #[sand(module = "time")]
+    #[sand(module = "time", derive(Encode, Decode))]
     pub enum Unit {
         /// Calendar year.
         Year,
@@ -558,7 +558,7 @@ pub mod enums {
 
     /// Rounding mode for `round`, `until`, and `since`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]
-    #[sand(module = "time")]
+    #[sand(module = "time", derive(Encode, Decode))]
     pub enum RoundingMode {
         /// Rounds toward positive infinity.
         Ceil,
@@ -583,7 +583,7 @@ pub mod enums {
     /// Strategy for resolving wall-clock times that fall in a daylight saving
     /// gap or fold.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]
-    #[sand(module = "time")]
+    #[sand(module = "time", derive(Encode, Decode))]
     pub enum Disambiguation {
         /// Advances by the gap length in a gap, and selects the earlier occurrence in a fold.
         Compatible,

@@ -260,7 +260,7 @@ fn each_captures(
 
 /// A substring match and its UTF-8 byte range `start..end`.
 #[derive(crate::SandStruct)]
-#[sand(module = "regex", no_value)]
+#[sand(module = "regex", no_value, derive(Encode, Decode))]
 struct Match {
     /// Matched substring.
     text: VmVal<String>,

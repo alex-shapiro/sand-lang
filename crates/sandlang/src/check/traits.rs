@@ -21,6 +21,7 @@
 //! projection from a parameter dictionary, or an [`HKind::Dict`] constructor.
 
 use super::expr::mk;
+use super::structural::StructView;
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -45,6 +46,9 @@ pub struct TraitDef {
     pub builtin: Option<Builtin>,
     /// Indicates whether this trait or any of its supertraits declares methods.
     pub has_dict: bool,
+    /// Struct parts visited by a structural implementation, if this trait has a
+    /// native default method.
+    pub structural: Option<StructView>,
 }
 
 impl TraitDef {
@@ -66,8 +70,13 @@ pub struct ImplDef {
     /// have runtime dictionaries are stored after supertrait dictionaries in
     /// the `impl` dictionary.
     pub evidence: Vec<(TypeId, TraitRef)>,
-    /// Indicates whether a later REPL input replaced this `impl`.
+    /// Indicates whether a later REPL input replaced this implementation or
+    /// structural derivation removed it.
     pub replaced: bool,
+    /// Resolved parts of a structural implementation.
+    pub structural: Option<Arc<super::structural::StructuralImpl>>,
+    /// Indicates whether the checker generated this implementation.
+    pub derived: bool,
 }
 
 struct Requirement {
@@ -125,6 +134,9 @@ pub(crate) fn impl_key(arena: &TypeArena, t: TypeId) -> Option<(Ctor, u32)> {
         ty => ctor_of(ty).map(|c| (c, 0)),
     }
 }
+
+/// Maximum recursion depth in [`Checker::resolve_evidence`].
+pub(crate) const MAX_EVIDENCE_DEPTH: u32 = 512;
 
 fn dict_expr(kind: HKind, span: Span) -> HExpr {
     mk(kind, TypeId::UNIT, span)
@@ -369,9 +381,9 @@ impl Checker {
                 self.error(g.name.span, "the type parameters of a trait cannot require traits; require them on the methods or impls");
             }
             let name = self.sym(&g.name.name);
-            generics.push(self.new_param(name, false));
+            generics.push(self.new_param(name));
         }
-        let self_param = self.new_param(Symbol::SELF_TYPE, false);
+        let self_param = self.new_param(Symbol::SELF_TYPE);
         let name = self.sym(&t.name.name);
         self.traits.push(TraitDef {
             name,
@@ -385,6 +397,7 @@ impl Checker {
             methods: Vec::new(),
             builtin: builtin.filter(|_| in_prelude),
             has_dict: !t.methods.is_empty(),
+            structural: None,
         });
         let id = (self.traits.len() - 1) as TraitId;
         if let Some(b) = builtin.filter(|_| in_prelude) {
@@ -431,7 +444,6 @@ impl Checker {
         let mut methods: Vec<TraitMethod> = Vec::new();
         let mut seen_names = HashSet::new();
         for (j, m) in d.methods.iter().enumerate() {
-            self.reject_reflect_params(m);
             if m.name.name == "init" {
                 self.error(m.name.span, "a trait cannot declare `init`; only a type declares its `init`");
             }
@@ -446,13 +458,14 @@ impl Checker {
                 }
             }
             for dv in m.params.iter().filter_map(|p| p.default.as_ref()) {
-                if !is_closed_const(dv) {
+                if closed_const(dv).is_none() {
                     self.error(dv.span, "default values of trait method parameters must be constants");
                 }
             }
             let slot = methods.len() as u32;
             let at = DeclPath { item, method: j as u32 };
-            let sig = self.declare_fn(m, at, rules, None, &outer, Some(self_ty));
+            let sig_decl = ast::FnDecl { is_native: false, ..m.clone() };
+            let sig = self.declare_fn(&sig_decl, at, rules, None, &outer, Some(self_ty));
             let f = &mut self.fns[sig as usize];
             f.kind = FnKind::TraitMethod(id, slot);
             f.decl = None;
@@ -462,6 +475,8 @@ impl Checker {
                 fi.kind = FnKind::Script;
                 fi.decl = Some(FnDeclRef::Fn(at));
                 Some(self.add_fn(fi))
+            } else if m.is_native {
+                self.native_default_method(id, sig, m)
             } else {
                 None
             };
@@ -477,7 +492,52 @@ impl Checker {
                 format!("the `Num` trait must declare the methods {names} in this order, because `native::Num` reads them by position"),
             );
         }
+        self.traits[id as usize].structural = self.structural_view(id, d, &methods);
         self.traits[id as usize].methods = methods;
+    }
+
+    /// Returns the [`StructView`] for trait `id` if its method has a native
+    /// default.
+    fn structural_view(&mut self, id: TraitId, d: &ast::TraitDecl, methods: &[TraitMethod]) -> Option<StructView> {
+        let is_native = |m: &TraitMethod| m.default.is_some_and(|f| matches!(self.fns[f as usize].kind, FnKind::Native(_)));
+        if !methods.iter().any(is_native) {
+            return None;
+        }
+        if methods.len() != 1 || !self.traits[id as usize].generics.is_empty() || self.supertraits_with_dicts(id).next().is_some() {
+            let msg = "a trait with a native default method must declare a single method, take no type parameters, and have no supertraits with methods";
+            self.error(d.name.span, msg);
+            return None;
+        }
+        let sig = &self.fns[methods[0].sig as usize];
+        let self_param = self.traits[id as usize].self_param;
+        let returns_self = self.arena.any(sig.ret, &mut |t| matches!(t, Ty::Param(p) if p == self_param));
+        Some(if !sig.has_self && returns_self { StructView::Constructor } else { StructView::Fields })
+    }
+
+    /// Declares native default method `method` for trait `trait_id` with
+    /// signature `sig_fn`.
+    fn native_default_method(&mut self, trait_id: TraitId, sig_fn: FnId, method: &ast::FnDecl) -> Option<FnId> {
+        if !self.current_module_is_native() {
+            self.error(method.name.span, "native functions can only be declared by native modules");
+            return None;
+        }
+        let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
+        let key = format!("{module}.{}.{}", self.name(self.traits[trait_id as usize].name), method.name.name);
+        let Some(decl) = self.natives.get(&key).cloned() else {
+            self.error(method.name.span, format!("no native implementation registered for `{key}`"));
+            return None;
+        };
+        let mut fn_info = self.fns[sig_fn as usize].clone();
+        let accepted_dicts = self.check_native_signature(method, &key, &decl.sig, &fn_info.generics, &fn_info.params, fn_info.ret);
+        let self_index = self.traits[trait_id as usize].generics.len() as u8;
+        let builtin = self.traits[trait_id as usize].builtin;
+        if fn_info.dicts.len() != 1 || accepted_dicts.len() != 1 || Some(accepted_dicts[0]) != builtin.map(|b| (self_index, b)) {
+            self.error(method.name.span, format!("the Rust function of native `{key}` must take only the dictionary of `Self`"));
+        }
+        fn_info.kind = FnKind::Native(decl.id);
+        fn_info.decl = None;
+        fn_info.trait_of = None;
+        Some(self.add_fn(fn_info))
     }
 
     // ------------------------------------------------------------------
@@ -494,7 +554,7 @@ impl Checker {
         };
         let tid = self.resolve_trait_path(path, span)?;
         if let Some(b) = self.traits[tid as usize].builtin
-            && (b.is_derived() || Some(self.cur_mod) != self.prelude)
+            && (b.is_derived() || (b == Builtin::Num && Some(self.cur_mod) != self.prelude))
         {
             let msg = if b.is_derived() {
                 format!("`{}` is a built-in trait; the compiler derives its impls, so it cannot be implemented", b.name())
@@ -543,6 +603,11 @@ impl Checker {
         for other in self.impls_by.get(&key).map(|v| v.to_vec()).unwrap_or_default() {
             if self.impls_overlap(trait_ref, &generics, other) {
                 if self.impls[other as usize].module == self.cur_mod && self.defined_by_earlier_input(self.impls[other as usize].span) {
+                    if self.impls[other as usize].derived && self.is_structural_impl(other) {
+                        // Earlier session structs may already cache this derived impl in their shapes.
+                        self.error(span, format!("an impl of {} must be declared in the same input as its type", shown(self)));
+                        return None;
+                    }
                     // Replace an overlapping `impl` from an earlier REPL input.
                     remove_impl(&mut self.impls_by, &key, other);
                     remove_impl(&mut self.impls_by_ctor, &(ctor, arity), other);
@@ -571,6 +636,8 @@ impl Checker {
             slots: Vec::new(),
             evidence,
             replaced: false,
+            structural: None,
+            derived: false,
         });
         add_impl(&mut self.impls_by, key, id);
         add_impl(&mut self.impls_by_ctor, (ctor, arity), id);
@@ -596,16 +663,15 @@ impl Checker {
             for p in m.params.iter().filter(|p| p.default.is_some()) {
                 self.error(p.name.span, "default values are declared by the trait, not the impl");
             }
-            self.reject_reflect_params(m);
             let at = DeclPath { item, method: j as u32 };
             let f = self.declare_fn(m, at, rules, Some(ctor), &scope, Some(target));
             if self.traits[tid as usize].builtin == Some(Builtin::Num) && !m.is_native {
                 self.error(m.name.span, "the methods of a `Num` impl must be native");
             }
-            // Trait dispatch passes the impl dictionary as the first hidden
-            // argument, which conflicts with the `Num` evidence slot in native functions.
+            // Trait dispatch passes the `Self` dictionary as the first hidden
+            // argument, so native `impl` methods cannot take extra dictionaries.
             if m.is_native && !self.fns[f as usize].dicts.is_empty() {
-                self.error(m.name.span, "the Rust function of a native impl method cannot take `Num` evidence");
+                self.error(m.name.span, "the Rust function of a native impl method cannot take trait dictionaries");
             }
             self.fns[f as usize].impl_of = Some(id);
             self.check_impl_method(id, slot as u32, f, m);
@@ -885,15 +951,14 @@ impl Checker {
         self.wrapper_value(sig, &bindings, span)
     }
 
-    /// Builds a closure that supplies hidden `reflect` and dictionary arguments
-    /// if generic function or trait method `f` is used as a first-class
-    /// function value.
+    /// Wraps generic or encoded-argument function `f` in a closure for use as a
+    /// first-class function value.
     pub(crate) fn wrapper_value(&mut self, f: FnId, pre: &[(ParamId, TypeId)], span: Span) -> HExpr {
         let inst = self.instantiate_fn_with(f, span, pre);
         let id = self.new_lambda();
         let params_ty = inst.params.clone();
         let lenient = move |c: &Self, t: TypeId| matches!(c.rty(t), Ty::Var(_)) && params_ty.iter().any(|&p| c.occurs_in(t, p));
-        let mut args = self.hidden_args(f, &inst.fresh, &inst.dicts, "function value", &lenient, span);
+        let mut args = self.hidden_args(&inst.dicts, &lenient, span);
         let mut params = Vec::new();
         for &t in &inst.params {
             self.fs.locals.push(LocalInfo { name: Symbol::ARG, mutable: false, owner: id, cell: false, span });
@@ -902,66 +967,23 @@ impl Checker {
             params.push(l);
             args.push(HArg::Expr(mk(HKind::Local(l), t, span)));
         }
+        let first_value_arg = args.len() - inst.params.len();
+        self.encode_native_args(f, &inst.params, &mut args[first_value_arg..], span);
         let name = self.fns[f as usize].runtime_name(&self.types, &self.syms);
         let body = mk(self.call_kind(f, inst.fresh, args), inst.ret, span);
-        let lam = HLambda { id, name, params, body, self_local: None };
+        let lam = HLambda { id, name, params, dicts: vec![], body, self_local: None };
         let fty = self.fn_ty(&inst.params, inst.ret);
         mk(HKind::Lambda(Box::new(lam)), fty, span)
     }
 
-    /// Builds hidden call arguments for `f` (`reflect` type descriptions
-    /// followed by trait evidence placeholders).
-    pub(crate) fn hidden_args(
-        &mut self,
-        f: FnId,
-        fresh: &[TypeId],
-        dicts: &[(TypeId, TraitRef)],
-        what: &'static str,
-        lenient: &dyn Fn(&Self, TypeId) -> bool,
-        span: Span,
-    ) -> Vec<HArg> {
+    /// Creates evidence placeholder arguments for `dicts`.
+    pub(crate) fn hidden_args(&mut self, dicts: &[(TypeId, TraitRef)], lenient: &dyn Fn(&Self, TypeId) -> bool, span: Span) -> Vec<HArg> {
         let mut out = Vec::new();
-        for (k, &t) in fresh.iter().enumerate() {
-            if self.params[self.fns[f as usize].generics[k] as usize].reflect {
-                self.fs.reflect_checks.push((t, span, what));
-                out.push(HArg::Expr(mk(HKind::TypeDesc { ty: t, args: Vec::new() }, TypeId::UNIT, span)));
-            }
-        }
         for &(t, tr) in dicts {
             let lenient = lenient(self, t);
             out.push(HArg::Expr(self.evidence_hole(t, tr, lenient, span)));
         }
         out
-    }
-
-    fn reject_reflect_params(&mut self, m: &ast::FnDecl) {
-        for g in m.generics.iter().filter(|g| g.reflect) {
-            self.error(g.name.span, "the type parameters of trait and impl methods cannot be `reflect`");
-        }
-    }
-
-    pub(crate) fn declare_reflect_params(&mut self, f: FnId) -> Vec<LocalId> {
-        let span = self.fns[f as usize].span;
-        let mut out = Vec::new();
-        for k in 0..self.fns[f as usize].generics.len() {
-            let p = self.fns[f as usize].generics[k];
-            if self.params[p as usize].reflect {
-                let l = self.declare_local_sym(Symbol::DESC, TypeId::UNIT, false, span, true);
-                self.fs.data[l as usize].used = true;
-                self.fs.reflect_locals.push((p, l));
-                out.push(l);
-            }
-        }
-        out
-    }
-
-    pub(crate) fn reflect_local(&self, t: TypeId) -> Option<LocalId> {
-        let Ty::Param(p) = self.rty(t) else { return None };
-        self.reflect_param_local(p)
-    }
-
-    pub(crate) fn reflect_param_local(&self, p: ParamId) -> Option<LocalId> {
-        self.fs.reflect_locals.iter().find(|&&(q, _)| q == p).map(|&(_, l)| l)
     }
 
     /// Declares hidden dictionary parameters for `f` and records the trait
@@ -1084,6 +1106,16 @@ impl Checker {
         out
     }
 
+    /// Returns `true` if dictionary `expr` reads a local owned by a lambda.
+    pub(crate) fn reads_lambda_local(&self, expr: &HExpr) -> bool {
+        match &expr.kind {
+            HKind::Dict { args, .. } => args.iter().any(|arg| self.reads_lambda_local(arg)),
+            HKind::Field { obj, .. } => self.reads_lambda_local(obj),
+            HKind::Local(local_id) => self.fs.locals[*local_id as usize].owner != 0,
+            _ => false,
+        }
+    }
+
     /// Hoists non-constant dictionary expressions into entry-block local
     /// bindings, deduplicating identical dictionaries.
     pub(crate) fn hoist_dict(&mut self, e: &mut HExpr, hoisted: &mut Vec<(LocalId, HExpr)>) {
@@ -1114,7 +1146,7 @@ impl Checker {
         let ty = self.zonk(ty);
         let tr = self.zonk_trait(tr);
         let span = Span::default();
-        if depth > 32 {
+        if depth > MAX_EVIDENCE_DEPTH {
             return Err(Unmet::new(format!("overflow while checking that {} implements `{}`", self.show(ty), self.show_trait(&tr))));
         }
         // Prefer static `impl` dictionaries for concrete types so that trait
@@ -1126,6 +1158,9 @@ impl Checker {
         match self.ty(ty) {
             Ty::Error => return Ok(dict_expr(HKind::Error, span)),
             Ty::Never if !self.has_dict(&tr) => return Ok(dict_expr(HKind::Unit, span)),
+            Ty::Never if self.is_structural_trait(tr.trait_id) => {
+                return Ok(dict_expr(HKind::Dict { impl_id: self.never_structural_impl(tr), args: Vec::new() }, span));
+            }
             Ty::Var(_) => {
                 let mut m = Unmet::new(format!("cannot infer the type that must implement `{}`", self.show_trait(&tr)));
                 m.unknown = true;
@@ -1133,14 +1168,16 @@ impl Checker {
                 return Err(m);
             }
             Ty::Param(p) => {
+                if let Some(collector) = &mut self.structural_bound_collector
+                    && collector.type_params.contains(&p)
+                {
+                    if !collector.bounds.contains(&(ty, tr)) {
+                        collector.bounds.push((ty, tr));
+                    }
+                    return Ok(dict_expr(HKind::Error, span));
+                }
                 let n = self.name(self.params[p as usize].name).to_string();
                 let t = self.show_trait(&tr);
-                if self.fs.field_default && self.param_has_trait(p, tr.trait_id) {
-                    let msg = format!(
-                        "field defaults cannot use `{t}`, which type parameter `{n}` requires, because defaults receive no trait dictionaries"
-                    );
-                    return Err(Unmet::new(msg));
-                }
                 let mut m = Unmet::new(format!("type parameter `{n}` does not implement `{t}`"));
                 m.hint = Some(format!("add `{n}: {t}`"));
                 return Err(m);
@@ -1290,10 +1327,19 @@ impl Checker {
 
     fn resolve_by_impl(&mut self, ty: TypeId, tr: TraitRef, depth: u32) -> Result<HExpr, Box<Unmet>> {
         let span = Span::default();
-        let not_impl = |c: &Checker| Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
+        let not_impl = |c: &Checker| {
+            let mut m = Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
+            if let Ty::Named(d, _) = c.arena.get(ty) {
+                m.because = c.structural_failure_reasons.get(&(tr.trait_id, d)).map(|r| r.to_string());
+            }
+            m
+        };
         let Some(key) = impl_key(&self.arena, ty) else { return Err(not_impl(self)) };
         if let Some(b) = self.traits[tr.trait_id as usize].builtin.filter(|b| b.is_derived()) {
             return self.resolve_derived(ty, tr, b, depth).map(|()| dict_expr(HKind::Unit, span));
+        }
+        if key.0 == Ctor::Tuple && self.is_structural_trait(tr.trait_id) {
+            self.ensure_tuple_structural_impl(tr, key.1);
         }
         let ids = self.impls_by.get(&(tr.trait_id, key.0, key.1)).map(|v| v.to_vec()).unwrap_or_default();
         let targs = self.elems(tr.args);
@@ -1409,13 +1455,13 @@ impl Checker {
     }
 }
 
-fn add_impl<K: std::hash::Hash + Eq + Clone>(table: &mut PMap<K, Arc<[ImplId]>>, key: K, id: ImplId) {
+pub(crate) fn add_impl<K: std::hash::Hash + Eq + Clone>(table: &mut PMap<K, Arc<[ImplId]>>, key: K, id: ImplId) {
     let mut ids: Vec<ImplId> = table.get(&key).map(|v| v.to_vec()).unwrap_or_default();
     ids.push(id);
     table.insert(key, ids.into());
 }
 
-fn remove_impl<K: std::hash::Hash + Eq + Clone>(table: &mut PMap<K, Arc<[ImplId]>>, key: &K, id: ImplId) {
+pub(crate) fn remove_impl<K: std::hash::Hash + Eq + Clone>(table: &mut PMap<K, Arc<[ImplId]>>, key: &K, id: ImplId) {
     if let Some(ids) = table.get(key) {
         let kept: Vec<ImplId> = ids.iter().copied().filter(|&i| i != id).collect();
         table.insert(key.clone(), kept.into());

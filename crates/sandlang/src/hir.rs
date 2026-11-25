@@ -144,6 +144,9 @@ pub struct HLambda {
     pub id: u32,
     pub name: String,
     pub params: Vec<LocalId>,
+    /// `(type, trait)` pair for each leading dictionary parameter of a generic
+    /// local function.
+    pub dicts: Vec<(TypeId, TraitRef)>,
     pub body: HExpr,
     /// If this lambda is a local function bound to a cell local, that local.
     pub self_local: Option<LocalId>,
@@ -258,13 +261,6 @@ pub enum HKind {
         native: u32,
         targs: Vec<TypeId>,
         args: Vec<HArg>,
-    },
-    /// Runtime description for a `reflect` type argument `ty`. If `ty`
-    /// contains type parameters, `args` provides their descriptions in the
-    /// order returned by `TypeArena::params_of`.
-    TypeDesc {
-        ty: TypeId,
-        args: Vec<HExpr>,
     },
     CallValue {
         callee: Box<HExpr>,
@@ -504,10 +500,6 @@ impl HExpr {
                 args_parts(args, f)
             }
             HKind::FnValue { targs, .. } => targs.iter_mut().for_each(|t| f(Part::Type(t))),
-            HKind::TypeDesc { ty, args } => {
-                args.iter_mut().for_each(e);
-                f(Part::Type(ty));
-            }
             HKind::CallValue { callee, args } => {
                 e(callee);
                 args.iter_mut().for_each(e);

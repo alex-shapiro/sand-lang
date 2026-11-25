@@ -383,7 +383,7 @@ let digits = regex.Regex(r"\\d+")?
 let text = "3 apples, 12 pears and 7 plums"
 let numbers = digits.find_all(text).map(m => m.text.parse_int().unwrap())
 print("\\(text) -> \\(numbers) (sum \\(numbers.sum()))")
-print(json.encode(orders[0].items[0]))
+print(json.encode(orders[0].items[0])?)
 `,
     },
     policy: `allow stdin

@@ -14,7 +14,7 @@ import json
 import math as m
 from math import cbrt, pi
 
-print(json.encode(["a": [1, 2]]))
+print(json.encode(["a": [1, 2]])?)
 print(m.hypot(3.0, 4.0))
 print(cbrt(27.0))
 print(pi)

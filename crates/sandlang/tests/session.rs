@@ -205,21 +205,26 @@ fn a_later_input_cannot_add_init() {
 }
 
 #[test]
-fn reflect_descriptions_from_type_parameters_across_inputs() {
+fn decode_dictionaries_from_type_parameters_across_inputs() {
     let mut r = Repl::new();
     r.ok(r#"import json
 struct P { x: int }
-fn all<reflect T: Decode>(s: str) -> Result<[T]> { json.decode(s) }"#);
+fn all<T: Decode>(s: str) -> Result<[T]> { json.decode(s) }"#);
     r.compile_error(
-        r#"fn opt<reflect T: Decode>(s: str) -> Result<T?> { json.decode(s) }
+        r#"fn opt<T: Decode>(s: str) -> Result<T?> { json.decode(s) }
 let o: P? = opt("null")?
 let bad: int = "no""#,
     );
     r.ok(r#"let a: [P] = all("[{\"x\": 1}]")?"#);
     assert_eq!(r.value("a"), "[P(x: 1)]");
-    r.ok(r#"fn opt<reflect T: Decode>(s: str) -> Result<[T?]> { json.decode(s) }
+    r.ok(r#"fn opt<T: Decode>(s: str) -> Result<[T?]> { json.decode(s) }
 let b: [[P]?] = opt("[null, [{\"x\": 2}]]")?"#);
     assert_eq!(r.value("b"), "[None, Some([P(x: 2)])]");
+    r.ok(
+        "struct Q { y: int }\nimpl Encode for Q {\n    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.y * 10) }\n}",
+    );
+    assert_eq!(r.value("json.encode([Q(y: 1), Q(y: 2)])?"), "\"[10,20]\"");
+    assert_eq!(r.value("json.encode([[P(x: 3)]])?"), "\"[[{\\\"x\\\":3}]]\"");
 }
 
 #[test]
@@ -275,7 +280,7 @@ fn imports_mid_session() {
     dir.write("geo.sand", "pub fn area(w: float, h: float) -> float { w * h }\nprint(\"geo loaded\")\n");
     let mut r = Repl::with(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).module_root(dir.path()).cwd(dir.path()));
     r.ok("import json");
-    assert_eq!(r.value("json.encode(json.parse(\"[1, 2]\")?)"), "\"[1,2]\"");
+    assert_eq!(r.value("json.encode(json.parse(\"[1, 2]\")?)?"), "\"[1,2]\"");
     r.ok("from math import cbrt");
     assert_eq!(r.value("cbrt(64.0)"), "4.0");
     r.ok("import \"geo.sand\"");
