@@ -11,14 +11,15 @@ use crate::stdlib::codec::{
 };
 use crate::syntax::lexer::is_ident;
 use crate::types::traits;
-use crate::vm::bytecode::Program;
+use crate::vm::bytecode::{MAX_SCANNED_SLOTS, Program, ShapeKind};
 use crate::vm::compare::str_hash;
-use crate::vm::heap::Staging;
+use crate::vm::heap::{Heap, Staging};
 use crate::vm::iomem::Reservation;
 use crate::vm::meter::{BYTES_PER_FUEL_UNIT, SLOW_BYTES_PER_FUEL_UNIT, VmMeter, WorkerMeter};
 use crate::vm::value::{FxHashMap, KeyIndex, MAP_ENTRY_SIZE, MapObj, Obj, VmValue, slot_fits};
 use crate::vm::{Fail, Vm, fail, internal};
 use hashbrown::HashTable;
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::fmt::Write;
 
@@ -155,7 +156,12 @@ pub(crate) fn module() -> NativeModule {
         "decode",
         |context: &mut CallContext, dict: TraitDict<0, traits::Decode>, text: VmVal<String>| -> CodecResult<Param<0>> {
             let dict_root = context.root(dict.raw());
-            let source = context.step(|vm| JsonSource::new(vm, text.raw()))?;
+            let text_root = context.root(text.raw());
+            if codec::dict_is_pure_decode(context.vm(), dict.raw()) {
+                return pure_decode(context, dict_root, text_root).map(Param::from_raw);
+            }
+            let text_val = context.value(text_root);
+            let source = context.step(|vm| JsonSource::new(vm, text_val))?;
             codec::decode(context, source, context.value(dict_root), |context, value, mut source| {
                 let result = source.finish();
                 context.vm().charge((source.take_consumed_bytes() / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
@@ -479,6 +485,277 @@ enum SourceFrameKind {
     Variant(bool, PathSegment),
 }
 
+fn push_path_segment(out: &mut String, src: &str, segment: &PathSegment) {
+    match segment {
+        PathSegment::None => {}
+        PathSegment::Index(index) => _ = write!(out, "[{index}]"),
+        PathSegment::Span(start, end) => push_path_key(out, &src[*start..*end]),
+        PathSegment::Owned(text) => push_path_key(out, text),
+    }
+}
+
+fn push_path_key(out: &mut String, key: &str) {
+    let key = super::truncate(key, MAX_PATH_KEY_LEN);
+    if is_ident(key) {
+        out.push('.');
+        out.push_str(key);
+    } else {
+        out.push('[');
+        write_str(out, key);
+        out.push(']');
+    }
+}
+
+/// Low-level JSON scanner borrowing directly from a UTF-8 slice.
+struct JsonCursor<'a> {
+    src: &'a str,
+    pos: usize,
+}
+
+impl<'a> JsonCursor<'a> {
+    fn err_at(&self, pos: usize, what: &str) -> HostError<Fail> {
+        let pos = pos.min(self.src.len());
+        let before = &self.src.as_bytes()[..pos];
+        let line = 1 + before.iter().filter(|&&c| c == b'\n').count();
+        let line_start = before.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
+        let col = 1 + self.src.get(line_start..pos).map_or(pos - line_start, |s| s.chars().count());
+        HostError::new("parse", format!("{what} at line {line}, column {col}"))
+    }
+
+    fn unexpected(&self) -> HostError<Fail> {
+        match self.src.get(self.pos..).and_then(|s| s.chars().next()) {
+            None => self.err_at(self.pos, "unexpected end of input"),
+            Some(c) => self.err_at(self.pos, &format!("unexpected character `{}`", c.escape_debug())),
+        }
+    }
+
+    #[inline(always)]
+    fn ws(&mut self) {
+        while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.src.as_bytes().get(self.pos) {
+            self.pos += 1;
+        }
+    }
+
+    #[inline(always)]
+    fn peek(&self) -> Option<u8> {
+        self.src.as_bytes().get(self.pos).copied()
+    }
+
+    #[inline(always)]
+    fn eat(&mut self, c: u8) -> bool {
+        let hit = self.peek() == Some(c);
+        if hit {
+            self.pos += 1;
+        }
+        hit
+    }
+
+    fn finish(&mut self) -> CodecResult {
+        self.ws();
+        if self.pos < self.src.len() { Err(self.unexpected()) } else { Ok(()) }
+    }
+
+    #[inline(always)]
+    fn literal(&mut self, word: &[u8]) -> CodecResult {
+        if self.src.as_bytes()[self.pos..].starts_with(word) {
+            self.pos += word.len();
+            return Ok(());
+        }
+        while self.eat(word[0]) {}
+        Err(self.unexpected())
+    }
+
+    #[inline(always)]
+    fn digits(&mut self) {
+        while let Some(b'0'..=b'9') = self.peek() {
+            self.pos += 1;
+        }
+    }
+
+    #[inline(always)]
+    fn number(&mut self) -> CodecResult<(usize, usize, bool)> {
+        let start = self.pos;
+        self.eat(b'-');
+        match self.peek() {
+            Some(b'0') => self.pos += 1,
+            Some(b'1'..=b'9') => self.digits(),
+            _ => return Err(self.unexpected()),
+        }
+        let mut is_int = true;
+        if self.eat(b'.') {
+            is_int = false;
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(self.unexpected());
+            }
+            self.digits();
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.pos += 1;
+            is_int = false;
+            if !self.eat(b'+') {
+                self.eat(b'-');
+            }
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(self.unexpected());
+            }
+            self.digits();
+        }
+        Ok((start, self.pos, is_int))
+    }
+
+    fn hex4(&mut self, esc: usize) -> CodecResult<u32> {
+        let digits = self.src.get(self.pos..self.pos + 4).filter(|h| h.bytes().all(|c| c.is_ascii_hexdigit()));
+        let Some(h) = digits else { return Err(self.err_at(esc, "invalid unicode escape")) };
+        self.pos += 4;
+        Ok(u32::from_str_radix(h, 16).unwrap_or(0))
+    }
+
+    #[inline(always)]
+    fn string(
+        &mut self,
+        keep: bool,
+        scratch: &mut String,
+        reserve: &mut impl FnMut(&mut String, usize) -> CodecResult,
+    ) -> CodecResult<Option<(usize, usize)>> {
+        self.pos += 1;
+        let first = self.pos;
+        let mut escaped = false;
+        loop {
+            let start = self.pos;
+            while let Some(&c) = self.src.as_bytes().get(self.pos) {
+                if c == b'"' || c == b'\\' || c < 0x20 {
+                    break;
+                }
+                self.pos += 1;
+            }
+            match self.peek() {
+                None => return Err(self.unexpected()),
+                Some(b'"') => {
+                    if escaped && keep {
+                        let end = self.pos;
+                        reserve(scratch, end - start)?;
+                        scratch.push_str(&self.src[start..end]);
+                    }
+                    self.pos += 1;
+                    return Ok((!escaped).then_some((first, self.pos - 1)));
+                }
+                Some(b'\\') => {
+                    if keep {
+                        if !escaped {
+                            scratch.clear();
+                        }
+                        let end = self.pos;
+                        reserve(scratch, (end - start).saturating_add(4))?;
+                        scratch.push_str(&self.src[start..end]);
+                    }
+                    escaped = true;
+                    let esc = self.pos;
+                    self.pos += 1;
+                    let c = match self.peek() {
+                        Some(b'"') => '"',
+                        Some(b'\\') => '\\',
+                        Some(b'/') => '/',
+                        Some(b'b') => '\u{8}',
+                        Some(b'f') => '\u{c}',
+                        Some(b'n') => '\n',
+                        Some(b'r') => '\r',
+                        Some(b't') => '\t',
+                        Some(b'u') => {
+                            self.pos += 1;
+                            let hi = self.hex4(esc)?;
+                            let code = if (0xd800..0xdc00).contains(&hi) {
+                                if !(self.eat(b'\\') && self.eat(b'u')) {
+                                    return Err(self.err_at(esc, "invalid unicode escape"));
+                                }
+                                let lo = self.hex4(esc)?;
+                                if !(0xdc00..0xe000).contains(&lo) {
+                                    return Err(self.err_at(esc, "invalid unicode escape"));
+                                }
+                                0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00)
+                            } else {
+                                hi
+                            };
+                            let Some(c) = char::from_u32(code) else { return Err(self.err_at(esc, "invalid unicode escape")) };
+                            if keep {
+                                reserve(scratch, 4)?;
+                                scratch.push(c);
+                            }
+                            continue;
+                        }
+                        _ => return Err(self.err_at(esc, "invalid escape")),
+                    };
+                    self.pos += 1;
+                    if keep {
+                        reserve(scratch, 4)?;
+                        scratch.push(c);
+                    }
+                }
+                Some(_) => return Err(self.err_at(self.pos, "control character in string")),
+            }
+        }
+    }
+
+    fn skip_value(&mut self, base_depth: usize, mut charge: impl FnMut(u64) -> CodecResult) -> CodecResult {
+        let mut open: SmallVec<[(bool, bool); 8]> = SmallVec::new();
+        let mut scratch = String::new();
+        let mut no_reserve = |_: &mut String, _: usize| Ok(());
+        loop {
+            let before = self.pos;
+            self.ws();
+            match self.peek() {
+                Some(b'n') => self.literal(b"null")?,
+                Some(b't') => self.literal(b"true")?,
+                Some(b'f') => self.literal(b"false")?,
+                Some(b'"') => _ = self.string(false, &mut scratch, &mut no_reserve)?,
+                Some(b'-' | b'0'..=b'9') => _ = self.number()?,
+                Some(b'[') => {
+                    if base_depth + open.len() >= MAX_NESTING_DEPTH {
+                        return Err(self.err_at(self.pos, "nesting too deep"));
+                    }
+                    self.pos += 1;
+                    open.push((false, true));
+                }
+                Some(b'{') => {
+                    if base_depth + open.len() >= MAX_NESTING_DEPTH {
+                        return Err(self.err_at(self.pos, "nesting too deep"));
+                    }
+                    self.pos += 1;
+                    open.push((true, true));
+                }
+                _ => return Err(self.unexpected()),
+            }
+            charge(1 + (self.pos.saturating_sub(before) / BYTES_PER_FUEL_UNIT) as u64)?;
+            while let Some((is_object, is_first)) = open.last_mut() {
+                self.ws();
+                let close = if *is_object { b'}' } else { b']' };
+                if self.eat(close) {
+                    open.pop();
+                    continue;
+                }
+                if !*is_first && !self.eat(b',') {
+                    return Err(self.unexpected());
+                }
+                *is_first = false;
+                if *is_object {
+                    self.ws();
+                    if self.peek() != Some(b'"') {
+                        return Err(self.unexpected());
+                    }
+                    let _ = self.string(false, &mut scratch, &mut no_reserve)?;
+                    self.ws();
+                    if !self.eat(b':') {
+                        return Err(self.unexpected());
+                    }
+                }
+                break;
+            }
+            if open.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+}
+
 /// Streaming JSON parser that feeds the decode walker.
 pub(crate) struct JsonSource {
     s: String,
@@ -518,186 +795,74 @@ impl JsonSource {
         }
     }
 
+    #[inline(always)]
+    fn cursor(&self) -> JsonCursor<'_> {
+        JsonCursor { src: &self.s, pos: self.pos }
+    }
+
+    #[inline(always)]
+    fn with_cursor<T>(&mut self, f: impl FnOnce(&mut JsonCursor<'_>) -> T) -> T {
+        let mut c = JsonCursor { src: &self.s, pos: self.pos };
+        let out = f(&mut c);
+        self.pos = c.pos;
+        out
+    }
+
     fn err_at(&self, pos: usize, what: &str) -> HostError<Fail> {
-        let pos = pos.min(self.s.len());
-        let before = &self.s.as_bytes()[..pos];
-        let line = 1 + before.iter().filter(|&&c| c == b'\n').count();
-        let line_start = before.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
-        let col = 1 + self.s.get(line_start..pos).map_or(pos - line_start, |s| s.chars().count());
-        HostError::new("parse", format!("{what} at line {line}, column {col}"))
+        self.cursor().err_at(pos, what)
     }
 
     fn unexpected(&self) -> HostError<Fail> {
-        match self.s.get(self.pos..).and_then(|s| s.chars().next()) {
-            None => self.err_at(self.pos, "unexpected end of input"),
-            Some(c) => self.err_at(self.pos, &format!("unexpected character `{}`", c.escape_debug())),
-        }
+        self.cursor().unexpected()
     }
 
+    #[inline(always)]
     fn ws(&mut self) {
-        while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.s.as_bytes().get(self.pos) {
-            self.pos += 1;
-        }
+        self.with_cursor(|c| c.ws());
     }
 
+    #[inline(always)]
     fn peek(&self) -> Option<u8> {
-        self.s.as_bytes().get(self.pos).copied()
+        self.cursor().peek()
     }
 
+    #[inline(always)]
     fn eat(&mut self, c: u8) -> bool {
-        let hit = self.peek() == Some(c);
-        if hit {
-            self.pos += 1;
-        }
-        hit
+        self.with_cursor(|cur| cur.eat(c))
     }
 
+    #[inline(always)]
     fn finish(&mut self) -> CodecResult {
-        self.ws();
-        if self.pos < self.s.len() { Err(self.unexpected()) } else { Ok(()) }
+        self.with_cursor(|c| c.finish())
     }
 
+    #[inline(always)]
     fn literal(&mut self, word: &[u8]) -> CodecResult {
-        if self.s.as_bytes()[self.pos..].starts_with(word) {
-            self.pos += word.len();
-            return Ok(());
-        }
-        while self.eat(word[0]) {}
-        Err(self.unexpected())
+        self.with_cursor(|c| c.literal(word))
     }
 
-    fn digits(&mut self) {
-        while let Some(b'0'..=b'9') = self.peek() {
-            self.pos += 1;
-        }
-    }
-
+    #[inline(always)]
     fn number(&mut self) -> CodecResult<(usize, usize, bool)> {
-        let start = self.pos;
-        self.eat(b'-');
-        match self.peek() {
-            Some(b'0') => self.pos += 1,
-            Some(b'1'..=b'9') => self.digits(),
-            _ => return Err(self.unexpected()),
-        }
-        let mut is_int = true;
-        if self.eat(b'.') {
-            is_int = false;
-            if !matches!(self.peek(), Some(b'0'..=b'9')) {
-                return Err(self.unexpected());
-            }
-            self.digits();
-        }
-        if matches!(self.peek(), Some(b'e' | b'E')) {
-            self.pos += 1;
-            is_int = false;
-            if !self.eat(b'+') {
-                self.eat(b'-');
-            }
-            if !matches!(self.peek(), Some(b'0'..=b'9')) {
-                return Err(self.unexpected());
-            }
-            self.digits();
-        }
-        Ok((start, self.pos, is_int))
+        self.with_cursor(|c| c.number())
     }
 
-    fn hex4(&mut self, esc: usize) -> CodecResult<u32> {
-        let digits = self.s.get(self.pos..self.pos + 4).filter(|h| h.bytes().all(|c| c.is_ascii_hexdigit()));
-        let Some(h) = digits else { return Err(self.err_at(esc, "invalid unicode escape")) };
-        self.pos += 4;
-        Ok(u32::from_str_radix(h, 16).unwrap_or(0))
-    }
-
-    fn reserve_scratch(&mut self, extra: usize) -> CodecResult {
-        let need = self.scratch.len().saturating_add(extra);
-        if need > self.scratch.capacity() {
-            let cap = need.max(self.scratch.capacity().saturating_mul(2)).max(64);
-            if self.scratch_reservation.ensure(cap).is_err() && self.scratch_reservation.ensure(need).is_err() {
-                return codec::memory_limit_error();
-            }
-            self.scratch.reserve(extra);
-        }
-        Ok(())
-    }
-
+    #[inline(always)]
     fn string(&mut self, keep: bool) -> CodecResult<Option<(usize, usize)>> {
-        self.pos += 1;
-        let first = self.pos;
-        let mut escaped = false;
-        loop {
-            let start = self.pos;
-            while let Some(&c) = self.s.as_bytes().get(self.pos) {
-                if c == b'"' || c == b'\\' || c < 0x20 {
-                    break;
+        let mut c = JsonCursor { src: &self.s, pos: self.pos };
+        let reservation = &mut self.scratch_reservation;
+        let out = c.string(keep, &mut self.scratch, &mut |scratch, extra| {
+            let need = scratch.len().saturating_add(extra);
+            if need > scratch.capacity() {
+                let cap = need.max(scratch.capacity().saturating_mul(2)).max(64);
+                if reservation.ensure(cap).is_err() && reservation.ensure(need).is_err() {
+                    return codec::memory_limit_error();
                 }
-                self.pos += 1;
+                scratch.reserve(extra);
             }
-            match self.peek() {
-                None => return Err(self.unexpected()),
-                Some(b'"') => {
-                    if escaped && keep {
-                        let end = self.pos;
-                        self.reserve_scratch(end - start)?;
-                        self.scratch.push_str(&self.s[start..end]);
-                    }
-                    self.pos += 1;
-                    return Ok((!escaped).then_some((first, self.pos - 1)));
-                }
-                Some(b'\\') => {
-                    if keep {
-                        if !escaped {
-                            self.scratch.clear();
-                        }
-                        let end = self.pos;
-                        self.reserve_scratch((end - start).saturating_add(4))?;
-                        self.scratch.push_str(&self.s[start..end]);
-                    }
-                    escaped = true;
-                    let esc = self.pos;
-                    self.pos += 1;
-                    let c = match self.peek() {
-                        Some(b'"') => '"',
-                        Some(b'\\') => '\\',
-                        Some(b'/') => '/',
-                        Some(b'b') => '\u{8}',
-                        Some(b'f') => '\u{c}',
-                        Some(b'n') => '\n',
-                        Some(b'r') => '\r',
-                        Some(b't') => '\t',
-                        Some(b'u') => {
-                            self.pos += 1;
-                            let hi = self.hex4(esc)?;
-                            let code = if (0xd800..0xdc00).contains(&hi) {
-                                if !(self.eat(b'\\') && self.eat(b'u')) {
-                                    return Err(self.err_at(esc, "invalid unicode escape"));
-                                }
-                                let lo = self.hex4(esc)?;
-                                if !(0xdc00..0xe000).contains(&lo) {
-                                    return Err(self.err_at(esc, "invalid unicode escape"));
-                                }
-                                0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00)
-                            } else {
-                                hi
-                            };
-                            let Some(c) = char::from_u32(code) else { return Err(self.err_at(esc, "invalid unicode escape")) };
-                            if keep {
-                                self.reserve_scratch(4)?;
-                                self.scratch.push(c);
-                            }
-                            continue;
-                        }
-                        _ => return Err(self.err_at(esc, "invalid escape")),
-                    };
-                    self.pos += 1;
-                    if keep {
-                        self.reserve_scratch(4)?;
-                        self.scratch.push(c);
-                    }
-                }
-                Some(_) => return Err(self.err_at(self.pos, "control character in string")),
-            }
-        }
+            Ok(())
+        });
+        self.pos = c.pos;
+        out
     }
 
     fn fail(&self, message: &str) -> HostError<Fail> {
@@ -1019,41 +1184,12 @@ impl JsonSource {
         if self.pending_map_key.take().is_some() {
             return Ok(());
         }
-        let depth = self.frames.len();
-        loop {
-            let before = self.pos;
-            self.ws();
-            match self.peek() {
-                Some(b'n') => self.literal(b"null")?,
-                Some(b't') => self.literal(b"true")?,
-                Some(b'f') => self.literal(b"false")?,
-                Some(b'"') => drop(self.string(false)?),
-                Some(b'-' | b'0'..=b'9') => drop(self.number()?),
-                Some(b'[') => {
-                    self.pos += 1;
-                    self.open(SourceFrameKind::Array(None))?;
-                }
-                Some(b'{') => {
-                    self.pos += 1;
-                    self.open(SourceFrameKind::Object)?;
-                }
-                _ => return Err(self.unexpected()),
-            }
-            self.meter.charge_fail(1 + (self.pos.saturating_sub(before) / BYTES_PER_FUEL_UNIT) as u64)?;
-            while self.frames.len() > depth {
-                let more = match self.top()?.kind {
-                    SourceFrameKind::Object => self.next_key()?.is_some(),
-                    _ => self.next_member(b']')?,
-                };
-                if more {
-                    break;
-                }
-                self.frames.pop();
-            }
-            if self.frames.len() == depth {
-                return Ok(());
-            }
-        }
+        let base_depth = self.frames.len() - self.some_depth;
+        let mut c = JsonCursor { src: &self.s, pos: self.pos };
+        let meter = &mut self.meter;
+        let out = c.skip_value(base_depth, |fuel| meter.charge_fail(fuel).map_err(Into::into));
+        self.pos = c.pos;
+        out
     }
 
     pub(crate) fn end(&mut self, enum_name: Option<&str>) -> CodecResult {
@@ -1089,21 +1225,7 @@ impl JsonSource {
     pub(crate) fn path(&self) -> String {
         let mut out = String::from("$");
         for frame in &self.frames {
-            match &frame.segment {
-                PathSegment::None => {}
-                PathSegment::Index(index) => _ = write!(out, "[{index}]"),
-                segment => {
-                    let key = super::truncate(self.segment_str(segment), MAX_PATH_KEY_LEN);
-                    if is_ident(key) {
-                        out.push('.');
-                        out.push_str(key);
-                    } else {
-                        out.push('[');
-                        write_str(&mut out, key);
-                        out.push(']');
-                    }
-                }
-            }
+            push_path_segment(&mut out, &self.s, &frame.segment);
         }
         out
     }
@@ -1763,6 +1885,16 @@ impl Builder<'_, '_, '_> {
     }
 }
 
+fn split_step_result<T>(result: CodecResult<T>) -> Result<CodecResult<T>, Fail> {
+    match result {
+        Ok(value) => Ok(Ok(value)),
+        Err(error) => match error.into_abort() {
+            Ok(fail) => Err(fail),
+            Err(sand_err) => Ok(Err(sand_err)),
+        },
+    }
+}
+
 fn pure_to_json(context: &mut CallContext, value_root: crate::native::context::RootedValue) -> CodecResult<VmValue> {
     let ids = JsonIds::new(&context.vm().prog)?;
     let root = context.value(value_root);
@@ -1773,13 +1905,7 @@ fn pure_to_json(context: &mut CallContext, value_root: crate::native::context::R
             codec::encode_pure(prog, heap, meter, root, &mut sink)?;
             sink.root.ok_or_else(|| missing_root_error().into())
         });
-        match result {
-            Ok(value) => Ok(Ok(value)),
-            Err(error) => match error.into_abort() {
-                Ok(fail) => Err(fail),
-                Err(sand_err) => Ok(Err(sand_err)),
-            },
-        }
+        split_step_result(result)
     })?
 }
 
@@ -1790,13 +1916,464 @@ fn decode_json(context: &mut CallContext, source: &mut JsonSource) -> CodecResul
         (source.pos, source.charged, source.some_depth, source.pending_map_key) = (saved.0, saved.1, saved.3, saved.4.clone());
         source.frames.truncate(saved.2);
         let meter = &vm.meter;
-        match vm.heap.staged(|_, st| Builder::new(st, meter).parse_json(ids, source)) {
-            Ok(value) => Ok(Ok(value)),
-            Err(error) => match error.into_abort() {
-                Ok(fail) => Err(fail),
-                Err(sand_err) => Ok(Err(sand_err)),
-            },
+        split_step_result(vm.heap.staged(|_, st| Builder::new(st, meter).parse_json(ids, source)))
+    })?
+}
+
+#[derive(Clone, Copy)]
+enum FastSeg {
+    Index(usize),
+    Span(usize, usize),
+    Escaped(usize),
+}
+
+#[derive(Clone, Copy)]
+enum PureSlotTarget {
+    Tuple,
+    Struct(u32),
+    Variant { id: u32 },
+}
+
+/// Recursive zero-copy JSON decoder that stages values directly into the VM heap.
+struct StagedDecoder<'a, 's, 'h> {
+    prog: &'a Program,
+    consts: &'a [VmValue],
+    heap: &'a Heap,
+    b: Builder<'a, 's, 'h>,
+    c: JsonCursor<'a>,
+    scratch: String,
+    slots: SmallVec<[VmValue; 16]>,
+    path: SmallVec<[FastSeg; 8]>,
+    path_owned: Vec<String>,
+}
+
+impl<'a, 's, 'h> StagedDecoder<'a, 's, 'h> {
+    #[cold]
+    fn path(&self) -> String {
+        let mut out = String::from("$");
+        for &seg in &self.path {
+            match seg {
+                FastSeg::Index(i) => _ = write!(out, "[{i}]"),
+                FastSeg::Span(a, b) => push_path_key(&mut out, &self.c.src[a..b]),
+                FastSeg::Escaped(i) => push_path_key(&mut out, &self.path_owned[i]),
+            }
         }
+        out
+    }
+
+    #[cold]
+    fn fail(&self, message: &str) -> HostError<Fail> {
+        HostError::new("parse", format!("{}: {message}", self.path()))
+    }
+
+    #[cold]
+    fn mismatch(&self, expected: &str) -> HostError<Fail> {
+        match self.c.peek() {
+            Some(b'n' | b't' | b'f' | b'"' | b'-' | b'0'..=b'9' | b'[' | b'{') => self.fail(&format!("expected {expected}")),
+            _ => self.c.unexpected(),
+        }
+    }
+
+    #[inline(always)]
+    fn string(&mut self) -> CodecResult<Option<(usize, usize)>> {
+        let pending = self.b.pending;
+        let st = &self.b.st;
+        self.c.string(true, &mut self.scratch, &mut |scratch, extra| {
+            st.check_memory((NODE_BYTES + pending).saturating_add(scratch.len().saturating_add(extra))).map_err(Into::into)
+        })
+    }
+
+    #[inline(always)]
+    fn read_str_seg(&mut self) -> CodecResult<FastSeg> {
+        Ok(match self.string()? {
+            Some((a, b)) => FastSeg::Span(a, b),
+            None => {
+                let idx = self.path_owned.len();
+                self.path_owned.push(self.scratch.clone());
+                FastSeg::Escaped(idx)
+            }
+        })
+    }
+
+    #[inline(always)]
+    fn read_key_seg(&mut self) -> CodecResult<FastSeg> {
+        self.c.ws();
+        if self.c.peek() != Some(b'"') {
+            return Err(self.c.unexpected());
+        }
+        let seg = self.read_str_seg()?;
+        self.c.ws();
+        if !self.c.eat(b':') {
+            return Err(self.c.unexpected());
+        }
+        Ok(seg)
+    }
+
+    #[inline(always)]
+    fn open(&mut self, depth: usize, byte: u8, expected: &str) -> CodecResult {
+        if depth >= MAX_NESTING_DEPTH {
+            return codec::nesting_limit_error();
+        }
+        self.c.ws();
+        if !self.c.eat(byte) {
+            return Err(self.mismatch(expected));
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn next_elem(&mut self, first: &mut bool, close: u8) -> CodecResult<bool> {
+        self.c.ws();
+        if self.c.eat(close) {
+            return Ok(false);
+        }
+        if !std::mem::replace(first, false) && !self.c.eat(b',') {
+            return Err(self.c.unexpected());
+        }
+        Ok(true)
+    }
+
+    #[inline(always)]
+    fn seg_str(&self, seg: FastSeg) -> &str {
+        match seg {
+            FastSeg::Span(a, b) => &self.c.src[a..b],
+            FastSeg::Escaped(i) => &self.path_owned[i],
+            FastSeg::Index(_) => "",
+        }
+    }
+
+    #[inline(always)]
+    fn pop_seg(&mut self, seg: FastSeg) {
+        self.path.pop();
+        if let FastSeg::Escaped(i) = seg {
+            self.path_owned.truncate(i);
+        }
+    }
+
+    #[inline(always)]
+    fn decode_value(&mut self, mut dict: VmValue, mut shape_idx: u32, depth: usize) -> CodecResult<VmValue> {
+        let mut somes = 0usize;
+        let mut shape = &self.prog.shapes[shape_idx as usize];
+        while matches!(shape.kind, ShapeKind::Option) {
+            self.b.meter.charge(1)?;
+            self.c.ws();
+            if self.c.peek() == Some(b'n') {
+                self.c.literal(b"null")?;
+                return Ok(VmValue::Tag(self.prog.ids.none));
+            }
+            (dict, shape_idx) = codec::eval_static_part(self.consts, self.heap, dict, &shape.parts[0])?;
+            shape = &self.prog.shapes[shape_idx as usize];
+            somes += 1;
+        }
+        self.b.meter.charge(1)?;
+        self.c.ws();
+        let mut val = match shape.kind {
+            ShapeKind::Unit => {
+                if self.c.peek() != Some(b'n') {
+                    return Err(self.mismatch("null"));
+                }
+                self.c.literal(b"null")?;
+                VmValue::Unit
+            }
+            ShapeKind::Bool => match self.c.peek() {
+                Some(b't') => {
+                    self.c.literal(b"true")?;
+                    VmValue::Bool(true)
+                }
+                Some(b'f') => {
+                    self.c.literal(b"false")?;
+                    VmValue::Bool(false)
+                }
+                _ => return Err(self.mismatch("bool")),
+            },
+            ShapeKind::Int | ShapeKind::Duration => {
+                if !matches!(self.c.peek(), Some(b'-' | b'0'..=b'9')) {
+                    return Err(self.mismatch("int"));
+                }
+                let (start, end, is_int) = self.c.number()?;
+                if !is_int {
+                    return Err(self.fail("expected int"));
+                }
+                let n: i64 = self.c.src[start..end].parse().map_err(|_| self.fail("integer out of range"))?;
+                if matches!(shape.kind, ShapeKind::Duration) { VmValue::Dur(n) } else { VmValue::Int(n) }
+            }
+            ShapeKind::Float => {
+                if !matches!(self.c.peek(), Some(b'-' | b'0'..=b'9')) {
+                    return Err(self.mismatch("float"));
+                }
+                let (start, end, _) = self.c.number()?;
+                VmValue::Float(self.c.src[start..end].parse().unwrap_or(f64::NAN))
+            }
+            ShapeKind::Str => {
+                if self.c.peek() != Some(b'"') {
+                    return Err(self.mismatch("str"));
+                }
+                let span = self.string()?;
+                let text = span.map_or(self.scratch.as_str(), |(a, b)| &self.c.src[a..b]);
+                self.b.st.check_memory((NODE_BYTES + self.b.pending).saturating_add(text.len()))?;
+                self.b.meter.charge_bytes(text.len())?;
+                self.b.st.new_str(text)
+            }
+            ShapeKind::List => self.decode_list(dict, shape_idx, depth)?,
+            ShapeKind::Map => self.decode_map(dict, shape_idx, depth)?,
+            ShapeKind::Tuple => {
+                let count = shape.parts.len();
+                self.open(depth, b'[', &format!("array of length {count}"))?;
+                self.decode_slots(dict, shape_idx, PureSlotTarget::Tuple, None, count, 0, depth + 1)?
+            }
+            ShapeKind::Struct(def) => {
+                self.open(depth, b'{', "object")?;
+                let fields = self.prog.types[def as usize].desc().fields.as_slice();
+                self.decode_slots(dict, shape_idx, PureSlotTarget::Struct(def), Some(fields), fields.len(), 0, depth + 1)?
+            }
+            ShapeKind::Enum { def, first_variant } => self.decode_enum(dict, shape_idx, def, first_variant, depth)?,
+            _ => return Err(Fail::internal("pure_decode: unsupported shape").into()),
+        };
+        for _ in 0..somes {
+            self.b.reserve()?;
+            val = self.b.st.new_variant(self.prog.ids.some, &[val]);
+        }
+        Ok(val)
+    }
+
+    #[inline(never)]
+    fn decode_list(&mut self, dict: VmValue, shape_idx: u32, depth: usize) -> CodecResult<VmValue> {
+        self.open(depth, b'[', "array")?;
+        self.b.reserve()?;
+        let (elem_dict, elem_shape) =
+            codec::eval_static_part(self.consts, self.heap, dict, &self.prog.shapes[shape_idx as usize].parts[0])?;
+        let mut items = Vec::new();
+        let mut first = true;
+        while self.next_elem(&mut first, b']')? {
+            self.path.push(FastSeg::Index(items.len()));
+            let item = self.decode_value(elem_dict, elem_shape, depth + 1)?;
+            self.path.pop();
+            self.b.push(&mut items, item)?;
+        }
+        Ok(self.b.list(items))
+    }
+
+    #[inline(never)]
+    fn decode_map(&mut self, dict: VmValue, shape_idx: u32, depth: usize) -> CodecResult<VmValue> {
+        self.open(depth, b'{', "object")?;
+        self.b.reserve()?;
+        let (val_dict, val_shape) = codec::eval_static_part(self.consts, self.heap, dict, &self.prog.shapes[shape_idx as usize].parts[1])?;
+        let base = self.b.entries.len();
+        let mut first = true;
+        while self.next_elem(&mut first, b'}')? {
+            let seg = self.read_key_seg()?;
+            let text = match seg {
+                FastSeg::Span(a, b) => &self.c.src[a..b],
+                FastSeg::Escaped(i) => self.path_owned[i].as_str(),
+                FastSeg::Index(_) => "",
+            };
+            let hash = self.b.hash(text)?;
+            let key_val = self.b.key(text, hash)?;
+            self.path.push(seg);
+            let value = self.decode_value(val_dict, val_shape, depth + 1)?;
+            self.pop_seg(seg);
+            self.b.append(base, hash, key_val, value)?;
+        }
+        Ok(self.b.map(base))
+    }
+
+    #[inline(never)]
+    fn decode_enum(&mut self, dict: VmValue, shape_idx: u32, def: u32, first_variant: u32, depth: usize) -> CodecResult<VmValue> {
+        let type_rt = &self.prog.types[def as usize];
+        let (is_object, seg) = match self.c.peek() {
+            Some(b'"') => (false, self.read_str_seg()?),
+            Some(b'{') => {
+                self.c.pos += 1;
+                self.c.ws();
+                if self.c.eat(b'}') {
+                    return Err(self.fail(&format!("expected a variant of {}", type_rt.name)));
+                }
+                (true, self.read_key_seg()?)
+            }
+            _ => return Err(self.mismatch(&type_rt.name)),
+        };
+        let variant_name = self.seg_str(seg);
+        let Some(offset) =
+            self.prog.variants[first_variant as usize..].iter().take_while(|v| v.def == def).position(|v| v.name == variant_name)
+        else {
+            let shown = super::truncate(variant_name, MAX_PATH_KEY_LEN).to_string();
+            return Err(self.fail(&format!("unknown variant `{shown}` of {}", type_rt.name)));
+        };
+        self.b.meter.charge((offset / 16) as u64)?;
+        let variant_id = first_variant + offset as u32;
+        let variant = &self.prog.variants[variant_id as usize];
+        if !is_object {
+            if variant.arity != 0 {
+                return Err(self.fail(&format!("variant `{}` of {} needs a payload", variant.name, type_rt.name)));
+            }
+            if let FastSeg::Escaped(i) = seg {
+                self.path_owned.truncate(i);
+            }
+            return Ok(VmValue::Tag(variant_id));
+        }
+        self.path.push(seg);
+        let value = if variant.arity == 0 {
+            self.c.ws();
+            if !self.c.eat(b'[') {
+                return Err(self.mismatch("array of length 0"));
+            }
+            self.c.ws();
+            if !self.c.eat(b']') {
+                return Err(self.fail("expected array of length 0"));
+            }
+            VmValue::Tag(variant_id)
+        } else {
+            let part_base: usize = (first_variant as usize..variant_id as usize).map(|vid| self.prog.variants[vid].arity).sum();
+            let names = variant.field_names.as_deref();
+            if names.is_some() {
+                self.open(depth, b'{', "object")?;
+            } else {
+                self.open(depth, b'[', &format!("array of length {}", variant.arity))?;
+            }
+            self.decode_slots(dict, shape_idx, PureSlotTarget::Variant { id: variant_id }, names, variant.arity, part_base, depth + 1)?
+        };
+        self.c.ws();
+        if !self.c.eat(b'}') {
+            return Err(if self.c.peek() == Some(b',') {
+                self.fail(&format!("expected a single variant of {}", type_rt.name))
+            } else {
+                self.c.unexpected()
+            });
+        }
+        self.pop_seg(seg);
+        Ok(value)
+    }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn decode_slots(
+        &mut self,
+        dict: VmValue,
+        shape_idx: u32,
+        target: PureSlotTarget,
+        names: Option<&[String]>,
+        count: usize,
+        part_base: usize,
+        depth: usize,
+    ) -> CodecResult<VmValue> {
+        let shape = &self.prog.shapes[shape_idx as usize];
+        let base = self.slots.len();
+        self.slots.resize(base + count, VmValue::Uninit);
+        let mut filled = 0usize;
+        let mut first = true;
+        if let Some(names) = names {
+            let mut next_guess = 0usize;
+            while self.next_elem(&mut first, b'}')? {
+                let seg = self.read_key_seg()?;
+                let name = self.seg_str(seg);
+                let found = if names.get(next_guess).is_some_and(|field| field == name) {
+                    Some(next_guess)
+                } else if matches!(target, PureSlotTarget::Struct(_))
+                    && let Some(index) = shape.slot_index.as_ref()
+                {
+                    index.get(name).map(|&slot| slot as usize)
+                } else {
+                    if names.len() > MAX_SCANNED_SLOTS {
+                        self.b.meter.charge((names.len() / 16) as u64)?;
+                    }
+                    names.iter().position(|field| field == name)
+                };
+                match found {
+                    Some(slot) if !matches!(self.slots[base + slot], VmValue::Uninit) => {
+                        let shown = super::truncate(name, MAX_PATH_KEY_LEN).to_string();
+                        self.path.push(seg);
+                        return Err(self.fail(&format!("duplicate field `{shown}`")));
+                    }
+                    Some(slot) => {
+                        next_guess = slot + 1;
+                        let (child_dict, child_shape) =
+                            codec::eval_static_part(self.consts, self.heap, dict, &shape.parts[part_base + slot])?;
+                        self.path.push(seg);
+                        let val = self.decode_value(child_dict, child_shape, depth)?;
+                        self.pop_seg(seg);
+                        self.slots[base + slot] = val;
+                    }
+                    None => {
+                        if let FastSeg::Escaped(i) = seg {
+                            self.path_owned.truncate(i);
+                        }
+                        let meter = self.b.meter;
+                        self.c.skip_value(depth, |fuel| meter.charge(fuel).map_err(Into::into))?;
+                    }
+                }
+            }
+        } else {
+            while self.next_elem(&mut first, b']')? {
+                if filled >= count {
+                    return Err(self.fail(&format!("expected array of length {count}")));
+                }
+                let (child_dict, child_shape) = codec::eval_static_part(self.consts, self.heap, dict, &shape.parts[part_base + filled])?;
+                self.path.push(FastSeg::Index(filled));
+                let val = self.decode_value(child_dict, child_shape, depth)?;
+                self.path.pop();
+                self.slots[base + filled] = val;
+                filled += 1;
+            }
+        }
+        for i in 0..count {
+            if !matches!(self.slots[base + i], VmValue::Uninit) {
+                continue;
+            }
+            if matches!(target, PureSlotTarget::Tuple) {
+                return Err(self.fail(&format!("expected array of length {count}, found {i}")));
+            }
+            let (_, part_shape) = codec::eval_static_part(self.consts, self.heap, dict, &shape.parts[part_base + i])?;
+            if matches!(self.prog.shapes[part_shape as usize].kind, ShapeKind::Option) {
+                self.slots[base + i] = VmValue::Tag(self.prog.ids.none);
+            } else {
+                let message =
+                    names.map_or_else(|| format!("expected {count} payload values"), |names| format!("missing field `{}`", names[i]));
+                return Err(self.fail(&message));
+            }
+        }
+        if names.is_none() && filled < count {
+            return Err(self.fail(&format!("expected array of length {count}")));
+        }
+        self.b.st.check_memory((NODE_BYTES + self.b.pending).saturating_add(count * std::mem::size_of::<VmValue>()))?;
+        let slice = &self.slots[base..base + count];
+        let val = match target {
+            PureSlotTarget::Tuple => self.b.st.new_tuple(slice.to_vec()),
+            PureSlotTarget::Struct(def) => self.b.st.alloc(Obj::Struct(def, slice.into())),
+            PureSlotTarget::Variant { id } => self.b.st.new_variant(id, slice),
+        };
+        self.slots.truncate(base);
+        Ok(val)
+    }
+}
+
+fn pure_decode(
+    context: &mut CallContext,
+    dict_root: crate::native::context::RootedValue,
+    text_root: crate::native::context::RootedValue,
+) -> CodecResult<VmValue> {
+    let dict = context.value(dict_root);
+    let text = context.value(text_root);
+    context.step(|vm| {
+        let (prog, consts, meter) = (&vm.prog, &vm.consts, &vm.meter);
+        let result: CodecResult<VmValue> = vm.heap.staged(|heap, st| {
+            let shape_idx = codec::dict_shape_pure(heap, dict)?;
+            let mut dec = StagedDecoder {
+                prog,
+                consts,
+                heap,
+                b: Builder::new(st, meter),
+                c: JsonCursor { src: heap.str(text), pos: 0 },
+                scratch: String::new(),
+                slots: SmallVec::new(),
+                path: SmallVec::new(),
+                path_owned: Vec::new(),
+            };
+            let value = dec.decode_value(dict, shape_idx, 0)?;
+            dec.c.finish()?;
+            meter.charge((dec.c.pos / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
+            Ok(value)
+        });
+        split_step_result(result)
     })?
 }
 

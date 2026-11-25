@@ -146,8 +146,8 @@ pub(crate) fn alloc_buffer(
     })
 }
 
-fn dict_shape(vm: &Vm, dict: VmValue) -> Result<Option<u32>, Fail> {
-    match vm.heap.get(dict) {
+fn shape_of_dict(heap: &crate::vm::heap::Heap, dict: VmValue) -> Result<Option<u32>, Fail> {
+    match heap.get(dict) {
         Obj::Tuple(slots) => match (slots.first(), slots.get(SHAPE_SLOT)) {
             (_, Some(&VmValue::Int(shape_idx))) => Ok(Some(shape_idx as u32)),
             (Some(_), _) => Ok(None),
@@ -155,6 +155,14 @@ fn dict_shape(vm: &Vm, dict: VmValue) -> Result<Option<u32>, Fail> {
         },
         _ => Err(Fail::internal("a codec dictionary is not a tuple")),
     }
+}
+
+fn dict_shape(vm: &Vm, dict: VmValue) -> Result<Option<u32>, Fail> {
+    shape_of_dict(&vm.heap, dict)
+}
+
+pub(crate) fn dict_shape_pure(heap: &crate::vm::heap::Heap, dict: VmValue) -> Result<u32, Fail> {
+    shape_of_dict(heap, dict)?.ok_or_else(|| Fail::internal("codec: non-structural dict in pure decode"))
 }
 
 fn eval_template(context: &mut CallContext, outer_dict: VmValue, template: &PartTemplate) -> Result<VmValue, Fail> {
@@ -199,9 +207,22 @@ fn eval_static_template(consts: &[VmValue], heap: &crate::vm::heap::Heap, outer_
     }
 }
 
-/// Returns `true` if `dict` and every reachable child dictionary are structural
-/// with no custom callbacks.
-pub(crate) fn dict_is_pure(vm: &Vm, dict: VmValue) -> bool {
+#[inline(always)]
+pub(crate) fn eval_static_part(
+    consts: &[VmValue],
+    heap: &crate::vm::heap::Heap,
+    outer_dict: VmValue,
+    template: &PartTemplate,
+) -> Result<(VmValue, u32), Fail> {
+    if let PartTemplate::Const(const_idx, Some(shape_idx)) = template {
+        return Ok((consts[*const_idx as usize], *shape_idx));
+    }
+    let dict = eval_static_template(consts, heap, outer_dict, template)
+        .ok_or_else(|| Fail::internal("codec: non-static template in pure decode"))?;
+    Ok((dict, dict_shape_pure(heap, dict)?))
+}
+
+fn dict_is_pure_with(vm: &Vm, dict: VmValue, for_decode: bool) -> bool {
     let mut visited = [0u32; 32];
     let mut visited_len = 0usize;
     let mut stack = [VmValue::Unit; 32];
@@ -224,6 +245,23 @@ pub(crate) fn dict_is_pure(vm: &Vm, dict: VmValue) -> bool {
         if matches!(shape.kind, ShapeKind::Never) {
             return false;
         }
+        if for_decode {
+            if shape.init.is_some()
+                || !shape.fills.iter().all(|f| matches!(f, PartFill::Required))
+                || matches!(shape.kind, ShapeKind::Set | ShapeKind::Bytes | ShapeKind::Range | ShapeKind::Native(..))
+            {
+                return false;
+            }
+            if matches!(shape.kind, ShapeKind::Map) {
+                let Some(key_dict) = shape.parts.first().and_then(|p| eval_static_template(&vm.consts, &vm.heap, current, p)) else {
+                    return false;
+                };
+                let Some(key_shape) = dict_shape(vm, key_dict).ok().flatten() else { return false };
+                if !matches!(vm.prog.shapes.get(key_shape as usize).map(|s| &s.kind), Some(ShapeKind::Str)) {
+                    return false;
+                }
+            }
+        }
         for part in &shape.parts {
             let Some(child) = eval_static_template(&vm.consts, &vm.heap, current, part) else { return false };
             if stack_len == stack.len() {
@@ -234,6 +272,17 @@ pub(crate) fn dict_is_pure(vm: &Vm, dict: VmValue) -> bool {
         }
     }
     true
+}
+
+/// Returns `true` if `dict` and every reachable child dictionary are structural
+/// with no custom callbacks.
+pub(crate) fn dict_is_pure(vm: &Vm, dict: VmValue) -> bool {
+    dict_is_pure_with(vm, dict, false)
+}
+
+/// Returns `true` if `dict` can run on the staged zero-copy JSON decoder.
+pub(crate) fn dict_is_pure_decode(vm: &Vm, dict: VmValue) -> bool {
+    dict_is_pure_with(vm, dict, true)
 }
 
 /// Single-use destination passed to `Encode.encode`.
