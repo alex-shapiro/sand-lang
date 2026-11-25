@@ -42,9 +42,8 @@ We want a runtime model that meets these requirements:
 
 All three arms follow the same language semantics:
 
-- Primitive values (`int`, `float`, `bool`, unit, and payload-less enum tags) stay unboxed inside `VmValue`.
-- Keep string-inlining behavior consistent across all three arms so short-string allocation counts do not confound GC comparisons.
-- Immutable heap types: `str`, `bytes`, tuples, enums, and structs without `var` fields.
+- Primitive values (`int`, `float`, `bool`, unit, and payload-less enum tags) and short strings (`<= 14` bytes) stay unboxed inside a 16-byte `VmValue` across all three arms.
+- Immutable heap types: long `str` (`> 14` bytes), `bytes`, tuples, enums, and structs without `var` fields.
 - Mutable heap types: `list`, `map`, structs with `var` fields, and closure capture cells.
 
 ## The Three Arms
@@ -67,13 +66,13 @@ Trade-offs: runtime layout and speed match Arm 1, and code still cannot hold `&s
 
 ### Arm 3: `Arc` with Cycle Collector
 
-Each immutable heap object lives behind `Arc<T>`, each mutable heap object lives behind `Arc<RwLock<T>>` (or `Arc<Mutex<T>>`), and strings store short strings inline and long strings behind an engine-tracked `Arc` that subtracts freed bytes on `Drop`. 100% safe Rust and `Send`.
+Each immutable heap object lives behind `Arc<T>`, each mutable heap object lives behind `Arc<RwLock<T>>` (or `Arc<Mutex<T>>`), and long strings (`> 14` bytes) live behind an engine-tracked `Arc` that subtracts freed bytes on `Drop`. 100% safe Rust and `Send`.
 
 Cloning a string handle takes constant time without copying bytes. Natives hold an owned string handle across allocations, callbacks, and `.await`, and borrow `&str` directly with zero manual rooting and without `Staging`.
 
-For cycles, use a Python-style reference-count cycle detector over all container types (both immutable and mutable, since an immutable struct can reference a mutable container that points back to it). Leave externally held native values untouched, drop write locks before triggering sweeps, and allocate no new memory at `max_memory`. Implement iterative `Drop` on linked values so deep drops fit on a 512 KB stack.
+For cycles, use a Python-style reference-count cycle detector over all container types (both immutable and mutable, since an immutable struct can reference a mutable container that points back to it). Leave externally held native values untouched and allocate no new memory at `max_memory`. Implement iterative `Drop` on linked values so deep drops fit on a 512 KB stack.
 
-Trade-offs: atomic refcount traffic on clones and drops, lock overhead on mutable containers, cycle-collector table overhead, and two heap allocations per tracked long string in 100% safe Rust.
+Trade-offs: atomic refcount traffic on clones and drops, lock overhead on mutable containers, `Weak` cycle-table entries that pin `Arc` headers until pruned, and two heap allocations per tracked long string in 100% safe Rust.
 
 ## Experimental Harness
 
@@ -86,8 +85,8 @@ Keep measurements fair across all three arms:
 - Share one bytecode ISA, test suite, dataset generator, and stateless JSON scanner (`(src: &str, pos: &mut usize)`) across all arms.
 - Share one strict byte tracker checked before every allocation. Count object headers, inner container buffers, root stacks, and cycle-collector tables.
 - Do not build a second structural-only fast-path codec beside the general callback codec in any arm. Give every arm one equal review and tuning pass before recording final numbers.
-- Use the same GC trigger policy across Arms 1 and 2 (collecting if allocated bytes reach the larger of 2x the last post-GC live set or a shared minimum threshold, plus emergency collection at `max_memory`). In B2 and B3, set that minimum threshold above a single decode's working set so B2 and B3 isolate steady-state codec speed while B4 tests GC under pressure.
-- In B1 and B2/B3 `decode`, report operation time, post-run cleanup time (one full collection for Arms 1 and 2; dropping the output and pruning dead `Weak` entries for Arm 3), and total combined time. In B2/B3 `encode`, report operation time without forcing a full-heap GC over the 100,000 live input objects.
+- Use the same memory-threshold collection policy across all three arms (running mark-sweep for Arms 1 and 2, and `Weak`-table pruning plus cycle collection for Arm 3, if tracked bytes reach the larger of 2x the last post-sweep live set or a shared minimum threshold, plus emergency sweeps at `max_memory`). In B2 and B3, set that minimum threshold above the working set of one full benchmark run so B2 and B3 isolate steady-state codec speed while B4 tests GC under pressure.
+- In B1, B2/B3 `decode`, and B2/B3 `small_encode`, report operation time, post-run cleanup time (one full collection for Arms 1 and 2; dropping the output and pruning dead `Weak` entries for Arm 3), and total combined time. Compare total combined time on `small_decode` and `small_encode`, since Arm 3 drops per-iteration outputs during operation time while Arms 1 and 2 defer freeing them to cleanup. In B2/B3 `large_encode`, report operation time without forcing a full-heap GC over the live input objects.
 
 ### Dataset and Baseline
 
@@ -104,7 +103,7 @@ struct User {
 struct Doc { users: [User] }
 ```
 
-The large dataset is a `Doc` of 5,000 generated `User` records. It creates about 100,000 heap objects and encodes to 1.28 MB of JSON. The small dataset is one `Address` record run 20,000 times.
+The large dataset is a `Doc` of 5,000 generated `User` records. It creates about 37,000 heap objects (including 4,990 `email` strings over the 14-byte inline limit) and encodes to 1.28 MB of JSON. The small dataset is one `Address` record run 20,000 times.
 
 For B2 reference only, `origin/main` in `benches/codec.rs` runs at 279 ns per `User` for `encode`, 624 ns per `User` for `decode`, and 218 ns per call for `small_decode`.
 
@@ -132,14 +131,14 @@ Repeat B2 with `Address` and `Status` implemented as Sand bytecode methods calli
 
 Check four cases under a hard `max_memory` cap:
 
-- Fill the heap to 70% with dead acyclic objects, then run B2 and B3. Treat this case as a correctness and memory-limit check rather than a speed race, since the refcounting arm frees acyclic garbage immediately on drop.
+- Fill the heap to 70% with dead acyclic objects, then run B2 and B3. Treat this case as a correctness and memory-limit check rather than a speed race, since Arm 3 frees acyclic inner buffers on drop while `Weak` entries pin `Arc` headers until pruned.
 - Fill the heap to 70% with dead reference cycles, then run B2 and B3.
 - Run B3 with a custom callback that allocates temporary garbage in a loop inside one decode call.
 - Attempt a single string or list allocation larger than `max_memory` and verify rejection before memory grows.
 
 ### B5: Deep Interleaved Recursion
 
-Define `struct Node { value: int, next: Node? }`. Encode, decode, and drop a 500-level linked `Node` with custom Sand callbacks that recurse through the native `Encoder` and `Decoder` walker at every level on a 512 KB native thread stack. Note that WebAssembly stack limits are a follow-up check for any winning arm.
+Define `struct Node { value: int, next: Node? }`. Encode, decode, and drop a 500-level linked `Node` with custom Sand callbacks that recurse through the native `Encoder` and `Decoder` walker at every level on a 512 KB native thread stack in debug builds (matching [api.rs](../crates/sandlang/tests/api.rs#L154-L167)). Note that WebAssembly stack limits are a follow-up check for any winning arm.
 
 ### B6: Async Yield and `Send`
 
@@ -155,7 +154,7 @@ Build four host integrations using only the public host API:
 
 - `List.map` calling a Sand closure per element.
 - A second format (`SExpr`) implementing both encoding and decoding.
-- A host object storing a Sand callback across multiple calls.
+- A host object storing a Sand callback across multiple calls, verifying that a cycle between the host object and its stored callback is collected.
 - Two independent engines running interleaved in the same process.
 
 Report both host-integration lines of code and total VM, GC, and codec core lines of code so complexity cannot hide inside the VM crate.
