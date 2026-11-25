@@ -7,10 +7,10 @@
 //! a decode through its rooted string handle and a byte offset, and they
 //! root every container that they walk or build.
 
-pub use super::codec_objects::*;
+use super::codec_objects::*;
 use super::heap::{Handle, Obj, Value};
 use super::vm::{Args, NativeModule, Vm, type_error};
-use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, absent_fields, all_fields, charge_input, find_field};
+use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, absent_fields, all_fields, charge_input, check_count, find_field};
 use crate::shared::isa::{DECODE_METHOD, ENCODE_METHOD, Program, Ty};
 use crate::shared::json::{Json, JsonWriter};
 use crate::shared::{BYTES_PER_FUEL, Fail, Result, SHORT_STR_MAX, ShortStr, text_fuel};
@@ -84,9 +84,9 @@ fn write_heap_str<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, v: Value, 
 /// Encodes `v` with `writer` and returns the output as a Sand string. The
 /// caller must root `v`.
 pub fn encode_with<W: FormatWriter>(vm: &mut Vm, writer: W, v: Value) -> Result<Value> {
-    vm.reserve(size_of::<EncodeState<W>>())?;
     // The root slot of the `Encoder` object that the first callback creates.
     let encoder = vm.push_root(Value::Unit)?;
+    vm.reserve(size_of::<EncodeState<W>>())?;
     let mut cx = EncodeCx { state: Some(Box::new(EncodeState { writer, out: String::new() })), encoder };
     let program = vm.program.clone();
     let result = encode_value(vm, &mut cx, &program, v);
@@ -177,13 +177,15 @@ fn encode_variant<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Progra
 fn encode_list<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, v: Value) -> Result<()> {
     vm.check_stack()?;
     let mark = vm.push_root(v)?;
-    write(vm, cx, Event::OpenList(vm.list_len(v)?))?;
+    let n = vm.list_len(v)?;
+    write(vm, cx, Event::OpenList(n))?;
     let mut i = 0;
     while let Some(item) = vm.list_get(v, i)? {
         encode_value(vm, cx, p, item)?;
         i += 1;
     }
     vm.truncate_roots(mark);
+    check_count(i, n)?;
     write(vm, cx, Event::CloseList)
 }
 
@@ -192,7 +194,8 @@ fn encode_map<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, h
     vm.check_stack()?;
     let mark = vm.push_root(Value::Obj(h))?;
     let Obj::Map(entries) = vm.heap.get(h) else { unreachable!() };
-    write(vm, cx, Event::OpenMap(entries.len()))?;
+    let n = entries.len();
+    write(vm, cx, Event::OpenMap(n))?;
     let mut i = 0;
     loop {
         let Obj::Map(entries) = vm.heap.get(h) else { unreachable!() };
@@ -205,6 +208,7 @@ fn encode_map<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, h
         i += 1;
     }
     vm.truncate_roots(mark);
+    check_count(i, n)?;
     write(vm, cx, Event::CloseMap)
 }
 

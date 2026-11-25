@@ -496,6 +496,9 @@ impl Vm {
 
     /// Calls function `func` synchronously with `closure` as its closure.
     pub fn call_function(&mut self, func: u16, closure: Value, args: &[Value]) -> Result<Value> {
+        if self.sync_depth == 0 && self.frames.is_empty() {
+            self.stack_base = stack_address();
+        }
         check_stack(self.stack_base)?;
         let f = &self.program.funcs[func as usize];
         if f.params as usize != args.len() {
@@ -618,8 +621,14 @@ impl Vm {
                     Op::Add { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_add(int!(b)).ok_or_else(overflow)?),
                     Op::Sub { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_sub(int!(b)).ok_or_else(overflow)?),
                     Op::Mul { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_mul(int!(b)).ok_or_else(overflow)?),
-                    Op::Div { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_div(int!(b)).ok_or_else(div_error)?),
-                    Op::Rem { dst, a, b } => reg!(dst) = Value::Int(int!(a).checked_rem(int!(b)).ok_or_else(div_error)?),
+                    Op::Div { dst, a, b } => {
+                        let divisor = int!(b);
+                        reg!(dst) = Value::Int(int!(a).checked_div(divisor).ok_or_else(|| div_error(divisor))?)
+                    }
+                    Op::Rem { dst, a, b } => {
+                        let divisor = int!(b);
+                        reg!(dst) = Value::Int(int!(a).checked_rem(divisor).ok_or_else(|| div_error(divisor))?)
+                    }
                     Op::FAdd { dst, a, b } => reg!(dst) = Value::Float(float!(a) + float!(b)),
                     Op::FSub { dst, a, b } => reg!(dst) = Value::Float(float!(a) - float!(b)),
                     Op::FMul { dst, a, b } => reg!(dst) = Value::Float(float!(a) * float!(b)),
@@ -962,7 +971,11 @@ impl Vm {
 
     /// Adds a fiber that runs function `func` with `args`.
     pub fn spawn(&mut self, func: u16, args: &[Value]) -> Result<()> {
-        let regs = self.program.funcs[func as usize].regs as usize;
+        let f = &self.program.funcs[func as usize];
+        if f.params as usize != args.len() {
+            return Err(Fail::error(format!("{} expects {} arguments", f.name, f.params)));
+        }
+        let regs = f.regs as usize;
         let capacity = regs + STACK_SLACK;
         self.reserve(capacity * size_of::<Value>() + FRAME_SLACK * size_of::<Frame>() + size_of::<Fiber>())?;
         let mut stack = Vec::with_capacity(capacity);
@@ -994,7 +1007,7 @@ impl Vm {
         self.set_fiber_state(i, state);
     }
 
-    /// Stores the state of fiber `i`, and returns the tracked bytes of its
+    /// Stores the state of fiber `i`, and releases the tracked bytes of its
     /// stack and frames once it finishes.
     fn set_fiber_state(&mut self, i: usize, state: FiberState) {
         let fiber = &mut self.fibers[i];
@@ -1129,9 +1142,10 @@ fn overflow() -> Fail {
     Fail::error("integer overflow")
 }
 
+/// Returns the error of a division by `divisor` that has no result.
 #[cold]
-fn div_error() -> Fail {
-    Fail::error("division by zero")
+fn div_error(divisor: i64) -> Fail {
+    if divisor == 0 { Fail::error("division by zero") } else { overflow() }
 }
 
 #[cold]

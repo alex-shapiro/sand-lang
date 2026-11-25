@@ -6,10 +6,10 @@
 //! cross an allocation or a callback without an explicit `unbind`.
 
 use super::scope::{GcScope, NativeModule, NoGcScope, Record, Scoped, Value, Vm, enter};
-use crate::arm1::codec::{DecoderObj, DynEncodeState, EncodeState, EncoderObj};
+use crate::arm1::codec_objects::{DecoderObj, DynEncodeState, EncodeState, EncoderObj};
 use crate::arm1::heap::{Obj, Value as RawValue};
 use crate::arm1::vm::{self as raw, Args, type_error};
-use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, absent_fields, all_fields, find_field};
+use crate::shared::format::{Event, FormatReader, FormatWriter, StrSpan, absent_fields, all_fields, check_count, find_field};
 use crate::shared::isa::{DECODE_METHOD, ENCODE_METHOD, Program, Ty};
 use crate::shared::json::{Json, JsonWriter};
 use crate::shared::{BYTES_PER_FUEL, Fail, Result, text_fuel};
@@ -85,9 +85,9 @@ fn write_heap_str<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, v: Value<'
 /// Encodes `v` with `writer` and returns the output as a Sand string. The
 /// caller must keep `v` rooted.
 pub fn encode_with<'a, W: FormatWriter>(vm: &mut Vm, writer: W, v: Value<'_>, mut gc: GcScope<'a, '_>) -> Result<Value<'a>> {
-    vm.reserve(size_of::<EncodeState<W>>(), gc.reborrow())?;
     // The root slot of the `Encoder` object that the first callback creates.
     let encoder = vm.push_root(Value::UNIT, gc.reborrow())?;
+    vm.reserve(size_of::<EncodeState<W>>(), gc.reborrow())?;
     let mut cx = EncodeCx { state: Some(Box::new(EncodeState { writer, out: String::new() })), encoder };
     let program = vm.program().clone();
     let result = encode_value(vm, &mut cx, &program, v, gc.reborrow());
@@ -154,7 +154,7 @@ fn encode_struct<W: FormatWriter>(
     write(vm, cx, Event::OpenMap(fields.len()), gc.reborrow())?;
     for (i, field) in fields.iter().enumerate() {
         write(vm, cx, Event::Key(&field.name), gc.reborrow())?;
-        let field = vm.field(v.get(vm, gc.nogc()), i, gc.nogc())?;
+        let field = vm.field(v.get(gc.nogc()), i, gc.nogc())?;
         encode_value(vm, cx, p, field.unbind(), gc.reborrow())?;
     }
     vm.truncate_roots(mark);
@@ -182,7 +182,7 @@ fn encode_variant<W: FormatWriter>(
         if let Some(names) = names {
             write(vm, cx, Event::Key(&names[i]), gc.reborrow())?;
         }
-        let field = vm.variant_field(v.get(vm, gc.nogc()), i, gc.nogc())?;
+        let field = vm.variant_field(v.get(gc.nogc()), i, gc.nogc())?;
         encode_value(vm, cx, p, field.unbind(), gc.reborrow())?;
     }
     write(vm, cx, if names.is_some() { Event::CloseMap } else { Event::CloseList }, gc.reborrow())?;
@@ -195,14 +195,15 @@ fn encode_list<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, 
     vm.check_stack()?;
     let mark = vm.root_mark();
     let v = v.scope(vm, gc.reborrow())?;
-    let n = vm.list_len(v.get(vm, gc.nogc()), gc.nogc())?;
+    let n = vm.list_len(v.get(gc.nogc()), gc.nogc())?;
     write(vm, cx, Event::OpenList(n), gc.reborrow())?;
     let mut i = 0;
-    while let Some(item) = vm.list_get(v.get(vm, gc.nogc()), i, gc.nogc())? {
+    while let Some(item) = vm.list_get(v.get(gc.nogc()), i, gc.nogc())? {
         encode_value(vm, cx, p, item.unbind(), gc.reborrow())?;
         i += 1;
     }
     vm.truncate_roots(mark);
+    check_count(i, n)?;
     write(vm, cx, Event::CloseList, gc)
 }
 
@@ -211,11 +212,11 @@ fn encode_map<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, v
     vm.check_stack()?;
     let mark = vm.root_mark();
     let v = v.scope(vm, gc.reborrow())?;
-    let Some(Obj::Map(entries)) = vm.obj(v.get(vm, gc.nogc()), gc.nogc()) else { unreachable!() };
+    let Some(Obj::Map(entries)) = vm.obj(v.get(gc.nogc()), gc.nogc()) else { unreachable!() };
     let n = entries.len();
     write(vm, cx, Event::OpenMap(n), gc.reborrow())?;
     let mut i = 0;
-    while let Some((key, value)) = vm.map_entry(v.get(vm, gc.nogc()), i, gc.nogc())? {
+    while let Some((key, value)) = vm.map_entry(v.get(gc.nogc()), i, gc.nogc())? {
         let value = value.unbind();
         match key.raw() {
             RawValue::Short(s) => write(vm, cx, Event::Key(s.as_str()), gc.reborrow())?,
@@ -226,6 +227,7 @@ fn encode_map<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, v
         i += 1;
     }
     vm.truncate_roots(mark);
+    check_count(i, n)?;
     write(vm, cx, Event::CloseMap, gc)
 }
 
@@ -241,7 +243,7 @@ fn encode_callback<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, func: u16
         let rooted = v.unbind().scope(vm, gc.reborrow())?;
         let created = vm.new_encoder(EncoderObj { state: None, walk: encode_entry::<W> }, gc.reborrow())?.unbind();
         vm.set_root(cx.encoder, created);
-        v = rooted.get(vm, gc.nogc());
+        v = rooted.get(gc.nogc());
         vm.truncate_roots(mark);
         encoder = created.bind(gc.nogc());
     }
@@ -413,7 +415,7 @@ fn decode_scalar<'a, 's, R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<'s, R>,
         Ty::Bool => Ok(Value::bool(cx.reader.bool(src!(vm, cx, gc), &mut cx.pos)?)),
         _ => {
             let span = cx.reader.str(src!(vm, cx, gc), &mut cx.pos, &mut cx.scratch)?;
-            let input = cx.input.get(vm, gc.nogc()).unbind();
+            let input = cx.input.get(gc.nogc()).unbind();
             vm.new_str_from_span(input, span, &cx.scratch, gc)
         }
     }
@@ -449,7 +451,7 @@ fn decode_map<'a, 's, R: FormatReader>(
     cx.reader.open_map(src!(vm, cx, gc), &mut cx.pos)?;
     let mark = vm.root_mark();
     while let Some(span) = cx.reader.next_key(src!(vm, cx, gc), &mut cx.pos, &mut cx.scratch)? {
-        let input = cx.input.get(vm, gc.nogc()).unbind();
+        let input = cx.input.get(gc.nogc()).unbind();
         let key = vm.new_str_from_span(input, span, &cx.scratch, gc.reborrow())?.unbind();
         vm.push_root(key, gc.reborrow())?;
         let v = decode_value(vm, cx, p, value, gc.reborrow())?.unbind();
@@ -563,7 +565,7 @@ fn decode_callback<'a, 's, R: FormatReader>(
     vm.count_custom_call();
     let mut decoder = vm.root(cx.decoder, gc.nogc());
     if decoder.is_unit() {
-        let input = cx.input.get(vm, gc.nogc()).raw();
+        let input = cx.input.get(gc.nogc()).raw();
         let obj = DecoderObj { input, pos: 0, charged: 0, scratch: String::new(), reader: cx.reader, walk: decode_entry::<R> };
         let created = vm.new_decoder(obj, gc.reborrow())?.unbind();
         vm.set_root(cx.decoder, created);

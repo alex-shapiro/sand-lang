@@ -101,10 +101,11 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
             YieldNow::default().await;
             let text = (|| {
                 let Value::Struct(u) = &user else { return Err(type_error("User")) };
-                let Value::List(tags) = &u.data.fields[5] else { return Err(type_error("tags")) };
-                let tag = tags.lock()?.0.get(1).and_then(|t| t.str().map(str::to_string)).ok_or_else(|| Fail::error("missing tag"))?;
-                let (name, email) = (u.data.fields[1].str().unwrap_or_default(), u.data.fields[2].str().unwrap_or_default());
-                Ok(format!("{name}|{email}|{tag}|{}", held.str().unwrap_or_default()))
+                let field = |i: usize| u.data.fields.get(i).ok_or_else(|| type_error("User field"));
+                let text = |v: &Value| v.str().map(str::to_string).ok_or_else(|| type_error("str"));
+                let Value::List(tags) = field(5)? else { return Err(type_error("tags")) };
+                let tag = tags.lock()?.0.get(1).cloned().ok_or_else(|| Fail::error("missing tag"))?;
+                Ok(format!("{}|{}|{}|{}", text(field(1)?)?, text(field(2)?)?, text(&tag)?, text(&held)?))
             })();
             let resume: AsyncResume = Box::new(move |vm: &mut Vm| vm.new_str(&text?));
             resume

@@ -84,8 +84,13 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
         let make_user = vm.program.func("make_user").ok_or_else(|| Fail::error("no make_user"))?;
         let user = vm.call_function(make_user, Value::Unit, &[Value::Int(i)])?;
         let user = vm.async_root(user)?;
-        let held = vm.new_str(HELD_STRING)?;
-        let held = vm.async_root(held)?;
+        let held = match vm.new_str(HELD_STRING).and_then(|held| vm.async_root(held)) {
+            Ok(held) => held,
+            Err(e) => {
+                vm.take_async_root(user);
+                return Err(e);
+            }
+        };
         Ok(Box::pin(async move {
             YieldNow::default().await;
             let resume: AsyncResume = Box::new(move |vm: &mut Vm| {

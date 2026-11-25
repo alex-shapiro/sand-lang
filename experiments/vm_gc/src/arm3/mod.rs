@@ -33,12 +33,17 @@ impl ArmEngine for Engine {
         self.vm.collect();
     }
 
+    fn cleanup(&mut self) {
+        self.vm.heap.prune();
+    }
+
     fn stats(&self) -> MemStats {
         MemStats {
             tracked_bytes: self.vm.heap.tracker.used(),
             live_objects: self.vm.heap.live_containers,
             collections: self.vm.heap.policy.collections,
             custom_calls: self.vm.custom_calls,
+            fuel_left: self.vm.fuel,
         }
     }
 

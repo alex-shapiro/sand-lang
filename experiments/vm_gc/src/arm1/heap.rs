@@ -4,7 +4,7 @@
 //! can collect garbage, so code that holds a handle across an allocation or
 //! a callback must root it on [`Vm::roots`](super::vm::Vm::roots).
 
-use super::codec::{DecoderObj, EncoderObj};
+use super::codec_objects::{DecoderObj, EncoderObj};
 use crate::shared::{GcPolicy, Limits, ShortStr, Tracker};
 use std::any::Any;
 use std::mem::size_of;
@@ -33,7 +33,9 @@ pub trait HostObject: Any + Send {
     /// Visits every value that the object holds.
     fn trace(&self, visit: &mut dyn FnMut(Value));
 
-    /// Bytes owned by the object, counted against the memory limit.
+    /// Bytes owned by the object, counted against the memory limit. The size
+    /// must not change while the object lives, because the collector
+    /// releases the size it reports when it frees the object.
     fn size(&self) -> usize {
         0
     }
@@ -218,8 +220,8 @@ impl Heap {
     }
 
     /// Marks everything reachable from the values that `roots` visits and
-    /// frees every other object. Returns the number of freed objects.
-    pub fn collect(&mut self, roots: impl FnOnce(&mut Marker)) -> usize {
+    /// frees every other object.
+    pub fn collect(&mut self, roots: impl FnOnce(&mut Marker)) {
         let mut mark = Marker { marks: &mut self.marks, gray: &mut self.gray };
         roots(&mut mark);
         while let Some(h) = mark.gray.pop() {
@@ -247,6 +249,5 @@ impl Heap {
         }
         self.live_objects -= freed;
         self.tracker.sub_mut(freed_bytes);
-        freed
     }
 }

@@ -21,7 +21,7 @@
 //! [`Value::bind`] on entry. The compiler does not check that a callee binds
 //! its arguments, or that unbound values stay rooted.
 
-use crate::arm1::codec::{DecoderObj, EncoderObj};
+use crate::arm1::codec_objects::{DecoderObj, EncoderObj};
 use crate::arm1::heap::{HostObject, Obj, Value as RawValue};
 use crate::arm1::vm::{self as raw, Args, AsyncRoot};
 use crate::shared::format::{FormatReader, StrSpan, charge_input};
@@ -181,7 +181,7 @@ pub struct Scoped<'s> {
 
 impl<'s> Scoped<'s> {
     #[inline(always)]
-    pub fn get<'a>(self, _vm: &Vm, _gc: NoGcScope<'a, 's>) -> Value<'a> {
+    pub fn get<'a>(self, _gc: NoGcScope<'a, 's>) -> Value<'a> {
         Value::new_raw(self.raw)
     }
 

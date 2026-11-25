@@ -167,7 +167,7 @@ pub fn run<E: ArmEngine>(runs: usize, reps: usize, filter: &str) -> Vec<Row> {
                 let cleanup_start = Instant::now();
                 if op.cleanup {
                     call(&mut e, "clear_out", None);
-                    e.collect();
+                    e.cleanup();
                 }
                 let cleanup = cleanup_start.elapsed();
                 best.0 = best.0.min(op_time);

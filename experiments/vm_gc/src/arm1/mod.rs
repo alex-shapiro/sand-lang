@@ -39,6 +39,7 @@ impl ArmEngine for Engine {
             live_objects: self.vm.heap.live_objects,
             collections: self.vm.heap.policy.collections,
             custom_calls: self.vm.custom_calls,
+            fuel_left: self.vm.fuel,
         }
     }
 

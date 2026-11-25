@@ -235,7 +235,7 @@ impl Heap {
     // Collection
     // ---------------------------------------------------------------------
 
-    fn prune(&mut self, i: usize) {
+    fn prune_slot(&mut self, i: usize) {
         let entry = &mut self.entries[i];
         if entry.weak.take().is_some() {
             self.tracker.sub(entry.bytes);
@@ -246,16 +246,23 @@ impl Heap {
         }
     }
 
-    /// Prunes dead slots and clears garbage cycles. Returns the number of
-    /// pruned containers.
-    pub fn collect(&mut self) -> usize {
-        let before = self.live_containers;
+    /// Prunes the slots of dead containers.
+    pub fn prune(&mut self) {
+        for i in 0..self.entries.len() {
+            if self.entries[i].weak.as_ref().is_some_and(|w| w.strong_count() == 0) {
+                self.prune_slot(i);
+            }
+        }
+    }
+
+    /// Prunes dead slots and clears garbage cycles.
+    pub fn collect(&mut self) {
         let n = self.entries.len();
         self.refs.clear();
         for i in 0..n {
             let count = self.entries[i].weak.as_ref().map_or(0, Weak::strong_count);
             if count == 0 {
-                self.prune(i);
+                self.prune_slot(i);
                 self.refs.push(DEAD);
             } else {
                 self.refs.push(count as i64);
@@ -310,13 +317,8 @@ impl Heap {
                 drop_values(std::mem::take(&mut cleared));
             }
         }
-        for i in 0..n {
-            if self.entries[i].weak.as_ref().is_some_and(|w| w.strong_count() == 0) {
-                self.prune(i);
-            }
-        }
+        self.prune();
         self.policy.collected(self.tracker.used());
         self.update_next_check();
-        before - self.live_containers
     }
 }

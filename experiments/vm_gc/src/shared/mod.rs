@@ -183,7 +183,7 @@ impl GcPolicy {
     /// Returns whether an allocation that brings tracked bytes to `used` triggers a collection.
     #[inline]
     pub fn should_collect(&self, used: usize) -> bool {
-        self.stress || (used > self.next_threshold && !self.paused)
+        self.stress || used > self.threshold()
     }
 
     /// Tracked byte count above which an allocation triggers a collection.

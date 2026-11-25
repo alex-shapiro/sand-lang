@@ -3,7 +3,9 @@
 /// A register index relative to the current frame base.
 pub type Reg = u16;
 
-/// One register-machine instruction. Every instruction costs one unit of fuel.
+/// One register-machine instruction. Every instruction costs one unit of
+/// fuel, and instructions that scan text or map keys also cost one unit per
+/// 16 bytes or entries.
 ///
 /// Operands named `base..base + count` are in the argument area above a
 /// frame's named registers, where the assembler copies them. An

@@ -43,6 +43,7 @@ pub struct MemStats {
     pub collections: u64,
     /// Calls of custom `encode` and `decode` methods that a codec walker made.
     pub custom_calls: u64,
+    pub fuel_left: u64,
 }
 
 /// One engine of an arm.
@@ -57,6 +58,12 @@ pub trait ArmEngine: Sized + Send + 'static {
     /// Runs one full collection: mark-sweep in Arms 1 and 2, and dead `Weak`
     /// pruning plus cycle collection in Arm 3.
     fn collect(&mut self);
+
+    /// Frees the garbage that a benchmark repetition left: one full
+    /// collection in Arms 1 and 2, and a prune of dead `Weak` entries in Arm 3.
+    fn cleanup(&mut self) {
+        self.collect();
+    }
 
     fn stats(&self) -> MemStats;
 
@@ -221,7 +228,9 @@ pub fn b2_b3_codec<E: ArmEngine>(variant: Variant) {
     call_ok(&mut e, "setup_doc", &[int(500)]);
     let text = call_str(&mut e, "encode_doc", &[]);
     assert_eq!(call_str(&mut e, "roundtrip_text", &[]), text);
+    let before = callback_count(&mut e);
     assert_eq!(call_ok(&mut e, "bench_decode", &[]), HostValue::Int(499));
+    assert_eq!(callback_count(&mut e), before + 500 * per_user, "{}: custom Address and Status decode calls", E::NAME);
 
     let doc_ty = program(variant).types.iter().position(|t| *t == super::isa::Ty::Struct(program(variant).struct_id("Doc").unwrap()));
     let doc_ty = doc_ty.expect("a Doc type operand") as i64;

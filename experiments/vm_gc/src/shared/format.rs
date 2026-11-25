@@ -121,6 +121,13 @@ pub fn syntax_error<T>(format: &str, what: &str, pos: usize) -> Result<T> {
     Err(Fail::Error(format!("{format}: expected {what} at byte {pos}")))
 }
 
+/// Fails if a list or map that an encode opened with `declared` items gave
+/// `written` items, because a callback changed its length.
+#[inline]
+pub fn check_count(written: usize, declared: usize) -> Result<()> {
+    if written == declared { Ok(()) } else { Err(Fail::error("a list or map changed length during encode")) }
+}
+
 /// Returns the mask of the record fields that the input left out and that
 /// default to `None`, or fails if the input left out a required field.
 /// `seen` has bit `i` set for each field `i` that the input gave.

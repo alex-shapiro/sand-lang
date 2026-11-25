@@ -2,7 +2,8 @@
 //!
 //! Enums use the external tagging of `origin/main`: `"Active"`,
 //! `{"Suspended": {"reason": "r"}}`, and `{"Banned": [1, "b"]}`. `None` is
-//! `null`. Separators are lenient: the scanner accepts a missing comma.
+//! `null`. The scanner requires commas between items, but it skips an unknown
+//! value without checking its separators.
 
 use super::format::{Event, FormatReader, FormatWriter, StrSpan, syntax_error};
 use super::{Fail, Result, push_int};

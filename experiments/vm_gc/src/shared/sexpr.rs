@@ -129,6 +129,22 @@ fn quoted(src: &str, pos: &mut usize, scratch: &mut String) -> Result<StrSpan> {
     Ok(StrSpan::Scratch)
 }
 
+/// Skips the quoted string at `pos`, which must be the opening quote.
+fn skip_quoted(bytes: &[u8], pos: &mut usize) -> Result<()> {
+    let mut i = *pos + 1;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            b'"' => {
+                *pos = i + 1;
+                return Ok(());
+            }
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    syntax_error("sexpr", "a closing quote", i)
+}
+
 fn expect(src: &str, pos: &mut usize, byte: u8, what: &str) -> Result<()> {
     if ws(src.as_bytes(), pos) == Some(byte) {
         *pos += 1;
@@ -226,7 +242,6 @@ impl FormatReader for SExpr {
     fn skip(&self, src: &str, pos: &mut usize) -> Result<()> {
         let bytes = src.as_bytes();
         let mut depth = 0usize;
-        let mut scratch = String::new();
         loop {
             match ws(bytes, pos) {
                 Some(b'(') => {
@@ -242,9 +257,7 @@ impl FormatReader for SExpr {
                     *pos += 1;
                     continue;
                 }
-                Some(b'"') => {
-                    quoted(src, pos, &mut scratch)?;
-                }
+                Some(b'"') => skip_quoted(bytes, pos)?,
                 Some(_) => {
                     let end = atom_end(bytes, *pos);
                     if end == *pos {

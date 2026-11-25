@@ -329,10 +329,11 @@ pub fn store(slot: &mut Value, v: Value) {
     }
 }
 
-/// Moves the values of `data` onto `stack`.
+/// Moves the containers that `data` holds onto `stack`.
 fn take_contents(data: &mut dyn Contents, stack: &mut Vec<Value>) {
     data.each_mut(&mut |v| {
-        if !v.is_immediate() {
+        // Strings drop in place without recursion; only containers can nest.
+        if v.header().is_some() {
             stack.push(std::mem::take(v));
         }
     });

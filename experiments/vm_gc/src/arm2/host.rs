@@ -36,17 +36,17 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
     m.function("list.map", 2, |vm, args, mut gc| {
         let list = vm.arg(args, 0, gc.nogc()).unbind().scope(vm, gc.reborrow())?;
         let f = vm.arg(args, 1, gc.nogc()).unbind().scope(vm, gc.reborrow())?;
-        let n = vm.list_len(list.get(vm, gc.nogc()), gc.nogc())?;
+        let n = vm.list_len(list.get(gc.nogc()), gc.nogc())?;
         let out = vm.new_list(n, gc.reborrow())?.unbind().scope(vm, gc.reborrow())?;
         let mut i = 0;
-        while let Some(item) = vm.list_get(list.get(vm, gc.nogc()), i, gc.nogc())? {
-            let (callee, item) = (f.get(vm, gc.nogc()).unbind(), item.unbind());
+        while let Some(item) = vm.list_get(list.get(gc.nogc()), i, gc.nogc())? {
+            let (callee, item) = (f.get(gc.nogc()).unbind(), item.unbind());
             let mapped = vm.call(callee, &[item], gc.reborrow())?.unbind().scope(vm, gc.reborrow())?;
-            let (target, mapped) = (out.get(vm, gc.nogc()).unbind(), mapped.get(vm, gc.nogc()).unbind());
+            let (target, mapped) = (out.get(gc.nogc()).unbind(), mapped.get(gc.nogc()).unbind());
             vm.list_push(target, mapped, gc.reborrow())?;
             i += 1;
         }
-        Ok(out.get(vm, gc.into_nogc()))
+        Ok(out.get(gc.into_nogc()))
     });
 
     m.function("sexpr.encode", 1, |vm, args, gc| {
@@ -82,8 +82,13 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
         let make_user = vm.program().func("make_user").ok_or_else(|| Fail::error("no make_user"))?;
         let user = vm.call_function(make_user, &[Value::int(i)], gc.reborrow())?.unbind();
         let user = vm.async_root(user, gc.reborrow())?;
-        let held = vm.new_str(HELD_STRING, gc.reborrow())?.unbind();
-        let held = vm.async_root(held, gc.reborrow())?;
+        let held = match vm.new_str(HELD_STRING, gc.reborrow()).map(Value::unbind).and_then(|held| vm.async_root(held, gc.reborrow())) {
+            Ok(held) => held,
+            Err(e) => {
+                vm.take_async_root(user, gc.nogc());
+                return Err(e);
+            }
+        };
         Ok(Box::pin(async move {
             YieldNow::default().await;
             let resume: AsyncResume = Box::new(move |vm, gc| {

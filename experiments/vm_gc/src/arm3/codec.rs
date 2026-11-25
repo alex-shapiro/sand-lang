@@ -9,7 +9,7 @@
 use super::heap::Heap;
 use super::value::*;
 use super::vm::{Args, NativeModule, Vm, type_error};
-use crate::shared::format::{Event, FormatReader, FormatWriter, absent_fields, all_fields, charge_input, find_field};
+use crate::shared::format::{Event, FormatReader, FormatWriter, absent_fields, all_fields, charge_input, check_count, find_field};
 use crate::shared::isa::{DECODE_METHOD, ENCODE_METHOD, Program, Ty};
 use crate::shared::json::{Json, JsonWriter};
 use crate::shared::{BYTES_PER_FUEL, Fail, Result, text_fuel};
@@ -216,6 +216,7 @@ fn encode_list<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, 
         encode_value(vm, cx, p, &item)?;
         i += 1;
     }
+    check_count(i, n)?;
     write(vm, cx, Event::CloseList)
 }
 
@@ -231,6 +232,7 @@ fn encode_map<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, m
         encode_value(vm, cx, p, &value)?;
         i += 1;
     }
+    check_count(i, n)?;
     write(vm, cx, Event::CloseMap)
 }
 
