@@ -170,6 +170,14 @@ pub fn b1_fuel<E: ArmEngine>() {
     assert_eq!(e.call("huge_string", &[int(16 << 20)]), Err(Fail::OutOfFuel));
 }
 
+/// Engines reject a native call with the wrong argument count when they
+/// link the program, before it can read a missing argument.
+pub fn rejects_bad_native_arity<E: ArmEngine>() {
+    let bad = super::programs::program_with(Variant::Structural, "fn bad() {\n    native r json.encode\n    ret r\n}").unwrap();
+    let err = E::new(bad, Limits::default(), &HostConfig::default()).err().expect("an arity error");
+    assert!(matches!(&err, Fail::Error(m) if m.contains("json.encode")), "{err}");
+}
+
 // -------------------------------------------------------------------------
 // B2 and B3
 // -------------------------------------------------------------------------
@@ -563,6 +571,10 @@ macro_rules! arm_tests {
         #[test]
         fn b8_host_cycle() {
             suite::b8_host_cycle::<$engine>();
+        }
+        #[test]
+        fn rejects_bad_native_arity() {
+            suite::rejects_bad_native_arity::<$engine>();
         }
         #[test]
         fn gc_stress() {

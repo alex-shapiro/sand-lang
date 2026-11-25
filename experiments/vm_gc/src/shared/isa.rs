@@ -429,6 +429,22 @@ impl Program {
         self.enum_methods[id as usize][method as usize]
     }
 
+    /// Checks that every native call passes the argument count that
+    /// `arities[native]` requires.
+    pub fn check_native_arity(&self, arities: &[u8]) -> Result<(), String> {
+        for func in &self.funcs {
+            for op in &func.code {
+                if let Op::CallNative { native, argc, .. } = op
+                    && arities.get(*native as usize) != Some(argc)
+                {
+                    let name = &self.natives[*native as usize];
+                    return Err(format!("{}: `{name}` takes {:?} arguments, found {argc}", func.name, arities.get(*native as usize)));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The variant definition of global tag `tag`.
     #[inline]
     pub fn variant(&self, tag: u16) -> &VariantDef {

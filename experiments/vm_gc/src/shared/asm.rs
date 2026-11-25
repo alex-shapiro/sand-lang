@@ -444,7 +444,7 @@ impl<'a> FuncAssembler<'a> {
             return Ok(r);
         }
         let r = self.next_reg;
-        self.next_reg += 1;
+        self.next_reg = r.checked_add(1).ok_or("a function has more than 65,535 registers")?;
         self.regs.insert(name.to_string(), r);
         Ok(r)
     }
@@ -475,7 +475,9 @@ impl<'a> FuncAssembler<'a> {
         for (line_no, tokens) in &parsed {
             let at = |e: String| format!("line {line_no}: {e}");
             if tokens.len() == 1 && tokens[0].starts_with('@') {
-                self.labels.insert(tokens[0][1..].to_string(), self.code.len() as u32);
+                if self.labels.insert(tokens[0][1..].to_string(), self.code.len() as u32).is_some() {
+                    return Err(format!("line {line_no}: duplicate label `{}`", tokens[0]));
+                }
                 continue;
             }
             self.instruction(tokens, arg_base).map_err(at)?;
@@ -494,19 +496,20 @@ impl<'a> FuncAssembler<'a> {
         if self.labels.values().any(|&target| target as usize >= self.code.len()) {
             return Err("a label must precede an instruction".into());
         }
-        let regs = arg_base as usize + self.max_args;
-        Ok((regs.max(1) as u16, self.code))
+        let regs = u16::try_from(arg_base as usize + self.max_args).map_err(|_| "a function has more than 65,535 registers")?;
+        Ok((regs.max(1), self.code))
     }
 
     /// Copies `args` into the argument area and returns its base and count.
     fn args(&mut self, args: &[String], arg_base: Reg) -> Result<(Reg, u8), String> {
+        let count = u8::try_from(args.len()).map_err(|_| "an instruction takes at most 255 operands".to_string())?;
         for (i, a) in args.iter().enumerate() {
             let src = self.reg(a)?;
             let dst = arg_base + i as Reg;
             self.code.push(Op::Move { dst, src });
         }
         self.max_args = self.max_args.max(args.len());
-        Ok((arg_base, args.len() as u8))
+        Ok((arg_base, count))
     }
 
     fn instruction(&mut self, t: &[String], arg_base: Reg) -> Result<(), String> {
@@ -640,6 +643,7 @@ impl<'a> FuncAssembler<'a> {
                         let func = self.asm.program.func(&symbol).ok_or_else(|| format!("unknown function `{symbol}`"))?;
                         if m == "call" { Op::Call { dst, func, base, argc: count } } else { Op::Closure { dst, func, base, count } }
                     }
+                    "callm" if count == 0 => return Err("`callm` needs a receiver".into()),
                     "callm" => Op::CallMethod { dst, method: self.asm.method(&symbol), base, argc: count },
                     "native" => Op::CallNative { dst, native: self.asm.native(&symbol), base, argc: count },
                     "new" => {
@@ -717,6 +721,8 @@ mod tests {
         assert!(assemble("fn f() {\n    int x 1\n}").unwrap_err().contains("must end with"));
         assert!(assemble("fn f() {\n    jmp @end\n@end\n}").is_err());
         assert!(assemble("fn f() {\n    int x 1\n    ret x\n}").is_ok());
+        assert!(assemble("fn f() {\n@a\n@a\n    ret x\n}").unwrap_err().contains("duplicate label"));
+        assert!(assemble("fn f() {\n    callm r encode\n    ret r\n}").unwrap_err().contains("receiver"));
     }
 
     #[test]

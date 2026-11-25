@@ -48,7 +48,7 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
     static SEXPR: SExpr = SExpr;
     let mut m = NativeModule::default();
 
-    m.function("list.map", |vm, args| {
+    m.function("list.map", 2, |vm, args| {
         let (list, f) = (vm.arg(args, 0).clone(), vm.arg(args, 1).clone());
         let Value::List(items) = &list else { return Err(type_error("list")) };
         let len = items.lock()?.0.len();
@@ -65,23 +65,23 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
         Ok(out)
     });
 
-    m.function("sexpr.encode", |vm, args| {
+    m.function("sexpr.encode", 1, |vm, args| {
         let v = vm.arg(args, 0).clone();
         encode_with(vm, SExprWriter::default(), &v)
     });
-    m.function("sexpr.decode", |vm, args| {
+    m.function("sexpr.decode", 2, |vm, args| {
         let (text, ty) = (vm.arg(args, 0).clone(), int_arg(vm.arg(args, 1))?);
         decode_with(vm, &SEXPR, &text, ty as u16)
     });
 
     let drops = config.host_drops.clone();
-    m.function("host.new", move |vm, _| vm.new_host(Box::new(CallbackHost { callback: Value::Unit, calls: 0, drops: drops.clone() })));
-    m.function("host.set", |vm, args| {
+    m.function("host.new", 0, move |vm, _| vm.new_host(Box::new(CallbackHost { callback: Value::Unit, calls: 0, drops: drops.clone() })));
+    m.function("host.set", 2, |vm, args| {
         let callback = vm.arg(args, 1).clone();
         with_host(vm.arg(args, 0), |host| host.callback = callback)?;
         Ok(Value::Unit)
     });
-    m.function("host.fire", |vm, args| {
+    m.function("host.fire", 2, |vm, args| {
         let x = vm.arg(args, 1).clone();
         // The lock must be released before the callback runs.
         let callback = with_host(vm.arg(args, 0), |host| {
@@ -90,9 +90,9 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
         })?;
         vm.call(&callback, &[x])
     });
-    m.function("host.calls", |vm, args| Ok(Value::Int(with_host(vm.arg(args, 0), |host| host.calls)?)));
+    m.function("host.calls", 1, |vm, args| Ok(Value::Int(with_host(vm.arg(args, 0), |host| host.calls)?)));
 
-    m.async_function("async.hold_user", |vm, args| {
+    m.async_function("async.hold_user", 1, |vm, args| {
         let i = int_arg(vm.arg(args, 0))?;
         let make_user = vm.program.func("make_user").ok_or_else(|| Fail::error("no make_user"))?;
         let user = vm.call_function(make_user, Value::Unit, &[Value::Int(i)])?;

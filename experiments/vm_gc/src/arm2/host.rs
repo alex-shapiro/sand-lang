@@ -33,7 +33,7 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
     static SEXPR: SExpr = SExpr;
     let mut m = NativeModule::default();
 
-    m.function("list.map", |vm, args, mut gc| {
+    m.function("list.map", 2, |vm, args, mut gc| {
         let list = vm.arg(args, 0, gc.nogc()).unbind().scope(vm, gc.reborrow())?;
         let f = vm.arg(args, 1, gc.nogc()).unbind().scope(vm, gc.reborrow())?;
         let n = vm.list_len(list.get(vm, gc.nogc()), gc.nogc())?;
@@ -49,35 +49,35 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
         Ok(out.get(vm, gc.into_nogc()))
     });
 
-    m.function("sexpr.encode", |vm, args, gc| {
+    m.function("sexpr.encode", 1, |vm, args, gc| {
         let v = vm.arg(args, 0, gc.nogc()).unbind();
         encode_with(vm, SExprWriter::default(), v, gc)
     });
-    m.function("sexpr.decode", |vm, args, gc| {
+    m.function("sexpr.decode", 2, |vm, args, gc| {
         let text = vm.arg(args, 0, gc.nogc()).unbind();
         let ty = vm.arg(args, 1, gc.nogc()).as_int().ok_or_else(|| type_error("int"))?;
         decode_with(vm, &SEXPR, text, ty as u16, gc)
     });
 
     let drops = config.host_drops.clone();
-    m.function("host.new", move |vm, _, gc| {
+    m.function("host.new", 0, move |vm, _, gc| {
         vm.new_host(Box::new(CallbackHost { callback: Value::UNIT, calls: 0, drops: drops.clone() }), gc)
     });
-    m.function("host.set", |vm, args, gc| {
+    m.function("host.set", 2, |vm, args, gc| {
         let (host, callback) = (vm.arg(args, 0, gc.nogc()), vm.arg(args, 1, gc.nogc()));
         vm.host_mut::<CallbackHost>(host, gc.nogc())?.callback = callback.unbind();
         Ok(Value::UNIT)
     });
-    m.function("host.fire", |vm, args, gc| {
+    m.function("host.fire", 2, |vm, args, gc| {
         let (host, x) = (vm.arg(args, 0, gc.nogc()), vm.arg(args, 1, gc.nogc()).unbind());
         let host = vm.host_mut::<CallbackHost>(host, gc.nogc())?;
         host.calls += 1;
         let callback = host.callback;
         vm.call(callback, &[x], gc)
     });
-    m.function("host.calls", |vm, args, gc| Ok(Value::int(vm.host::<CallbackHost>(vm.arg(args, 0, gc.nogc()), gc.nogc())?.calls)));
+    m.function("host.calls", 1, |vm, args, gc| Ok(Value::int(vm.host::<CallbackHost>(vm.arg(args, 0, gc.nogc()), gc.nogc())?.calls)));
 
-    m.async_function("async.hold_user", |vm, args, mut gc| {
+    m.async_function("async.hold_user", 1, |vm, args, mut gc| {
         let i = vm.arg(args, 0, gc.nogc()).as_int().ok_or_else(|| type_error("int"))?;
         let make_user = vm.program().func("make_user").ok_or_else(|| Fail::error("no make_user"))?;
         let user = vm.call_function(make_user, &[Value::int(i)], gc.reborrow())?.unbind();

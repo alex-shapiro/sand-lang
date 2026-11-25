@@ -76,7 +76,7 @@ impl Heap {
     /// Reserves `bytes` of tracked memory. May collect garbage.
     #[inline(always)]
     pub fn reserve(&mut self, bytes: usize) -> Result<()> {
-        if bytes <= self.next_check.saturating_sub(self.tracker.used()) {
+        if bytes < self.next_check.saturating_sub(self.tracker.used()) {
             self.tracker.add(bytes);
             return Ok(());
         }

@@ -39,7 +39,7 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
     static SEXPR: SExpr = SExpr;
     let mut m = NativeModule::default();
 
-    m.function("list.map", |vm, args| {
+    m.function("list.map", 2, |vm, args| {
         let (list, f) = (vm.arg(args, 0), vm.arg(args, 1));
         let out = vm.new_list(vm.list_len(list)?)?;
         let out = vm.push_root(out)?;
@@ -54,32 +54,32 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
         Ok(vm.root(out))
     });
 
-    m.function("sexpr.encode", |vm, args| {
+    m.function("sexpr.encode", 1, |vm, args| {
         let v = vm.arg(args, 0);
         encode_with(vm, SExprWriter::default(), v)
     });
-    m.function("sexpr.decode", |vm, args| {
+    m.function("sexpr.decode", 2, |vm, args| {
         let (text, ty) = (vm.arg(args, 0), int_arg(vm.arg(args, 1))?);
         decode_with(vm, &SEXPR, text, ty as u16)
     });
 
     let drops = config.host_drops.clone();
-    m.function("host.new", move |vm, _| vm.new_host(Box::new(CallbackHost { callback: Value::Unit, calls: 0, drops: drops.clone() })));
-    m.function("host.set", |vm, args| {
+    m.function("host.new", 0, move |vm, _| vm.new_host(Box::new(CallbackHost { callback: Value::Unit, calls: 0, drops: drops.clone() })));
+    m.function("host.set", 2, |vm, args| {
         let (host, callback) = (vm.arg(args, 0), vm.arg(args, 1));
         vm.host_mut::<CallbackHost>(host)?.callback = callback;
         Ok(Value::Unit)
     });
-    m.function("host.fire", |vm, args| {
+    m.function("host.fire", 2, |vm, args| {
         let (host, x) = (vm.arg(args, 0), vm.arg(args, 1));
         let host = vm.host_mut::<CallbackHost>(host)?;
         host.calls += 1;
         let callback = host.callback;
         vm.call(callback, &[x])
     });
-    m.function("host.calls", |vm, args| Ok(Value::Int(vm.host::<CallbackHost>(vm.arg(args, 0))?.calls)));
+    m.function("host.calls", 1, |vm, args| Ok(Value::Int(vm.host::<CallbackHost>(vm.arg(args, 0))?.calls)));
 
-    m.async_function("async.hold_user", |vm, args| {
+    m.async_function("async.hold_user", 1, |vm, args| {
         let i = int_arg(vm.arg(args, 0))?;
         let make_user = vm.program.func("make_user").ok_or_else(|| Fail::error("no make_user"))?;
         let user = vm.call_function(make_user, Value::Unit, &[Value::Int(i)])?;

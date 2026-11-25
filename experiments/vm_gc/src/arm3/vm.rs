@@ -36,17 +36,23 @@ pub enum Native {
 /// A named group of native functions.
 #[derive(Default)]
 pub struct NativeModule {
-    functions: Vec<(String, Native)>,
+    /// Each function's name, argument count, and body.
+    functions: Vec<(String, u8, Native)>,
 }
 
 impl NativeModule {
-    pub fn function(&mut self, name: &str, f: impl Fn(&mut Vm, Args) -> Result<Value> + Send + Sync + 'static) -> &mut Self {
-        self.functions.push((name.to_string(), Native::Sync(Box::new(f))));
+    pub fn function(&mut self, name: &str, arity: u8, f: impl Fn(&mut Vm, Args) -> Result<Value> + Send + Sync + 'static) -> &mut Self {
+        self.functions.push((name.to_string(), arity, Native::Sync(Box::new(f))));
         self
     }
 
-    pub fn async_function(&mut self, name: &str, f: impl Fn(&mut Vm, Args) -> Result<AsyncCall> + Send + Sync + 'static) -> &mut Self {
-        self.functions.push((name.to_string(), Native::Async(Box::new(f))));
+    pub fn async_function(
+        &mut self,
+        name: &str,
+        arity: u8,
+        f: impl Fn(&mut Vm, Args) -> Result<AsyncCall> + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.functions.push((name.to_string(), arity, Native::Async(Box::new(f))));
         self
     }
 }
@@ -109,12 +115,16 @@ pub fn type_error(what: &str) -> Fail {
 
 impl Vm {
     pub fn new(program: Arc<Program>, limits: Limits, modules: Vec<NativeModule>) -> Result<Vm> {
-        let mut available: Vec<(String, Native)> = modules.into_iter().flat_map(|m| m.functions).collect();
+        let mut available: Vec<(String, u8, Native)> = modules.into_iter().flat_map(|m| m.functions).collect();
         let mut natives = Vec::new();
+        let mut arities = Vec::new();
         for name in &program.natives {
-            let index = available.iter().position(|(n, _)| n == name).ok_or_else(|| Fail::error(format!("unknown native `{name}`")))?;
-            natives.push(available.swap_remove(index).1);
+            let index = available.iter().position(|(n, ..)| n == name).ok_or_else(|| Fail::error(format!("unknown native `{name}`")))?;
+            let (_, arity, native) = available.swap_remove(index);
+            arities.push(arity);
+            natives.push(native);
         }
+        program.check_native_arity(&arities).map_err(Fail::Error)?;
         let mut vm = Vm {
             heap: Heap::new(&limits),
             stack: Vec::new(),

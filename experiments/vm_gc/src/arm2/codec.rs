@@ -617,67 +617,69 @@ fn decoder_text<'a>(
 pub fn core_module() -> NativeModule {
     static JSON: Json = Json;
     let mut m = NativeModule::default();
-    m.function("json.encode", |vm, args, gc| {
+    m.function("json.encode", 1, |vm, args, gc| {
         let v = vm.arg(args, 0, gc.nogc()).unbind();
         encode_with(vm, JsonWriter::default(), v, gc)
     });
-    m.function("json.decode", |vm, args, gc| {
+    m.function("json.decode", 2, |vm, args, gc| {
         let (text, ty) = (vm.arg(args, 0, gc.nogc()).unbind(), int_arg(vm, args, 1, gc.nogc())? as u16);
         decode_with(vm, &JSON, text, ty, gc)
     });
-    m.function("vm.fail", |vm, args, gc| Err(Fail::error(vm.str(&vm.arg(args, 0, gc.nogc()), gc.nogc())?.to_string())));
-    m.function("vm.collect", |vm, _, gc| {
+    m.function("vm.fail", 1, |vm, args, gc| Err(Fail::error(vm.str(&vm.arg(args, 0, gc.nogc()), gc.nogc())?.to_string())));
+    m.function("vm.collect", 0, |vm, _, gc| {
         vm.collect(gc);
         Ok(Value::UNIT)
     });
 
-    m.function("enc.none", |vm, args, gc| encoder_event(vm, args, Event::None, gc));
-    m.function("enc.close_map", |vm, args, gc| encoder_event(vm, args, Event::CloseMap, gc));
-    m.function("enc.close_list", |vm, args, gc| encoder_event(vm, args, Event::CloseList, gc));
-    m.function("enc.close_variant", |vm, args, gc| encoder_event(vm, args, Event::CloseVariant, gc));
-    m.function("enc.open_map", |vm, args, gc| {
+    m.function("enc.none", 1, |vm, args, gc| encoder_event(vm, args, Event::None, gc));
+    m.function("enc.close_map", 1, |vm, args, gc| encoder_event(vm, args, Event::CloseMap, gc));
+    m.function("enc.close_list", 1, |vm, args, gc| encoder_event(vm, args, Event::CloseList, gc));
+    m.function("enc.close_variant", 1, |vm, args, gc| encoder_event(vm, args, Event::CloseVariant, gc));
+    m.function("enc.open_map", 2, |vm, args, gc| {
         let n = int_arg(vm, args, 1, gc.nogc())? as usize;
         encoder_event(vm, args, Event::OpenMap(n), gc)
     });
-    m.function("enc.open_list", |vm, args, gc| {
+    m.function("enc.open_list", 2, |vm, args, gc| {
         let n = int_arg(vm, args, 1, gc.nogc())? as usize;
         encoder_event(vm, args, Event::OpenList(n), gc)
     });
-    m.function("enc.int", |vm, args, gc| {
+    m.function("enc.int", 2, |vm, args, gc| {
         let i = int_arg(vm, args, 1, gc.nogc())?;
         encoder_event(vm, args, Event::Int(i), gc)
     });
-    m.function("enc.float", |vm, args, gc| match vm.arg(args, 1, gc.nogc()).as_float() {
+    m.function("enc.float", 2, |vm, args, gc| match vm.arg(args, 1, gc.nogc()).as_float() {
         Some(f) => encoder_event(vm, args, Event::Float(f), gc),
         None => Err(type_error("float")),
     });
-    m.function("enc.bool", |vm, args, gc| match vm.arg(args, 1, gc.nogc()).as_bool() {
+    m.function("enc.bool", 2, |vm, args, gc| match vm.arg(args, 1, gc.nogc()).as_bool() {
         Some(b) => encoder_event(vm, args, Event::Bool(b), gc),
         None => Err(type_error("bool")),
     });
-    m.function("enc.str", |vm, args, gc| encoder_text(vm, args, |s| Event::Str(s), gc));
-    m.function("enc.key", |vm, args, gc| encoder_text(vm, args, |s| Event::Key(s), gc));
-    m.function("enc.tag", |vm, args, gc| encoder_text(vm, args, |s| Event::Tag(s), gc));
-    m.function("enc.open_variant", |vm, args, gc| encoder_text(vm, args, |s| Event::OpenVariant(s), gc));
-    m.function("enc.value", |vm, args, mut gc| {
+    m.function("enc.str", 2, |vm, args, gc| encoder_text(vm, args, |s| Event::Str(s), gc));
+    m.function("enc.key", 2, |vm, args, gc| encoder_text(vm, args, |s| Event::Key(s), gc));
+    m.function("enc.tag", 2, |vm, args, gc| encoder_text(vm, args, |s| Event::Tag(s), gc));
+    m.function("enc.open_variant", 2, |vm, args, gc| encoder_text(vm, args, |s| Event::OpenVariant(s), gc));
+    m.function("enc.value", 2, |vm, args, mut gc| {
         let (encoder, v) = (vm.arg(args, 0, gc.nogc()).unbind(), vm.arg(args, 1, gc.nogc()).unbind());
         vm.run_encode_walk(encoder, v, gc.reborrow())?;
         Ok(Value::UNIT)
     });
 
-    m.function("dec.int", |vm, args, gc| Ok(Value::int(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.int(src, pos))?)));
-    m.function("dec.float", |vm, args, gc| Ok(Value::float(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.float(src, pos))?)));
-    m.function("dec.bool", |vm, args, gc| Ok(Value::bool(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.bool(src, pos))?)));
-    m.function("dec.null", |vm, args, gc| Ok(Value::bool(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.null(src, pos))?)));
-    m.function("dec.str", |vm, args, gc| decoder_text(vm, args, gc, |r, src, pos, scratch| r.str(src, pos, scratch)));
-    m.function("dec.open_map", |vm, args, gc| {
+    m.function("dec.int", 1, |vm, args, gc| Ok(Value::int(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.int(src, pos))?)));
+    m.function("dec.float", 1, |vm, args, gc| Ok(Value::float(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.float(src, pos))?)));
+    m.function("dec.bool", 1, |vm, args, gc| Ok(Value::bool(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.bool(src, pos))?)));
+    m.function("dec.null", 1, |vm, args, gc| Ok(Value::bool(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.null(src, pos))?)));
+    m.function("dec.str", 1, |vm, args, gc| decoder_text(vm, args, gc, |r, src, pos, scratch| r.str(src, pos, scratch)));
+    m.function("dec.open_map", 1, |vm, args, gc| {
         with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.open_map(src, pos)).map(|_| Value::UNIT)
     });
-    m.function("dec.open_list", |vm, args, gc| {
+    m.function("dec.open_list", 1, |vm, args, gc| {
         with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.open_list(src, pos)).map(|_| Value::UNIT)
     });
-    m.function("dec.next_item", |vm, args, gc| Ok(Value::bool(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.next_item(src, pos))?)));
-    m.function("dec.next_key", |vm, args, gc| {
+    m.function("dec.next_item", 1, |vm, args, gc| {
+        Ok(Value::bool(with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.next_item(src, pos))?))
+    });
+    m.function("dec.next_key", 1, |vm, args, gc| {
         match with_decoder(vm, args, gc.nogc(), |r, src, pos, scratch| r.next_key(src, pos, scratch))? {
             Some(span) => {
                 let decoder = vm.arg(args, 0, gc.nogc()).unbind();
@@ -686,14 +688,14 @@ pub fn core_module() -> NativeModule {
             None => Ok(Value::NONE),
         }
     });
-    m.function("dec.open_variant", |vm, args, gc| {
+    m.function("dec.open_variant", 1, |vm, args, gc| {
         decoder_text(vm, args, gc, |r, src, pos, scratch| Ok(r.open_variant(src, pos, scratch)?.0))
     });
-    m.function("dec.close_variant", |vm, args, gc| {
+    m.function("dec.close_variant", 1, |vm, args, gc| {
         with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.close_variant(src, pos)).map(|_| Value::UNIT)
     });
-    m.function("dec.skip", |vm, args, gc| with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.skip(src, pos)).map(|_| Value::UNIT));
-    m.function("dec.value", |vm, args, gc| {
+    m.function("dec.skip", 1, |vm, args, gc| with_decoder(vm, args, gc.nogc(), |r, src, pos, _| r.skip(src, pos)).map(|_| Value::UNIT));
+    m.function("dec.value", 2, |vm, args, gc| {
         let decoder = vm.arg(args, 0, gc.nogc()).unbind();
         let ty = int_arg(vm, args, 1, gc.nogc())? as u16;
         vm.run_decode_walk(decoder, ty, gc)

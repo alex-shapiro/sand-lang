@@ -27,12 +27,17 @@ pub enum Variant {
 }
 
 pub fn program(variant: Variant) -> Arc<Program> {
+    program_with(variant, "").unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Assembles `variant` with the extra source `extra`.
+pub fn program_with(variant: Variant, extra_source: &str) -> Result<Arc<Program>, String> {
     let extra = match variant {
         Variant::Structural => "",
         Variant::Custom => CUSTOM,
         Variant::GarbageCallback => GARBAGE_CALLBACK,
         Variant::NodeCustom => NODE_CUSTOM,
     };
-    let source = [DATASET, B1, B4, B6, B8, NODE, extra].join("\n");
-    Arc::new(assemble(&source).unwrap_or_else(|e| panic!("{e}")))
+    let source = [DATASET, B1, B4, B6, B8, NODE, extra, extra_source].join("\n");
+    assemble(&source).map(Arc::new)
 }

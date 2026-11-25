@@ -531,19 +531,19 @@ pub struct NativeModule {
 }
 
 impl NativeModule {
-    pub fn function<F>(&mut self, name: &str, f: F) -> &mut Self
+    pub fn function<F>(&mut self, name: &str, arity: u8, f: F) -> &mut Self
     where
         F: for<'v, 'w, 'a, 's> Fn(&'w mut Vm<'v>, Args, GcScope<'a, 's>) -> Result<Value<'a>> + Send + Sync + 'static,
     {
-        self.raw.function(name, move |vm, args| enter(|gc| f(&mut Vm::new(vm), args, gc).map(Value::raw)));
+        self.raw.function(name, arity, move |vm, args| enter(|gc| f(&mut Vm::new(vm), args, gc).map(Value::raw)));
         self
     }
 
-    pub fn async_function<F>(&mut self, name: &str, f: F) -> &mut Self
+    pub fn async_function<F>(&mut self, name: &str, arity: u8, f: F) -> &mut Self
     where
         F: for<'v, 'w, 'a, 's> Fn(&'w mut Vm<'v>, Args, GcScope<'a, 's>) -> Result<AsyncCall> + Send + Sync + 'static,
     {
-        self.raw.async_function(name, move |vm, args| {
+        self.raw.async_function(name, arity, move |vm, args| {
             let call = enter(|gc| f(&mut Vm::new(vm), args, gc))?;
             Ok(Box::pin(async move {
                 let resume = call.await;
