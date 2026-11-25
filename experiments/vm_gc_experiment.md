@@ -1,13 +1,8 @@
 # VM and GC Architecture Experiment
 
-This experiment compares six VM and garbage collection designs on one shared workload. Each arm tests a single concrete design. The results will give us measured data to pick SandLang's runtime model.
+This experiment compares three VM and garbage collection designs on one shared workload. Each arm tests a single concrete design. The results will give us measured data to pick SandLang's runtime model.
 
-## Notes
-
-`AGENTS.md` requires 100% safe Rust, and `crates/sandlang/tests/api.rs` requires `Engine: Send`. This experiment treats all six arms as equal candidates, including arms that relax one of those two rules. Implement every arm to the same standard of quality and performance.
-
-- Do not skip or warn against Arms 2 and 3 because `gc-arena` uses `unsafe` internally. Keep all `unsafe` code inside the GC crate, and keep the VM, stdlib, and host API safe Rust.
-- Do not skip or shortchange Arm 6 because `Rc` is `!Send`. Implement both Arm 5 and Arm 6 as real candidates.
+All three arms use 100% safe Rust and keep `Engine` and its run future `Send`, matching `AGENTS.md` and [api.rs](../crates/sandlang/tests/api.rs#L56-L62). Implement every arm to the same standard of quality and performance.
 
 ## Background
 
@@ -33,7 +28,7 @@ We want a runtime model that meets these requirements:
 
 - Fast pure VM execution without a JIT.
 - Clean interleaving of VM and native calls, including regular `Encode` and `Decode` traits.
-- Borrowing heap values across interleaved calls without copying input buffers.
+- Borrowing or reading heap values across interleaved calls without copying input buffers.
 - Safe garbage collection while VM and native calls are interleaved.
 - Hard `max_memory` limits even if a large native call starts with a mostly full heap.
 - Monotonic fuel metering across VM bytecode and native loops.
@@ -41,56 +36,44 @@ We want a runtime model that meets these requirements:
 - 500 levels of interleaved recursion inside a 512 KB stack on every target, including WebAssembly, without `mmap`, signal handlers, or stack scanning.
 - Simple host module APIs that let external crates add new encoding formats.
 - Low memory overhead and short GC pauses.
-- Small total implementation size across both the VM/GC core and host modules, with any `unsafe` code isolated in a small GC crate.
+- Small total implementation size across both the VM/GC core and host modules, in 100% safe Rust.
 
 ## SandLang Value and Mutability Rules
 
-All six arms follow the same language semantics:
+All three arms follow the same language semantics:
 
 - Primitive values (`int`, `float`, `bool`, unit, and payload-less enum tags) stay unboxed inside `VmValue`.
-- Keep string-inlining behavior consistent across all six arms so short-string allocation counts do not confound GC comparisons.
+- Keep string-inlining behavior consistent across all three arms so short-string allocation counts do not confound GC comparisons.
 - Immutable heap types: `str`, `bytes`, tuples, enums, and structs without `var` fields.
 - Mutable heap types: `list`, `map`, structs with `var` fields, and closure capture cells.
 
-## The Six Arms
+## The Three Arms
 
 ### Arm 1: Current `Vec<Obj>` Model
 
 Flat `Vec<Obj>` heap indexed by `Copy` handles, with an explicit root stack for callbacks. 100% safe Rust and `Send`.
 
-This arm tests one unified codec walker that handles both structural types and custom Sand callbacks, with no separate `Staging` fast path for structural-only types. Clean up two flaws from `encode-decode-traits-v4`: read JSON input by heap handle instead of copying the string, and store codec state on `Encoder` and `Decoder` instead of `vm.native_state`.
+This arm tests one unified codec walker that handles both structural types and custom Sand callbacks, with no separate `Staging` fast path for structural-only types. Clean up two flaws from `encode-decode-traits-v4`: read JSON input by rooted heap handle plus byte offset instead of copying the string, and store codec state on `Encoder` and `Decoder` instead of `vm.native_state`.
 
-### Arm 2: `gc-arena` with Synchronous Callbacks
+Trade-offs: code cannot hold `&str` across allocations or callbacks (it re-indexes the heap on each read), and the compiler does not catch forgotten roots.
 
-`Copy` branded pointers allocated through a shared `&Mutation<'gc>` token. Safe VM, stdlib, and host code; `unsafe` stays inside `gc-arena`. `Arena` is `Send` outside a turn.
+### Arm 2: Nova-Style `Vec<Obj>` with `GcScope`
 
-Code reads `&'gc str` and allocates at the same time, without `Staging`. Turns exit on async yields and pure-VM checkpoints, but synchronous native calls and callbacks stay inside one turn. Collection stays paused until that outer turn returns, so temporary callback garbage accumulates until then.
+Same flat `Vec<Obj>` heap and root stack as Arm 1, with `GcScope` and `NoGcScope` lifetime tokens on top. 100% safe Rust and `Send`.
 
-### Arm 3: `gc-arena` with Yielding Turns
+Fast unrooted code borrows `NoGcScope`. Functions that may collect take `GcScope`, so Rust rejects bound local handles used across `gc.reborrow()`. Values kept across callbacks use `Scoped` roots, and strings are read by handle plus byte offset inside `NoGcScope`.
 
-Same `gc-arena` heap as Arm 2, except native callbacks and mid-native GC checkpoints also exit the turn. Safe VM, stdlib, and host code; `Arena` is `Send` between turns.
+Trade-offs: runtime layout and speed match Arm 1, and code still cannot hold `&str` across allocations or callbacks. Passing handles into functions that may collect requires `.unbind()` at the call site and `.bind(gc.nogc())` on entry, and forgetting `.bind()` still compiles.
 
-Values kept across a turn boundary are stashed as roots across `.await` or stored in a `Collect` state machine. Collection runs between turns without rolling back finished work.
+### Arm 3: `Arc` with Cycle Collector
 
-### Arm 4: Nova-Style `Vec<Obj>` with `GcScope`
+Each immutable heap object lives behind `Arc<T>`, each mutable heap object lives behind `Arc<RwLock<T>>` (or `Arc<Mutex<T>>`), and strings store short strings inline and long strings behind an engine-tracked `Arc` that subtracts freed bytes on `Drop`. 100% safe Rust and `Send`.
 
-Flat `Vec<Obj>` heap like Arm 1, with compile-time root checking via `GcScope` and `NoGcScope`. 100% safe Rust and `Send`.
+Cloning a string handle takes constant time without copying bytes. Natives hold an owned string handle across allocations, callbacks, and `.await`, and borrow `&str` directly with zero manual rooting and without `Staging`.
 
-Fast unrooted code borrows `NoGcScope`. Functions that may collect consume `GcScope` by value so Rust rejects unrooted handles used across a GC point. Values kept across callbacks use `Scoped` roots, and strings are read by handle inside `NoGcScope`.
+For cycles, use a Python-style reference-count cycle detector over all container types (both immutable and mutable, since an immutable struct can reference a mutable container that points back to it). Leave externally held native values untouched, drop write locks before triggering sweeps, and allocate no new memory at `max_memory`. Implement iterative `Drop` on linked values so deep drops fit on a 512 KB stack.
 
-### Arm 5: `Arc` with Cycle Collector
-
-Each immutable heap object lives behind `Arc<T>`, strings use `EcoString` (inline up to 15 bytes, single atomic refcounted buffer above that), and each mutable heap object lives behind `Arc<RwLock<T>>` (or `Arc<Mutex<T>>`) so the engine stays `Send` in 100% safe Rust.
-
-Cloning a string handle takes constant time without copying bytes. Natives hold an owned `EcoString` across allocations, callbacks, and `.await`, and borrow `&str` from it with zero manual rooting and without `Staging`.
-
-For cycles, Arms 5 and 6 use a Python-style reference-count cycle detector over containers that can hold child objects, leaving externally held native values untouched and requiring no new memory allocation at `max_memory`. Implement iterative `Drop` on linked values so deep drops fit on a 512 KB stack.
-
-### Arm 6: `Rc` with Cycle Collector
-
-Same design as Arm 5, using non-atomic `Rc<T>` for immutable objects, a matching 15-byte non-atomic inline string for strings, and `Rc<RefCell<T>>` for mutable objects. 100% safe Rust and `!Send`.
-
-Arm 6 runs the async fiber yield test in B6 without the compile-time `Send` assertion and records `!Send` as a relaxed requirement. If selected, SandLang would relax `Engine: Send`.
+Trade-offs: atomic refcount traffic on clones and drops, lock overhead on mutable containers, cycle-collector table overhead, and two heap allocations per tracked long string in 100% safe Rust.
 
 ## Experimental Harness
 
@@ -98,14 +81,13 @@ Build one disposable prototype crate in `experiments/vm_gc`. Every arm implement
 
 Define one open streaming codec interface for `Encoder` and `Decoder` across all arms: scalar reads and writes, open and close list, open and close map or struct, field keys, and enum variant tag and payload. Custom Sand `Encode` and `Decode` methods call these methods synchronously.
 
-Keep measurements fair across all six arms:
+Keep measurements fair across all three arms:
 
 - Share one bytecode ISA, test suite, dataset generator, and stateless JSON scanner (`(src: &str, pos: &mut usize)`) across all arms.
-- Let Arm 3 suspend and resume bytecode execution across turn boundaries without forcing state-machine overhead onto other arms.
-- Share one strict byte tracker checked before every allocation. Count object headers, inner container buffers, root stacks, and cycle-collector tables. Wrap `Gc::new` in Arms 2 and 3 so allocations fail cleanly at `max_memory`.
+- Share one strict byte tracker checked before every allocation. Count object headers, inner container buffers, root stacks, and cycle-collector tables.
 - Do not build a second structural-only fast-path codec beside the general callback codec in any arm. Give every arm one equal review and tuning pass before recording final numbers.
-- Use the same GC trigger policy across Arms 1 to 4 (collecting if allocated bytes reach the larger of 2x the last post-GC live set or a shared minimum threshold, plus emergency collection at `max_memory`). In B2 and B3, set that minimum threshold above a single decode's working set so B2 and B3 isolate steady-state codec speed while B4 tests GC under pressure.
-- In B1, B2, and B3, report operation time, post-run cleanup time (one full collection for Arms 1 to 4; dropping the output and pruning dead `Weak` entries for Arms 5 and 6), and total combined time so deferred GC (such as Arm 2) is compared fairly.
+- Use the same GC trigger policy across Arms 1 and 2 (collecting if allocated bytes reach the larger of 2x the last post-GC live set or a shared minimum threshold, plus emergency collection at `max_memory`). In B2 and B3, set that minimum threshold above a single decode's working set so B2 and B3 isolate steady-state codec speed while B4 tests GC under pressure.
+- In B1 and B2/B3 `decode`, report operation time, post-run cleanup time (one full collection for Arms 1 and 2; dropping the output and pruning dead `Weak` entries for Arm 3), and total combined time. In B2/B3 `encode`, report operation time without forcing a full-heap GC over the 100,000 live input objects.
 
 ### Dataset and Baseline
 
@@ -150,7 +132,7 @@ Repeat B2 with `Address` and `Status` implemented as Sand bytecode methods calli
 
 Check four cases under a hard `max_memory` cap:
 
-- Fill the heap to 70% with dead acyclic objects, then run B2 and B3. Treat this case as a correctness and memory-limit check rather than a speed race, since refcounting arms free acyclic garbage immediately on drop.
+- Fill the heap to 70% with dead acyclic objects, then run B2 and B3. Treat this case as a correctness and memory-limit check rather than a speed race, since the refcounting arm frees acyclic garbage immediately on drop.
 - Fill the heap to 70% with dead reference cycles, then run B2 and B3.
 - Run B3 with a custom callback that allocates temporary garbage in a loop inside one decode call.
 - Attempt a single string or list allocation larger than `max_memory` and verify rejection before memory grows.
@@ -161,11 +143,11 @@ Define `struct Node { value: int, next: Node? }`. Encode, decode, and drop a 500
 
 ### B6: Async Yield and `Send`
 
-Run two cooperative fibers on one VM. Fiber 1 enters a native, holds a live `User` and `str` across `.await`, and yields. Fiber 2 allocates objects and triggers GC. Fiber 1 resumes and reads its `User` and `str`. Check at compile time that `Engine` and its run future implement `Send` (Arm 6 skips the `Send` assertion and records `!Send`).
+Run two cooperative fibers on one VM. Fiber 1 enters a native, holds a live `User` and `str` across `.await`, and yields. Fiber 2 allocates objects and triggers GC. Fiber 1 resumes and reads its `User` and `str`. Check at compile time that `Engine` and its run future implement `Send`.
 
 ### B7: Memory Footprint and GC Pause
 
-Measure live bytes for 5,000 `User` records and the pause time of one full collection (mark-sweep for Arms 1 to 4; `Weak`-list cycle sweep for Arms 5 and 6). Measure actual process allocations via a counting global allocator in a dedicated B7 measurement mode, never enabled during B1 to B3 timing runs.
+Measure live bytes for 5,000 `User` records and the pause time of one full collection (mark-sweep for Arms 1 and 2; `Weak`-list cycle sweep for Arm 3). Measure actual process allocations via a counting global allocator in a dedicated B7 measurement mode, never enabled during B1 to B3 timing runs.
 
 ### B8: Host Module Ergonomics and Isolation
 
@@ -180,4 +162,4 @@ Report both host-integration lines of code and total VM, GC, and codec core line
 
 ## Evaluation
 
-Report all eight tests for all six arms side by side. Note which requirements each arm satisfies or relaxes, then weigh pure VM speed (B1), single-walker codec speed (B2 and B3), memory and GC pauses (B7), and total simplicity across VM core and host APIs (B8).
+Report all eight tests for all three arms side by side. Weigh pure VM speed (B1), single-walker codec speed (B2 and B3), memory and GC pauses (B7), and total simplicity across VM core and host APIs (B8).
