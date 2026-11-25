@@ -89,7 +89,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 
 /// Limits for steady-state runs: the GC floor sits above every working set.
 pub fn roomy_limits() -> Limits {
-    Limits { max_memory: 8 << 30, fuel: u64::MAX, gc_min_threshold: 4 << 30 }
+    Limits { max_memory: 8 << 30, gc_min_threshold: 4 << 30, ..Limits::default() }
 }
 
 pub fn engine<E: ArmEngine>(variant: Variant, limits: Limits) -> E {
@@ -173,11 +173,21 @@ pub const FIRST_USERS_JSON: &str = concat!(
 /// Checks encoding and decoding of the dataset with `variant`'s codec methods.
 pub fn b2_b3_codec<E: ArmEngine>(variant: Variant) {
     let mut e: E = engine(variant, Limits::default());
+    // Each custom `Address` and `Status` method call adds 1 to `callbacks`.
+    let per_user = if variant == Variant::Custom { 2 } else { 0 };
+    let per_address = if variant == Variant::Custom { 1 } else { 0 };
     call_ok(&mut e, "setup_doc", &[int(3)]);
+    let before = callback_count(&mut e);
     assert_eq!(call_str(&mut e, "encode_doc", &[]), FIRST_USERS_JSON);
+    assert_eq!(callback_count(&mut e), before + 3 * per_user, "{}: custom encode calls", E::NAME);
     call_ok(&mut e, "setup_address", &[]);
     assert_eq!(call_ok(&mut e, "bench_small_encode", &[int(10)]), HostValue::Int(10 * ADDRESS_JSON.len() as i64));
+    let before = callback_count(&mut e);
     assert_eq!(call_ok(&mut e, "bench_small_decode", &[int(10)]), HostValue::Int(10 * "Springfield".len() as i64));
+    assert_eq!(callback_count(&mut e), before + 10 * per_address, "{}: custom decode calls", E::NAME);
+    if variant == Variant::Custom {
+        assert_eq!(call_str(&mut e, "evil_encode", &[]), r#"[[1,"a long string that lives on the heap"]]"#);
+    }
 
     call_ok(&mut e, "setup_text", &[int(500)]);
     call_ok(&mut e, "setup_doc", &[int(500)]);
@@ -199,6 +209,44 @@ pub fn b2_b3_codec<E: ArmEngine>(variant: Variant) {
     assert_eq!(call_str(&mut e, "reencode", &[Arg::Str(without_zip), int(doc_ty)]), missing);
     let broken = FIRST_USERS_JSON.replace(r#""Banned""#, r#""Bogus""#);
     assert!(e.call("reencode", &[Arg::Str(broken), int(doc_ty)]).is_err());
+}
+
+fn callback_count<E: ArmEngine>(e: &mut E) -> i64 {
+    match call_ok(e, "callback_count", &[]) {
+        HostValue::Int(n) => n,
+        other => panic!("{}: callback_count returned {other:?}", E::NAME),
+    }
+}
+
+/// Runs the codec, host, and async checks while every allocation collects
+/// garbage, so a value that native code forgot to root fails the check.
+pub fn gc_stress<E: ArmEngine>() {
+    let stress = Limits { gc_stress: true, ..Limits::default() };
+    for variant in [Variant::Structural, Variant::Custom] {
+        let mut roomy: E = engine(variant, Limits::default());
+        call_ok(&mut roomy, "setup_doc", &[int(20)]);
+        let expected = call_str(&mut roomy, "encode_doc", &[]);
+        let mut e: E = engine(variant, stress);
+        call_ok(&mut e, "setup_doc", &[int(20)]);
+        assert_eq!(call_str(&mut e, "encode_doc", &[]), expected);
+        assert_eq!(call_str(&mut e, "roundtrip_text_of_doc", &[]), expected);
+        assert!(matches!(call_ok(&mut e, "sexpr_roundtrip", &[]), HostValue::Int(n) if n > 1000));
+        call_ok(&mut e, "setup_address", &[]);
+        assert_eq!(call_ok(&mut e, "bench_small_decode", &[int(3)]), HostValue::Int(3 * "Springfield".len() as i64));
+        assert_eq!(call_ok(&mut e, "map_mutating", &[]), HostValue::Int(12 * 100 + 3));
+        if variant == Variant::Custom {
+            assert_eq!(call_str(&mut e, "evil_encode", &[]), r#"[[1,"a long string that lives on the heap"]]"#);
+        }
+    }
+    let host = HostConfig::default();
+    let mut e = E::new(program(Variant::Structural), stress, &host).unwrap();
+    call_ok(&mut e, "host_setup", &[]);
+    assert_eq!(call_ok(&mut e, "host_fire_twice", &[]), HostValue::Int(13));
+    let mut e: E = engine(Variant::Structural, stress);
+    e.spawn("holder", &[int(7)]).unwrap();
+    e.spawn("churn", &[int(20)]).unwrap();
+    let results = block_on(e.run_fibers());
+    assert_eq!(results[0], Ok(HostValue::Str(format!("user 7|u7@example.com|b2|{HELD_STRING}"))));
 }
 
 // -------------------------------------------------------------------------
@@ -229,7 +277,7 @@ pub fn b4_dead_garbage<E: ArmEngine>(generator: &str) -> Vec<B4Run> {
         let mut roomy: E = engine(variant, roomy_limits());
         b4_workload(&mut roomy);
         let cap = roomy.stats().tracked_bytes * 3 / 2;
-        let limits = Limits { max_memory: cap, fuel: u64::MAX, gc_min_threshold: cap };
+        let limits = Limits { max_memory: cap, gc_min_threshold: cap, ..Limits::default() };
         let mut e: E = engine(variant, limits);
         e.pause_gc(true);
         while e.stats().tracked_bytes < cap * 7 / 10 {
@@ -259,7 +307,7 @@ pub struct B4Run {
 
 /// Runs a decode whose `Address.decode` allocates garbage in a loop.
 pub fn b4_garbage_callback<E: ArmEngine>() -> B4Run {
-    let limits = Limits { max_memory: B4_MAX_MEMORY, fuel: u64::MAX, gc_min_threshold: 4 << 20 };
+    let limits = Limits { max_memory: B4_MAX_MEMORY, gc_min_threshold: 4 << 20, ..Limits::default() };
     let mut e: E = engine(Variant::GarbageCallback, limits);
     call_ok(&mut e, "setup_text", &[int(B4_USERS)]);
     let before = e.stats().collections;
@@ -280,7 +328,7 @@ pub fn b4_garbage_callback<E: ArmEngine>() -> B4Run {
 
 /// Rejects allocations larger than the cap before memory grows.
 pub fn b4_oversized<E: ArmEngine>() {
-    let limits = Limits { max_memory: B4_MAX_MEMORY, fuel: u64::MAX, gc_min_threshold: 4 << 20 };
+    let limits = Limits { max_memory: B4_MAX_MEMORY, gc_min_threshold: 4 << 20, ..Limits::default() };
     let mut e: E = engine(Variant::Structural, limits);
     call_ok(&mut e, "huge_string", &[int(1000)]);
     call_ok(&mut e, "huge_list", &[int(10)]);
@@ -323,6 +371,9 @@ pub fn b5_callbacks<E: ArmEngine>() {
     on_small_stack(|| {
         let mut e: E = engine(Variant::NodeCustom, Limits::default());
         assert_eq!(call_ok(&mut e, "node_roundtrip", &[int(50)]), HostValue::Int(50));
+        // The structural walker handles 500 levels, so these overflows come from the callbacks.
+        assert_eq!(e.call("node_encode", &[int(400)]), Err(Fail::StackOverflow));
+        assert_eq!(e.call("node_decode", &[Arg::Str(deep_node_json(400))]), Err(Fail::StackOverflow));
         assert_eq!(e.call("node_encode", &[int(100_000)]), Err(Fail::StackOverflow));
         assert_eq!(e.call("node_decode", &[Arg::Str(deep_node_json(100_000))]), Err(Fail::StackOverflow));
         assert_eq!(call_ok(&mut e, "node_roundtrip", &[int(50)]), HostValue::Int(50));
@@ -373,9 +424,13 @@ pub fn b8_sexpr<E: ArmEngine>() {
 pub fn b8_host_cycle<E: ArmEngine>() {
     let host = HostConfig::default();
     let mut e = E::new(program(Variant::Structural), Limits::default(), &host).unwrap();
+    call_ok(&mut e, "host_setup", &[]);
+    // Only the host object keeps the closure alive across this collection.
+    e.collect();
     // fire(5) twice: 5 + 1 call, then 5 + 2 calls.
-    assert_eq!(call_ok(&mut e, "host_cycle", &[]), HostValue::Int(13));
+    assert_eq!(call_ok(&mut e, "host_fire_twice", &[]), HostValue::Int(13));
     assert_eq!(host.host_drops.load(Ordering::Relaxed), 0);
+    call_ok(&mut e, "host_release", &[]);
     e.collect();
     assert_eq!(host.host_drops.load(Ordering::Relaxed), 1, "{}: the host object and its callback form a garbage cycle", E::NAME);
 }
@@ -461,6 +516,10 @@ macro_rules! arm_tests {
         #[test]
         fn b8_host_cycle() {
             suite::b8_host_cycle::<$engine>();
+        }
+        #[test]
+        fn gc_stress() {
+            suite::gc_stress::<$engine>();
         }
         #[test]
         fn b8_two_engines() {

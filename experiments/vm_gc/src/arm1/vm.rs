@@ -125,7 +125,7 @@ impl Vm {
             natives.push(available.swap_remove(index).1);
         }
         let mut vm = Vm {
-            heap: Heap::new(limits.max_memory, limits.gc_min_threshold),
+            heap: Heap::new(&limits),
             stack: Vec::new(),
             frames: Vec::new(),
             roots: Vec::new(),

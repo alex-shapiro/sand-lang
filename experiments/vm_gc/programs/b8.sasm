@@ -49,17 +49,34 @@ fn fire_self(x) {
     ret r
 }
 
-# Stores a closure that captures its host object in that host object, then
-# fires it twice. The host object and closure become a garbage cycle.
-fn host_cycle() {
+global host_holder
+
+# Stores a closure that captures its host object in that host object. Only
+# the host object keeps the closure alive, and a global keeps the host object.
+fn host_setup() {
     native h host.new
     closure f fire_self h
     native _ host.set h f
+    gset host_holder h
+    unit u
+    ret u
+}
+
+# Fires the stored closure twice.
+fn host_fire_twice() {
+    gget h host_holder
     int five 5
     native a host.fire h five
     native b host.fire h five
     add r a b
     ret r
+}
+
+# Drops the last reference, so the host object and closure form a garbage cycle.
+fn host_release() {
+    unit u
+    gset host_holder u
+    ret u
 }
 
 fn sexpr_roundtrip() {

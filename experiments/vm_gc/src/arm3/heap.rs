@@ -15,7 +15,7 @@
 //! tables grow with the slot table, so a collection never allocates.
 
 use super::value::*;
-use crate::shared::{Fail, GcPolicy, Result, ShortStr, Tracker};
+use crate::shared::{Fail, GcPolicy, Limits, Result, ShortStr, Tracker};
 use std::mem::size_of;
 use std::sync::{Arc, Weak};
 
@@ -176,10 +176,10 @@ pub struct Heap {
 }
 
 impl Heap {
-    pub fn new(limit: usize, gc_min_threshold: usize) -> Heap {
+    pub fn new(limits: &Limits) -> Heap {
         let mut heap = Heap {
-            tracker: Arc::new(Tracker::new(limit)),
-            policy: GcPolicy::new(gc_min_threshold),
+            tracker: Arc::new(Tracker::new(limits.max_memory)),
+            policy: GcPolicy::new(limits),
             next_check: 0,
             entries: Vec::new(),
             free: Vec::new(),

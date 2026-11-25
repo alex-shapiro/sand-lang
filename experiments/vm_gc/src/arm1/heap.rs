@@ -5,7 +5,7 @@
 //! a callback must root it on [`Vm::roots`](super::vm::Vm::roots).
 
 use super::codec::{DecoderObj, EncoderObj};
-use crate::shared::{GcPolicy, ShortStr, Tracker};
+use crate::shared::{GcPolicy, Limits, ShortStr, Tracker};
 use std::any::Any;
 use std::mem::size_of;
 
@@ -143,15 +143,15 @@ pub struct Heap {
 }
 
 impl Heap {
-    pub fn new(limit: usize, gc_min_threshold: usize) -> Heap {
+    pub fn new(limits: &Limits) -> Heap {
         let mut heap = Heap {
             slots: Vec::new(),
             marks: Vec::new(),
             gray: Vec::new(),
             free_head: NO_FREE_SLOT,
             live_objects: 0,
-            tracker: Tracker::new(limit),
-            policy: GcPolicy::new(gc_min_threshold),
+            tracker: Tracker::new(limits.max_memory),
+            policy: GcPolicy::new(limits),
             next_check: 0,
         };
         heap.update_next_check();

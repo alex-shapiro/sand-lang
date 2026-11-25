@@ -51,11 +51,14 @@ pub struct Limits {
     pub fuel: u64,
     /// Smallest tracked byte count that triggers an automatic collection.
     pub gc_min_threshold: usize,
+    /// Collects garbage at every allocation, so that tests catch values
+    /// that native code forgot to root.
+    pub gc_stress: bool,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { max_memory: 1 << 32, fuel: u64::MAX, gc_min_threshold: 1 << 20 }
+        Limits { max_memory: 1 << 32, fuel: u64::MAX, gc_min_threshold: 1 << 20, gc_stress: false }
     }
 }
 
@@ -153,24 +156,33 @@ pub struct GcPolicy {
     next_threshold: usize,
     /// Skips automatic collections. Memory-limit collections still run.
     pub paused: bool,
+    /// Triggers a collection at every allocation.
+    stress: bool,
     pub collections: u64,
 }
 
 impl GcPolicy {
-    pub fn new(min_threshold: usize) -> GcPolicy {
-        GcPolicy { min_threshold, next_threshold: min_threshold, paused: false, collections: 0 }
+    pub fn new(limits: &Limits) -> GcPolicy {
+        let min_threshold = limits.gc_min_threshold;
+        GcPolicy { min_threshold, next_threshold: min_threshold, paused: false, stress: limits.gc_stress, collections: 0 }
     }
 
     /// Returns whether an allocation that brings tracked bytes to `used` triggers a collection.
     #[inline]
     pub fn should_collect(&self, used: usize) -> bool {
-        used > self.next_threshold && !self.paused
+        self.stress || (used > self.next_threshold && !self.paused)
     }
 
     /// Tracked byte count above which an allocation triggers a collection.
     #[inline]
     pub fn threshold(&self) -> usize {
-        if self.paused { usize::MAX } else { self.next_threshold }
+        if self.stress {
+            0
+        } else if self.paused {
+            usize::MAX
+        } else {
+            self.next_threshold
+        }
     }
 
     /// Records a finished collection that left `live` tracked bytes.

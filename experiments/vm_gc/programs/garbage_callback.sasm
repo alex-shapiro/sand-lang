@@ -1,5 +1,6 @@
 # B4: `Address.decode` allocates temporary garbage before it decodes.
 fn Address.decode(dec) {
+    call _ count_callback
     int i 0
     int one 1
     int count 200

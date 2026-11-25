@@ -1,5 +1,6 @@
 # B3: `Address` and `Status` implement `Encode` and `Decode` in bytecode.
 fn Address.encode(self, enc) {
+    call _ count_callback
     int three 3
     native _ enc.open_map enc three
     str k "street"
@@ -26,6 +27,7 @@ fn Address.encode(self, enc) {
 }
 
 fn Address.decode(dec) {
+    call _ count_callback
     native _ dec.open_map dec
     str street ""
     str city ""
@@ -62,6 +64,7 @@ fn Address.decode(dec) {
 }
 
 fn Status.encode(self, enc) {
+    call _ count_callback
     vindex i self
     int one 1
     int two 2
@@ -99,6 +102,7 @@ fn Status.encode(self, enc) {
 }
 
 fn Status.decode(dec) {
+    call _ count_callback
     native name dec.open_variant dec
     str s "Active"
     eq c name s
@@ -144,4 +148,38 @@ fn Status.decode(dec) {
     str m "unknown Status variant"
     native _ vm.fail m
     ret m
+}
+
+# A custom `encode` that detaches the list that the walker is encoding and
+# collects garbage. The walker must keep that list alive.
+struct Evil { x: int }
+global evil_outer
+
+fn Evil.encode(self, enc) {
+    gget outer evil_outer
+    pop _ outer
+    native _ vm.collect
+    field x self Evil.x
+    native _ enc.int enc x
+    unit u
+    ret u
+}
+
+# Returns `[[Evil(1), long string]]`. No register keeps the inner list.
+fn make_evil_outer() {
+    int one 1
+    new e Evil one
+    str s "a long string that lives on the heap"
+    list mid e s
+    list outer mid
+    ret outer
+}
+
+fn evil_encode() {
+    call outer make_evil_outer
+    gset evil_outer outer
+    native t json.encode outer
+    unit u
+    gset evil_outer u
+    ret t
 }
