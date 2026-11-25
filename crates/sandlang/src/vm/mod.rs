@@ -160,11 +160,9 @@ impl Fail {
 
     /// Reports that the run exceeded `kind`.
     ///
-    /// On [`LimitKind::Memory`], the engine collects garbage. It then retries a
-    /// plain synchronous function, a `&mut Vm` function, or a `step` closure
-    /// once. If a [`CallContext`](crate::native::context::CallContext) function
-    /// or native future returns `Fail::limit`, the engine ends the run
-    /// immediately.
+    /// On [`LimitKind::Memory`], plain, `&mut Vm`, and `step` calls retry once
+    /// after garbage collection. [`CallContext`](crate::native::context::CallContext)
+    /// functions and native futures end the run immediately.
     #[cold]
     pub fn limit(kind: LimitKind) -> Fail {
         Fail(Box::new(FailKind::Limit(kind)))

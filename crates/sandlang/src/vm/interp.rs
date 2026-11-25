@@ -1743,9 +1743,8 @@ impl Vm {
 
     /// Calls native function `n` with arguments on `fiber.stack`.
     ///
-    /// Returns `Ok(None)` if bytecode execution continues in this slice.
-    /// Returns `Ok(Some(stop))` if the call stops the slice. Preempts the task
-    /// with `FiberStop::Preempt` if the call exhausts slice fuel.
+    /// Returns `Ok(None)` to continue the slice, or `Ok(Some(stop))` to stop
+    /// or preempt after slice exhaustion.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn call_native(

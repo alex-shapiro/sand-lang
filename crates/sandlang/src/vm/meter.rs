@@ -153,11 +153,8 @@ impl VmMeter {
         self.spent_fuel.set(self.spent_fuel.get().saturating_add(spent));
     }
 
-    /// Synchronizes the interpreter's local counter with fuel remaining until
-    /// `next_check_fuel`.
-    ///
-    /// Call this before entering or resuming the interpreter. The returned
-    /// value becomes the interpreter's local counter and the new sync baseline.
+    /// Returns fuel remaining until `next_check_fuel` and records it as the
+    /// new interpreter sync baseline.
     #[inline]
     pub(crate) fn reload_interpreter_fuel(&self) -> i64 {
         let remaining = self.next_check_fuel.get().saturating_sub(self.spent_fuel.get()).min(i64::MAX as u64) as i64;

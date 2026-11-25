@@ -541,7 +541,7 @@ pub fn keys_eq(heap: &Heap, meter: &impl Meter, a: VmValue, b: VmValue) -> Resul
 }
 
 /// Computes the hash of map key or set element `v`, consistent with
-/// [`values_eq`] for all types that implement `Hash`.
+/// [`values_eq_metered`] for all types that implement `Hash`.
 ///
 /// Charges one unit per visited node plus the number of hashed bytes. For large
 /// keys, container hashes are memoized by handle so that keys with shared

@@ -1,12 +1,8 @@
 //! Benchmarks for native functions that call Sand functions.
 //!
-//! `cargo bench --bench callbacks` measures wall time and time per call.
-//! `cargo test --benches` verifies each benchmark's output in a single pass.
-//!
-//! Each benchmark calls `fn inc(x: int) -> int { x + 1 }` 1,000,000 times
-//! through a different call path. By default, the harness runs each benchmark
-//! five times. `BENCH_RUNS` sets the run count. The harness includes script
-//! compilation in each timed run. It reports the fastest run.
+//! `cargo bench --bench callbacks` runs 1,000,000 calls to `inc` per path and
+//! reports the fastest run, including compilation. Set `BENCH_RUNS` to change
+//! the default five runs. `cargo test --benches` checks output once.
 
 use sandlang::engine::{Config, Engine, HostModules, MemorySink};
 use sandlang::native::NativeModule;

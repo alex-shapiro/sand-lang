@@ -57,11 +57,9 @@ pub struct NativeContext {
     state: Arc<Mutex<NativeCallState>>,
 }
 
-/// Handle to a [`VmValue`] rooted in a [`CallContext`] or [`NativeContext`]
-/// until the native call returns.
+/// Handle to a [`VmValue`] rooted until the native call returns.
 ///
-/// Read the value from the same context with [`CallContext::value`] or
-/// [`NativeContext::value`].
+/// Read it back from the same context with `value()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RootedValue(u32);
 
@@ -183,13 +181,10 @@ impl NativeContext {
         self.state.lock().callback_result.take().expect("the scheduler stores the callback result before polling again")
     }
 
-    /// Runs `f` with `&mut Vm` under automatic retry for limit errors and
-    /// permission requests.
+    /// Runs `f` with `&mut Vm`, retrying after garbage collection on limit
+    /// errors or after a user permission prompt.
     ///
-    /// `f` must check limits and capabilities before any side effect. After a
-    /// memory or resource limit error, the engine collects all garbage. It then
-    /// runs `f` again. After a permission request, the engine prompts the user.
-    /// It then runs `f` again.
+    /// Check limits and capabilities in `f` before any side effect.
     ///
     /// ```
     /// # use sandlang::native::context::NativeContext;
@@ -303,11 +298,9 @@ const MAX_IDLE_ROOT_SLOTS: usize = 1024;
 
 /// VM and callback handle for a synchronous native function.
 ///
-/// [`NativeModule::function`](super::NativeModule::function) passes a
-/// `CallContext` to a function whose first parameter is `&mut CallContext`.
-/// [`CallContext::call`] runs a Sand function on the calling task. The engine
-/// runs a `CallContext` function once per call. [`CallContext::step`] retries
-/// memory and resource checks after garbage collection.
+/// Functions taking `&mut CallContext` first run once per call. Use
+/// [`CallContext::call`] for Sand callbacks and [`CallContext::step`] for
+/// retryable VM operations.
 ///
 /// ```
 /// # use sandlang::native::NativeModule;
@@ -342,28 +335,20 @@ impl<'a> CallContext<'a> {
 
     /// Returns shared read access to the [`Vm`].
     ///
-    /// Use [`CallContext::step`] for mutable [`Vm`] access.
-    /// [`CallContext::root`] keeps a [`VmValue`] alive across
-    /// [`CallContext::call`] and [`CallContext::step`]. The garbage collector
-    /// can free unrooted heap values during either method.
+    /// Use [`CallContext::step`] for `&mut Vm` and [`CallContext::root`] to
+    /// keep heap values alive across `call` or `step`.
     pub fn vm(&self) -> &Vm {
         self.vm
     }
 
-    /// Calls the Sand function `callee` with `args` on the calling task.
+    /// Calls Sand function `callee` with `args` on the calling task.
     ///
-    /// Returns `callee`'s result as an unrooted [`VmValue`]. The garbage
-    /// collector preserves that [`VmValue`] until the next `call` or `step`.
-    /// [`CallContext::root`] keeps it alive until this native call returns.
+    /// Returns an unrooted [`VmValue`] valid until the next `call` or `step`.
+    /// Use [`CallContext::root`] to keep it longer. Task waits, permission
+    /// prompts, and self-cancellation fail with an `"invalid"` error.
     ///
-    /// The engine runs `callee` to completion on the host thread. During
-    /// `callee`, the engine rejects task waits, permission prompts, and
-    /// self-cancellation with an `"invalid"` error.
-    ///
-    /// If `callee` ends the run, `call` records that outcome. `call` returns
-    /// that recorded outcome as a [`Fail`]. Later `call` and `step` calls
-    /// return the same [`Fail`]. After this native function returns, the engine
-    /// ends the run with that recorded outcome.
+    /// A terminal run ending from `callee` is recorded, returned from this and
+    /// all later `call` or `step` calls, and applied after the native call returns.
     ///
     /// # Panics
     ///
@@ -396,12 +381,11 @@ impl<'a> CallContext<'a> {
         self.fiber.native_roots[rooted.0 as usize]
     }
 
-    /// Runs `f` with `&mut Vm` under automatic retry for limit errors.
+    /// Runs `f` with `&mut Vm`, retrying once after garbage collection on
+    /// memory or resource limits.
     ///
-    /// `f` must check limits before any side effect. After a memory or resource
-    /// limit error, the engine collects all garbage. It then runs `f` again.
-    /// The engine rejects any permission prompt inside `f` with an `"invalid"`
-    /// error.
+    /// Check limits in `f` before any side effect. Permission prompts fail with
+    /// an `"invalid"` error.
     pub fn step<R, E: NativeError>(&mut self, mut f: impl FnMut(&mut Vm) -> Result<R, E>) -> Result<R, E::FutureError> {
         if let Some(ending) = &self.run_ending {
             return Err(Fail::from(ending.clone()).into());
@@ -427,10 +411,8 @@ impl<'a> CallContext<'a> {
         result
     }
 
-    /// Converts `output` into a Sand return value.
-    ///
-    /// Truncates the fiber's root stack to its pre-call length. Converts any
-    /// [`Fail`] into a terminal run ending.
+    /// Truncates the fiber's root stack, converts `output` to a Sand value, and
+    /// turns any [`Fail`] into a terminal run ending.
     pub(crate) fn finish(self, output: impl NativeReturn<Fail>) -> Result<VmValue, Ctl> {
         let CallContext { vm, fiber, roots_start, run_ending, .. } = self;
         fiber.native_roots.truncate(roots_start);

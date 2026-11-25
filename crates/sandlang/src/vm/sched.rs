@@ -319,10 +319,8 @@ impl Vm {
         ProgramCode { program: self.prog.clone(), natives: self.natives.clone() }
     }
 
-    /// Runs a bytecode slice on `fiber` with `fuel`.
-    ///
-    /// On a memory-limit error, `run_slice` collects all garbage and retries
-    /// the instruction in the same slice.
+    /// Runs a bytecode slice on `fiber` with `fuel`, retrying once in place
+    /// after garbage collection on a memory limit.
     fn run_slice(&mut self, code: &ProgramCode, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
         let mut last_retry_site = None;
         loop {
@@ -414,13 +412,10 @@ impl Vm {
         Ok(())
     }
 
-    /// Runs `callee` with `args` to completion on `fiber` for a synchronous
-    /// native call.
+    /// Runs `callee` with `args` to completion on `fiber` above `frame_base`.
     ///
-    /// `frame_base` is the first stack slot above the active native caller's
-    /// registers. Rejects task suspension and self-cancellation with an
-    /// `"invalid"` error. Restores `fiber.frames` and `self.caller_site` on
-    /// exit.
+    /// Rejects task suspension and self-cancellation with an `"invalid"` error,
+    /// and restores `fiber.frames` and `self.caller_site` on exit.
     pub(crate) fn run_callback(
         &mut self,
         code: &ProgramCode,

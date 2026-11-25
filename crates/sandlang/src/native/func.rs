@@ -51,25 +51,18 @@ impl Signature {
 /// module.function("fetch", |url: String| async move { url.len() as i64 });
 /// ```
 ///
-/// - **Synchronous.** Each parameter implements [`NativeParam`]. Parameters can
-///   borrow `&str`, `&[u8]`, or `&T` from the VM heap. The return type
-///   implements [`NativeReturn<Ctl>`].
-/// - **Synchronous with `&mut Vm` first.** Each parameter after `&mut Vm` is an
-///   owned [`NativeParam`] type. The return type implements
-///   [`NativeReturn<Ctl>`]. Check permissions and limits before any side
-///   effect. The engine reruns the function after a permission prompt or
-///   limit-triggered garbage collection. [`Later`] suspends the calling task on
-///   a future. That future can await host events or Sand callbacks.
-/// - **Synchronous with `&mut CallContext` first.** The function can call Sand
-///   functions on the calling task through [`CallContext::call`]. Each
-///   parameter after `&mut CallContext` is an owned [`NativeParam`] type. The
-///   return type implements [`NativeReturn<Fail>`]. The engine runs the
-///   function once per call. [`CallContext::step`] retries limit checks in
-///   place after garbage collection.
-/// - **Asynchronous.** The function returns a future. The engine suspends only
-///   the calling Sand task. Each parameter is an owned `Send` [`NativeParam`]
-///   type. The future and its output are `Send`. The output implements
-///   [`NativeReturn<Fail>`].
+/// - **Synchronous.** Parameters implement [`NativeParam`] and may borrow
+///   `&str`, `&[u8]`, or `&T` from the heap. Output implements [`NativeReturn<Ctl>`].
+/// - **Synchronous with `&mut Vm`.** Trailing parameters are owned
+///   [`NativeParam`] types and output implements [`NativeReturn<Ctl>`]. Check
+///   permissions and limits before side effects; the engine reruns the call
+///   after prompts or GC retries. Return [`Later`] to suspend on a future.
+/// - **Synchronous with `&mut CallContext`.** Trailing parameters are owned
+///   [`NativeParam`] types and output implements [`NativeReturn<Fail>`]. Runs
+///   once per call; use [`CallContext::call`] for Sand callbacks and
+///   [`CallContext::step`] for GC-retried VM checks.
+/// - **Asynchronous.** Returns a `Send` future with `Send` owned parameters and
+///   `Send` [`NativeReturn<Fail>`] output. Suspends only the calling task.
 ///
 /// The compiler rejects borrowed parameters in `&mut Vm` and `&mut CallContext`
 /// functions:
@@ -263,11 +256,10 @@ pub struct CallContextNativeFn;
 /// Asynchronous [`NativeFunction`] that returns a future.
 pub struct AsyncNativeFn;
 
-/// Return type of a registered function.
+/// Return type of a registered native function.
 ///
-/// `C` is the control signal that stops the call. Plain synchronous and
-/// `&mut Vm` functions use [`Ctl`]. [`CallContext`] functions and futures use
-/// [`Fail`].
+/// Plain and `&mut Vm` functions use `C = Ctl`; [`CallContext`] functions and
+/// futures use `C = Fail`.
 pub trait NativeReturn<C>: SandType {
     #[doc(hidden)]
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C>;
