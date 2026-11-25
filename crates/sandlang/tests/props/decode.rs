@@ -17,6 +17,8 @@ enum Ty {
     Keyed,
     /// `struct Valid { a: int }`. Declares an `init` constructor.
     Valid,
+    /// `struct Custom { n: int }`. Implements custom `Encode` and `Decode`.
+    Custom,
     Fn,
     Task,
     Range,
@@ -47,6 +49,7 @@ impl Ty {
             Ty::Rec => "Rec".into(),
             Ty::Keyed => "Keyed".into(),
             Ty::Valid => "Valid".into(),
+            Ty::Custom => "Custom".into(),
             Ty::Fn => "(fn() -> int)".into(),
             Ty::Task => "Task<int>".into(),
             Ty::Range => "Range".into(),
@@ -101,7 +104,17 @@ impl Ty {
     /// Returns `true` if the type implements `Hash`.
     fn hashable(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Unit | Ty::Duration | Ty::UnitEnum | Ty::Rec | Ty::Valid | Ty::Range => true,
+            Ty::Int
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::Unit
+            | Ty::Duration
+            | Ty::UnitEnum
+            | Ty::Rec
+            | Ty::Valid
+            | Ty::Custom
+            | Ty::Range => true,
             Ty::Option(t) | Ty::Wrap(t) => t.hashable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::hashable),
             _ => false,
@@ -149,7 +162,7 @@ fn ty() -> impl Strategy<Value = Ty> {
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
-        4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec), Just(Ty::Valid)],
+        4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec), Just(Ty::Valid), Just(Ty::Custom)],
         1 => prop_oneof![Just(Ty::Range), Just(Ty::Keyed)],
         bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task)],
         param => Just(Ty::Param),
@@ -171,7 +184,10 @@ fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
 
 const TYPES: &str = "enum Unit { A, B }\nstruct Rec { a: int, b: str? }\nstruct Key { a: int }\nstruct Keyed { m: [Key: int]? }\nstruct Wrap<T> { v: T }\n\
                      struct Tree<T> { v: T, kids: [Tree<T>] = [] }\nstruct Bag<T> { s: Set<T> }\n\
-                     struct Valid {\n    a: int\n    fn init(a: int) -> Valid { Self(a) }\n}";
+                     struct Valid {\n    a: int\n    fn init(a: int) -> Valid { Self(a) }\n}\n\
+                     struct Custom { n: int }\n\
+                     impl Encode for Custom {\n    fn encode(self, encoder: Encoder) -> Result<()> { encoder.encode(self.n) }\n}\n\
+                     impl Decode for Custom {\n    fn decode(decoder: Decoder) -> Result<Custom> {\n        match decoder.kind()? {\n            InputKind.Int => Ok(Custom(n: decoder.decode()?))\n            InputKind.Str => {\n                let s: str = decoder.decode()?\n                Ok(Custom(n: s.len()))\n            }\n            _ => Err(Error(message: \"expected int or str\", kind: \"parse\"))\n        }\n    }\n}";
 
 const INPUTS: [&str; 14] = [
     "null",
@@ -273,6 +289,7 @@ fn json_text(t: &Ty, rng: &mut Rng, depth: u32, wrong: u64) -> String {
         Ty::Rec => ["{\"a\": 1, \"b\": \"x\"}", "{\"a\": 2}"][rng.below(2) as usize].into(),
         Ty::Keyed => ["{}", "{\"m\": null}"][rng.below(2) as usize].into(),
         Ty::Valid => "{\"a\": 1}".into(),
+        Ty::Custom => ["1", "\"ab\""][rng.below(2) as usize].into(),
         Ty::Range => ["{\"start\": 1, \"end\": 3}", "{\"start\": 0, \"end\": 0, \"inclusive\": true}"][rng.below(2) as usize].into(),
         Ty::Fn | Ty::Task | Ty::Param => "null".into(),
         Ty::List(e) | Ty::Set(e) => format!("[{}]", many(e, rng).join(", ")),
@@ -523,5 +540,39 @@ proptest! {
         }
         src += &format!("struct S{chain} {{ v: int = 1 }}\nlet s: S0 = json.decode(\"{{}}\")?\nprint(s == S0())\nprint(json.encode(s)? == json.encode(S0())?)\n");
         check(&src, "true\ntrue\n", None)?;
+    }
+
+    #[test]
+    fn codec_roundtrip_agrees_across_modes(
+        t in ty_with(0, 0).prop_filter("valid map keys", |t| t.decodable() && t.well_formed() && t.keys_decodable()),
+        seed in 1..u64::MAX,
+    ) {
+        let mut rng = Rng(seed);
+        let texts: Vec<String> = (0..6).map(|_| format!("{:?}", json_text(&t, &mut rng, 0, 1000))).collect();
+        let src = format!(
+            "import json\n{TYPES}\n\
+             fn roundtrip<T: Encode + Decode + Eq>(s: str) -> (Result<T>, str) {{\n\
+                 let r: Result<T> = json.decode(s)\n\
+                 match r {{\n\
+                     Ok(v) => {{\n\
+                         let compact = json.encode(v).unwrap()\n\
+                         let pretty = json.encode(v, indent: 2).unwrap()\n\
+                         let j = json.to_json(v).unwrap()\n\
+                         let a: T = json.decode(compact).unwrap()\n\
+                         let b: T = json.decode(pretty).unwrap()\n\
+                         (Ok(v), \"\\(a == v) \\(b == v) \\(json.parse(compact).unwrap() == j) \\(json.encode(j).unwrap() == compact)\")\n\
+                     }}\n\
+                     Err(e) => (Err(e), e.kind)\n\
+                 }}\n\
+             }}\n\
+             for s in [{}] {{\n    let (_, out): (Result<{}>, str) = roundtrip(s)\n    print(out)\n}}",
+            texts.join(", "),
+            t.sand()
+        );
+        let run = super::run_modes(&src, &[super::Mode::Optimized, super::Mode::Unoptimized, super::Mode::GcStress])?;
+        prop_assert!(run.failure.is_none(), "{:?}\n{}", run.failure, src);
+        for line in run.stdout.lines() {
+            prop_assert!(line == "true true true true" || line == "parse", "unexpected `{line}`\n{src}");
+        }
     }
 }

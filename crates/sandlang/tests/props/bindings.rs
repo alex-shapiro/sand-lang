@@ -366,20 +366,27 @@ proptest! {
 
     #[test]
     fn rust_json_values_round_trip_through_text(value in json(), indent in prop_oneof![Just(0i64), 1i64..4]) {
+        use sandlang::native::ty::Encoded;
+        use sandlang::value::{ToValue, Value};
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_vals = Arc::new(Mutex::new(Vec::new()));
         let mut m = NativeModule::new("doc");
+        m.source("pub native fn take_val<T: Encode>(x: T) -> ()");
         let s = seen.clone();
         m.function("keep", move |j: Json| s.lock().push(j));
         let made = value.clone();
         m.function("make", move || made.clone());
+        let sv = seen_vals.clone();
+        m.function("take_val", move |v: Encoded<0>| sv.lock().push(v.value().clone()));
         let src = format!(
             "import doc\nimport json\nlet j = doc.make()\nlet back = json.parse(json.encode(j, indent: {indent})?)?\nprint(back == j)\n\
-             print(json.to_json(j)? == j)\ndoc.keep(back)\nlet d: json.Json = json.decode(json.encode(j)?)?\ndoc.keep(d)"
+             print(json.to_json(j)? == j)\ndoc.keep(back)\nlet d: json.Json = json.decode(json.encode(j)?)?\ndoc.keep(d)\ndoc.take_val(j)"
         );
         let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(out, "true\ntrue\n");
-        prop_assert_eq!(seen.lock().clone(), vec![value.clone(), value]);
+        prop_assert_eq!(seen.lock().clone(), vec![value.clone(), value.clone()]);
+        prop_assert_eq!(seen_vals.lock().clone(), vec![value.to_value() as Value]);
     }
 
     #[test]

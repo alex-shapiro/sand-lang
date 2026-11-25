@@ -41,3 +41,9 @@ name = "policy"
 path = "fuzz_targets/policy.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
+test = false
+doc = false
