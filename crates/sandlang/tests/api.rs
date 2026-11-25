@@ -2193,14 +2193,14 @@ fn sync_natives_encode_and_decode_host_values() {
     module.function(
         "save",
         |context: &mut CallContext, encode_dict: TraitDict<0, traits::Encode>, value: Param<0>| -> Result<String, HostError<Fail>> {
-            Ok(format!("{:?}", context.to_value(value.raw(), encode_dict.raw())?))
+            Ok(format!("{:?}", context.to_value(value.raw(), encode_dict)?))
         },
     );
     module.function(
         "load",
         |context: &mut CallContext, decode_dict: TraitDict<0, traits::Decode>, num: i64| -> Result<Param<0>, HostError<Fail>> {
             let value = Value::List(vec![Value::Str("a".into()), Value::Int(num)]);
-            let decoded = context.from_value(value, decode_dict.raw())?;
+            let decoded = context.from_value(value, decode_dict)?;
             Ok(Param::from_raw(decoded))
         },
     );
@@ -2236,7 +2236,7 @@ fn a_decoder_reports_the_kind_of_each_host_value() {
             Value::List(vec![]),
             Value::Map(vec![]),
         ]);
-        let decoded = context.from_value(value, decode_dict.raw())?;
+        let decoded = context.from_value(value, decode_dict)?;
         Ok(Param::from_raw(decoded))
     });
     let src = "import host\nstruct K { kind: str }\n\
@@ -2298,12 +2298,102 @@ fn deep_structural_encode_and_decode_fit_on_a_small_stack() {
 #[test]
 fn decoding_an_init_with_over_255_args_returns_a_limit_error() {
     let params: String = (0..256).map(|i| format!("a{i}: int = 0")).collect::<Vec<_>>().join(", ");
-    let src = format!("import json\nstruct Big {{\n    x: int\n    fn init({params}) -> Big {{ Big(x: a0) }}\n}}\nlet _: Result<Big> = json.decode(\"{{}}\")");
+    let src = format!(
+        "import json\nstruct Big {{\n    x: int\n    fn init({params}) -> Big {{ Big(x: a0) }}\n}}\nlet _: Result<Big> = json.decode(\"{{}}\")"
+    );
     let (res, _, _) = run_src(Config::new(), &src);
     assert!(
         matches!(&res, Err(Error::Runtime { message, .. }) if message.contains("at most 255 arguments")),
         "expected callback argument limit error, got {res:?}"
     );
+}
+
+#[test]
+fn custom_decode_can_wrap_errors_without_double_path_or_swallowing() {
+    let src = r##"
+import json
+struct Wrapped { n: int }
+impl Decode for Wrapped {
+    fn decode(decoder: Decoder) -> Result<Wrapped> {
+        let r: Result<int> = decoder.decode()
+        match r {
+            Ok(n) => Ok(Wrapped(n: n))
+            Err(_) => Err(Error(message: "must be whole number", kind: "invalid"))
+        }
+    }
+}
+struct Propagated { n: int }
+impl Decode for Propagated {
+    fn decode(decoder: Decoder) -> Result<Propagated> {
+        Ok(Propagated(n: decoder.decode()?))
+    }
+}
+struct Swallow { n: int }
+impl Decode for Swallow {
+    fn decode(decoder: Decoder) -> Result<Swallow> {
+        let _: Result<int> = decoder.decode()
+        Ok(Swallow(n: 99))
+    }
+}
+struct Outer { w: Wrapped }
+struct OuterProp { p: Propagated }
+struct OuterSwallow { s: Swallow }
+let r1: Result<Outer> = json.decode(r#"{"w": "bad"}"#)
+let r2: Result<OuterProp> = json.decode(r#"{"p": "bad"}"#)
+let r3: Result<OuterSwallow> = json.decode(r#"{"s": "bad"}"#)
+print(r1)
+print(r2)
+print(r3)
+"##;
+    let (res, out, _) = run_src(Config::new(), src);
+    res.unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "Err(Error(message: \"$.w: must be whole number\", kind: \"invalid\"))");
+    assert_eq!(lines[1], "Err(Error(message: \"$.p: expected int\", kind: \"parse\"))");
+    assert_eq!(lines[2], "Err(Error(message: \"$.s: expected int\", kind: \"parse\"))");
+}
+
+#[test]
+fn codec_gc_reclaims_garbage_before_encoding_large_strings_and_decoding_ranges() {
+    let src = r##"
+import json
+var garbage: [str] = []
+for _ in 0..8 {
+    garbage.push("a".repeat(256 * 1024))
+}
+garbage = []
+let big = "b".repeat(512 * 1024)
+let text = json.encode(big)?
+print(text.len())
+let r: Range = json.decode(r#"{"start": 1, "end": 5}"#)?
+print(r)
+"##;
+    let limits = Limits { max_memory: Some(3 << 20), ..Limits::default() };
+    let (res, out, _) = run_src(Config::new().limits(limits), src);
+    res.unwrap();
+    assert_eq!(out, "524290\n1..5\n");
+}
+
+#[test]
+fn polymorphic_init_dictionary_dag_materializes_in_linear_time() {
+    let src = r#"
+import json
+struct Pair<A, B> {
+    left: A
+    right: B
+    fn init(left: A, right: B) -> Pair<A, B> { Pair(left: left, right: right) }
+}
+struct Level<T> {
+    v: Pair<T, T>?
+    fn init(v: Pair<T, T>?) -> Level<T> { Level(v: v) }
+}
+let decoded: Level<Level<Level<Level<Level<Level<int>>>>>> = json.decode("{}")?
+print(decoded.v)
+"#;
+    let limits = Limits { max_instructions: Some(50_000), ..Limits::default() };
+    let (res, out, _) = run_src(Config::new().limits(limits), src);
+    res.unwrap();
+    assert_eq!(out, "None\n");
 }
 
 #[test]

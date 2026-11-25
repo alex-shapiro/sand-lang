@@ -5,7 +5,9 @@
 
 use super::convert::HostError;
 use super::func::{NativeError, NativeReturn};
+use super::ty::TraitDict;
 use crate::policy::Capability;
+use crate::types::traits;
 use crate::value::Value;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::sched::ProgramCode;
@@ -382,6 +384,12 @@ impl<'a> CallContext<'a> {
         self.fiber.native_roots[index] = value;
     }
 
+    /// Returns rooted slot `index` from the fiber root stack.
+    #[inline]
+    pub(crate) fn root_at(&self, index: usize) -> VmValue {
+        self.fiber.native_roots[index]
+    }
+
     /// Returns a slice of rooted slots from the fiber root stack.
     #[inline]
     pub(crate) fn roots_slice(&self, range: std::ops::Range<usize>) -> &[VmValue] {
@@ -396,22 +404,20 @@ impl<'a> CallContext<'a> {
 
     /// Encodes `value` into a host [`Value`] using `encode_dict`.
     ///
-    /// Pass a [`TraitDict`](super::ty::TraitDict) for `Encode` as
-    /// `encode_dict`. Runs custom Sand `Encode.encode` methods synchronously.
-    /// Any attempt to wait, prompt for permissions, or self-cancel inside a
-    /// custom method fails immediately with an `"invalid"` error.
-    pub fn to_value(&mut self, value: VmValue, encode_dict: VmValue) -> Result<Value, HostError<Fail>> {
-        crate::stdlib::codec::to_value(self, value, encode_dict)
+    /// Runs custom Sand `Encode.encode` methods synchronously. Any attempt to
+    /// wait, prompt for permissions, or self-cancel inside a custom method
+    /// fails immediately with an `"invalid"` error.
+    pub fn to_value<const N: u8>(&mut self, value: VmValue, encode_dict: TraitDict<N, traits::Encode>) -> Result<Value, HostError<Fail>> {
+        crate::stdlib::codec::to_value(self, value, encode_dict.raw())
     }
 
     /// Decodes host `value` into a Sand value using `decode_dict`.
     ///
-    /// Pass a [`TraitDict`](super::ty::TraitDict) for `Decode` as
-    /// `decode_dict`. Runs custom Sand `Decode.decode` methods, `init`
-    /// constructors, and computed defaults synchronously. The returned
-    /// [`VmValue`] stays valid until the next `call` or `step`.
-    pub fn from_value(&mut self, value: Value, decode_dict: VmValue) -> Result<VmValue, HostError<Fail>> {
-        crate::stdlib::codec::from_value(self, value, decode_dict)
+    /// Runs custom Sand `Decode.decode` methods, `init` constructors, and
+    /// computed defaults synchronously. The returned [`VmValue`] stays valid
+    /// until the next `call` or `step`.
+    pub fn from_value<const N: u8>(&mut self, value: Value, decode_dict: TraitDict<N, traits::Decode>) -> Result<VmValue, HostError<Fail>> {
+        crate::stdlib::codec::from_value(self, value, decode_dict.raw())
     }
 
     /// Calls Sand function `callee` with `args` on the calling task.

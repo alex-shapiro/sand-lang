@@ -5,13 +5,12 @@ use crate::native::context::{CallContext, RootedValue};
 use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::ty::{EncodedArg, Param, TraitDict, VmVal};
 use crate::types::{ConstVal, traits};
-use crate::value::{StructDesc, Value, ValueSink, ValueSource, VariantDesc};
+use crate::value::{StructDesc, Value, ValueSink, ValueSource};
 use crate::vm::bytecode::{Const, MAX_SCANNED_SLOTS, PartFill, PartTemplate, Program, SHAPE_SLOT, Shape, ShapeKind};
 use crate::vm::meter::SLOW_BYTES_PER_FUEL_UNIT;
 use crate::vm::value::{FxHashMap, MAP_ENTRY_SIZE, MapObj, Obj, SET_ENTRY_SIZE, SetObj, VmValue};
 use crate::vm::{Fail, Vm};
 use std::any::Any;
-use std::borrow::Cow;
 use std::mem::size_of;
 use std::sync::{Arc, Weak};
 
@@ -28,6 +27,9 @@ pub(crate) const MAX_NESTING_DEPTH: usize = 512;
 
 /// Maximum nodes kept in a cached structural plan.
 const MAX_CACHED_NODES: usize = 1024;
+
+/// Maximum cached structural plans kept per VM.
+const MAX_CACHED_PLANS: usize = 256;
 
 /// Sentinel for an unresolved child entry in [`NodeKind::Structural::parts`].
 const UNRESOLVED: u32 = u32::MAX;
@@ -56,14 +58,14 @@ fn shape(prog: &Program, shape_idx: u32) -> Result<&Shape, Fail> {
     prog.shapes.get(shape_idx as usize).ok_or_else(|| Fail::internal("unknown codec shape"))
 }
 
-fn with_source_path(err: HostError<Fail>, source: &dyn DecodeSource) -> HostError<Fail> {
+fn with_source_path(err: HostError<Fail>, source: &(impl DecodeSource + ?Sized)) -> HostError<Fail> {
     match err.sand_error() {
         Some((kind, message)) => HostError::new(kind, format!("{}: {message}", source.path())),
         None => err,
     }
 }
 
-fn parse_error<T>(source: &dyn DecodeSource, msg: impl std::fmt::Display) -> CodecResult<T> {
+fn parse_error<T>(source: &(impl DecodeSource + ?Sized), msg: impl std::fmt::Display) -> CodecResult<T> {
     Err(HostError::new("parse", format!("{}: {msg}", source.path())))
 }
 
@@ -157,24 +159,35 @@ struct PlanCache {
 }
 
 impl PlanCache {
-    fn sync(&mut self, prog: &Arc<Program>, consts: &[VmValue]) {
-        if self.prog.as_ptr() != Arc::as_ptr(prog) || consts.len() < self.indexed_consts {
-            *self = PlanCache { prog: Arc::downgrade(prog), ..PlanCache::default() };
-        }
-        for (idx, &val) in consts.iter().enumerate().skip(self.indexed_consts) {
-            if matches!(prog.consts.get(idx), Some(Const::Tuple(_)))
-                && let VmValue::Obj(handle) = val
-            {
-                self.const_by_handle.insert(handle, idx as u32);
-            }
-        }
-        self.indexed_consts = consts.len();
-    }
-
     fn const_idx(&self, value: VmValue) -> Option<u32> {
         let VmValue::Obj(handle) = value else { return None };
         self.const_by_handle.get(&handle).copied()
     }
+}
+
+/// Synchronizes `vm`'s [`PlanCache`] with `prog` and newly allocated constant
+/// tuples without cloning `vm.consts`.
+fn sync_plan_cache(vm: &mut Vm, prog: &Arc<Program>) {
+    let total = vm.consts.len();
+    let (reset, start) = {
+        let cache = vm.native_state::<PlanCache>();
+        if cache.prog.as_ptr() != Arc::as_ptr(prog) || total < cache.indexed_consts { (true, 0) } else { (false, cache.indexed_consts) }
+    };
+    if !reset && start == total {
+        return;
+    }
+    let added: Vec<(u32, u32)> = (start..total)
+        .filter_map(|idx| match (prog.consts.get(idx), vm.consts[idx]) {
+            (Some(Const::Tuple(_)), VmValue::Obj(handle)) => Some((handle, idx as u32)),
+            _ => None,
+        })
+        .collect();
+    let cache = vm.native_state::<PlanCache>();
+    if reset {
+        *cache = PlanCache { prog: Arc::downgrade(prog), ..PlanCache::default() };
+    }
+    cache.const_by_handle.extend(added);
+    cache.indexed_consts = total;
 }
 
 /// Dynamic dictionaries rooted in a single VM list for the duration of a walk.
@@ -229,14 +242,7 @@ impl WalkPlan {
     fn checkout(context: &mut CallContext, prog: &Arc<Program>, root_dict: VmValue) -> Result<(WalkPlan, u32), Fail> {
         let const_idx = {
             let vm = context.vm_mut();
-            let stale = {
-                let cache = vm.native_state::<PlanCache>();
-                cache.prog.as_ptr() != Arc::as_ptr(prog) || cache.indexed_consts != vm.consts.len()
-            };
-            if stale {
-                let consts = vm.consts.clone();
-                vm.native_state::<PlanCache>().sync(prog, &consts);
-            }
+            sync_plan_cache(vm, prog);
             vm.native_state::<PlanCache>().const_idx(root_dict)
         };
         if let Some(const_idx) = const_idx {
@@ -268,7 +274,10 @@ impl WalkPlan {
             && self.live.is_empty()
             && self.plan.nodes.len() <= MAX_CACHED_NODES
         {
-            vm.native_state::<PlanCache>().plans.insert(const_idx, self.plan);
+            let plans = &mut vm.native_state::<PlanCache>().plans;
+            if plans.len() < MAX_CACHED_PLANS {
+                plans.insert(const_idx, self.plan);
+            }
         }
     }
 
@@ -378,22 +387,43 @@ impl WalkPlan {
         }
     }
 
-    /// Materializes `spec_id` as a live VM dictionary value.
+    /// Materializes `spec_id` as a live VM dictionary value, memoizing shared
+    /// DAG sub-tuples so repeated references expand linearly.
     fn materialize(&self, context: &mut CallContext, spec_id: u32) -> Result<VmValue, Fail> {
         match &self.plan.specs[spec_id as usize] {
             DictSpec::Const(c) => Ok(context.vm().consts[*c as usize]),
             DictSpec::Live(live_idx) => Ok(self.live.get(context, *live_idx)),
+            DictSpec::Tuple(_) => {
+                let mark = context.root_mark();
+                let mut memo = FxHashMap::default();
+                let res = self.materialize_dag(context, spec_id, &mut memo);
+                context.truncate_roots(mark);
+                res
+            }
+        }
+    }
+
+    fn materialize_dag(&self, context: &mut CallContext, spec_id: u32, memo: &mut FxHashMap<u32, usize>) -> Result<VmValue, Fail> {
+        if let Some(&root_idx) = memo.get(&spec_id) {
+            return Ok(context.root_at(root_idx));
+        }
+        match &self.plan.specs[spec_id as usize] {
+            DictSpec::Const(c) => Ok(context.vm().consts[*c as usize]),
+            DictSpec::Live(live_idx) => Ok(self.live.get(context, *live_idx)),
             DictSpec::Tuple(items) => {
+                context.vm().charge(1)?;
                 let len = items.len();
-                let base = context.push_roots(len, VmValue::Unit)?;
-                for (i, &item_spec) in items.iter().enumerate() {
-                    let val = self.materialize(context, item_spec)?;
-                    context.set_root(base + i, val);
+                let mut slot_roots = Vec::with_capacity(len);
+                for &item_spec in items.iter() {
+                    let val = self.materialize_dag(context, item_spec, memo)?;
+                    let slot = context.push_roots(1, val)?;
+                    slot_roots.push(slot);
                 }
                 context.step(|vm| vm.check_memory(NODE_BYTES + len * size_of::<VmValue>()))?;
-                let (vm, roots) = context.vm_and_roots();
-                let tuple = vm.heap.alloc(Obj::Tuple(roots[base..base + len].into()));
-                context.truncate_roots(base);
+                let values: Vec<VmValue> = slot_roots.iter().map(|&idx| context.root_at(idx)).collect();
+                let tuple = context.vm_mut().heap.alloc(Obj::Tuple(values.into_boxed_slice()));
+                let memo_root = context.push_roots(1, tuple)?;
+                memo.insert(spec_id, memo_root);
                 Ok(tuple)
             }
         }
@@ -408,11 +438,18 @@ impl WalkPlan {
         templates: &[PartTemplate],
     ) -> Result<usize, Fail> {
         let base = context.push_roots(templates.len(), VmValue::Unit)?;
-        for (i, template) in templates.iter().enumerate() {
-            let spec = self.eval_spec(context, prog, outer_spec, template)?;
-            let dict_val = self.materialize(context, spec)?;
-            context.set_root(base + i, dict_val);
-        }
+        let temp_mark = context.root_mark();
+        let mut memo = FxHashMap::default();
+        let res = (|| -> Result<(), Fail> {
+            for (i, template) in templates.iter().enumerate() {
+                let spec = self.eval_spec(context, prog, outer_spec, template)?;
+                let dict_val = self.materialize_dag(context, spec, &mut memo)?;
+                context.set_root(base + i, dict_val);
+            }
+            Ok(())
+        })();
+        context.truncate_roots(temp_mark);
+        res?;
         Ok(base)
     }
 
@@ -483,64 +520,122 @@ impl<S: DecodeSource + 'static> ErasedSource for S {
     }
 }
 
-macro_rules! delegate_methods {
-    ($($vis:vis fn $name:ident(&mut self $(, $arg:ident : $ty:ty)*) -> $ret:ty;)*) => {
-        $(fn $name(&mut self $(, $arg: $ty)*) -> $ret { self.0.$name($($arg),*) })*
-    };
+trait WalkSink: Sized {
+    type Target: EncodeSink + ?Sized;
+    fn target_mut(&mut self) -> &mut Self::Target;
+    fn into_erased(self) -> Box<dyn ErasedSink>;
+    fn from_erased(erased: Box<dyn ErasedSink>) -> Result<Self, Fail>;
 }
 
-struct BoxedSink(Box<dyn ErasedSink>);
-impl EncodeSink for BoxedSink {
-    delegate_methods! {
-        fn unit(&mut self) -> CodecResult;
-        fn bool(&mut self, v: bool) -> CodecResult;
-        fn int(&mut self, v: i64) -> CodecResult;
-        fn float(&mut self, v: f64) -> CodecResult;
-        fn duration(&mut self, n: i64) -> CodecResult;
-        fn str(&mut self, v: &str) -> CodecResult;
-        fn bytes(&mut self, v: &[u8]) -> CodecResult;
-        fn range(&mut self, s: i64, e: i64, inc: bool) -> CodecResult;
-        fn native(&mut self, t: &str, text: &str) -> CodecResult;
-        fn none(&mut self) -> CodecResult;
-        fn begin_some(&mut self) -> CodecResult;
-        fn begin_list(&mut self, len: usize) -> CodecResult;
-        fn begin_tuple(&mut self, len: usize) -> CodecResult;
-        fn begin_set(&mut self, len: usize) -> CodecResult;
-        fn begin_map(&mut self, len: usize) -> CodecResult;
-        fn begin_struct(&mut self, desc: &Arc<StructDesc>) -> CodecResult;
-        fn begin_variant(&mut self, desc: &Arc<VariantDesc>, len: usize) -> CodecResult;
-        fn end(&mut self) -> CodecResult;
+impl<S: EncodeSink + 'static> WalkSink for S {
+    type Target = S;
+    #[inline(always)]
+    fn target_mut(&mut self) -> &mut S {
+        self
+    }
+    fn into_erased(self) -> Box<dyn ErasedSink> {
+        Box::new(self)
+    }
+    fn from_erased(erased: Box<dyn ErasedSink>) -> Result<Self, Fail> {
+        erased.into_any().downcast::<S>().map(|s| *s).map_err(|_| Fail::internal("encode: sink type mismatch"))
     }
 }
 
-struct BoxedSource(Box<dyn ErasedSource>);
-impl DecodeSource for BoxedSource {
-    delegate_methods! {
-        fn kind(&mut self) -> CodecResult<InputKind>;
-        fn unit(&mut self) -> CodecResult;
-        fn bool(&mut self) -> CodecResult<bool>;
-        fn int(&mut self) -> CodecResult<i64>;
-        fn float(&mut self) -> CodecResult<f64>;
-        fn duration(&mut self) -> CodecResult<i64>;
-        fn str(&mut self) -> CodecResult<Cow<'_, str>>;
-        fn bytes(&mut self) -> CodecResult<Cow<'_, [u8]>>;
-        fn range(&mut self) -> CodecResult<(i64, i64, bool)>;
-        fn native(&mut self, t: &str) -> CodecResult<Cow<'_, str>>;
-        fn option(&mut self) -> CodecResult<bool>;
-        fn begin_list(&mut self) -> CodecResult;
-        fn begin_tuple(&mut self, len: usize) -> CodecResult;
-        fn begin_map(&mut self) -> CodecResult;
-        fn next(&mut self) -> CodecResult<bool>;
-        fn begin_struct(&mut self, desc: &StructDesc) -> CodecResult;
-        fn next_field(&mut self) -> CodecResult<Option<Cow<'_, str>>>;
-        fn begin_variant(&mut self, t: &str) -> CodecResult<Cow<'_, str>>;
-        fn begin_payload(&mut self, form: PayloadForm) -> CodecResult;
-        fn skip(&mut self) -> CodecResult;
-        fn end(&mut self) -> CodecResult;
-        fn take_consumed_bytes(&mut self) -> usize;
+struct ErasedSinkRef(Box<dyn ErasedSink>);
+
+impl WalkSink for ErasedSinkRef {
+    type Target = dyn EncodeSink + 'static;
+    #[inline(always)]
+    fn target_mut(&mut self) -> &mut (dyn EncodeSink + 'static) {
+        &mut *self.0
     }
-    fn path(&self) -> String {
-        self.0.path()
+    fn into_erased(self) -> Box<dyn ErasedSink> {
+        self.0
+    }
+    fn from_erased(erased: Box<dyn ErasedSink>) -> Result<Self, Fail> {
+        Ok(ErasedSinkRef(erased))
+    }
+}
+
+trait WalkSource: Sized {
+    type Target: DecodeSource + ?Sized;
+    fn target_mut(&mut self) -> &mut Self::Target;
+    fn target(&self) -> &Self::Target;
+    fn into_erased(self) -> Box<dyn ErasedSource>;
+    fn from_erased(erased: Box<dyn ErasedSource>) -> Result<Self, Fail>;
+}
+
+impl<S: DecodeSource + 'static> WalkSource for S {
+    type Target = S;
+    #[inline(always)]
+    fn target_mut(&mut self) -> &mut S {
+        self
+    }
+    #[inline(always)]
+    fn target(&self) -> &S {
+        self
+    }
+    fn into_erased(self) -> Box<dyn ErasedSource> {
+        Box::new(self)
+    }
+    fn from_erased(erased: Box<dyn ErasedSource>) -> Result<Self, Fail> {
+        erased.into_any().downcast::<S>().map(|s| *s).map_err(|_| Fail::internal("decode: source type mismatch"))
+    }
+}
+
+struct ErasedSourceRef(Box<dyn ErasedSource>);
+
+impl WalkSource for ErasedSourceRef {
+    type Target = dyn DecodeSource + 'static;
+    #[inline(always)]
+    fn target_mut(&mut self) -> &mut (dyn DecodeSource + 'static) {
+        &mut *self.0
+    }
+    #[inline(always)]
+    fn target(&self) -> &(dyn DecodeSource + 'static) {
+        &*self.0
+    }
+    fn into_erased(self) -> Box<dyn ErasedSource> {
+        self.0
+    }
+    fn from_erased(erased: Box<dyn ErasedSource>) -> Result<Self, Fail> {
+        Ok(ErasedSourceRef(erased))
+    }
+}
+
+trait SessionDirection: crate::native::NativeObject + crate::native::ObjectType + 'static {
+    type Io;
+    const MISUSE: [&'static str; 2];
+    fn session_turn(&self) -> (u64, u64);
+    fn map(sessions: &mut CodecSessions) -> &mut SessionMap<Self::Io>;
+    fn make_handle(vm: &mut Vm, session: u64, turn: u64) -> Result<VmValue, Fail>;
+}
+
+impl SessionDirection for Encoder {
+    type Io = Box<dyn ErasedSink>;
+    const MISUSE: [&'static str; 2] = ENCODER_MISUSE;
+    fn session_turn(&self) -> (u64, u64) {
+        (self.session, self.turn)
+    }
+    fn map(sessions: &mut CodecSessions) -> &mut SessionMap<Self::Io> {
+        &mut sessions.encode
+    }
+    fn make_handle(vm: &mut Vm, session: u64, turn: u64) -> Result<VmValue, Fail> {
+        Encoder { session, turn }.into_vm_value(vm)
+    }
+}
+
+impl SessionDirection for Decoder {
+    type Io = Box<dyn ErasedSource>;
+    const MISUSE: [&'static str; 2] = DECODER_MISUSE;
+    fn session_turn(&self) -> (u64, u64) {
+        (self.session, self.turn)
+    }
+    fn map(sessions: &mut CodecSessions) -> &mut SessionMap<Self::Io> {
+        &mut sessions.decode
+    }
+    fn make_handle(vm: &mut Vm, session: u64, turn: u64) -> Result<VmValue, Fail> {
+        Decoder { session, turn }.into_vm_value(vm)
     }
 }
 
@@ -549,7 +644,8 @@ struct Session<IO> {
     active_turn: u64,
     used: bool,
     depth: usize,
-    failed: Option<(String, String)>,
+    misuse: Option<String>,
+    stream_error: Option<(String, String)>,
 }
 
 impl<IO> Session<IO> {
@@ -565,13 +661,13 @@ impl<IO> Session<IO> {
     }
 
     fn misuse(&mut self, message: &str) -> HostError<Fail> {
-        self.failed.get_or_insert_with(|| ("invalid".to_string(), message.to_string()));
+        self.misuse.get_or_insert_with(|| message.to_string());
         HostError::new("invalid", message)
     }
 
-    fn record_error(&mut self, err: &HostError<Fail>) {
+    fn record_stream_error(&mut self, err: &HostError<Fail>) {
         if let Some((kind, message)) = err.sand_error() {
-            self.failed = Some((kind.to_string(), message.to_string()));
+            self.stream_error = Some((kind.to_string(), message.to_string()));
         }
     }
 }
@@ -588,11 +684,19 @@ impl<IO> Default for SessionMap<IO> {
     }
 }
 
-#[derive(Clone, Copy)]
 struct SavedTurn {
     turn: u64,
     used: bool,
     depth: usize,
+    misuse: Option<String>,
+    stream_error: Option<(String, String)>,
+}
+
+struct TurnOutcome<IO> {
+    io: Option<IO>,
+    unused: bool,
+    misuse: Option<String>,
+    stream_error: Option<(String, String)>,
 }
 
 impl<IO> SessionMap<IO> {
@@ -602,30 +706,47 @@ impl<IO> SessionMap<IO> {
         match outer {
             Some(id) => {
                 let s = self.map.get_mut(&id).ok_or_else(|| Fail::internal("codec: missing outer session"))?;
-                let saved = SavedTurn { turn: s.active_turn, used: s.used, depth: s.depth };
+                let saved = SavedTurn {
+                    turn: s.active_turn,
+                    used: s.used,
+                    depth: s.depth,
+                    misuse: s.misuse.take(),
+                    stream_error: s.stream_error.take(),
+                };
                 (s.io, s.active_turn, s.used, s.depth) = (Some(io), turn, false, depth);
                 Ok((id, turn, Some(saved)))
             }
             None => {
                 self.next_id += 1;
                 let id = self.next_id;
-                self.map.insert(id, Session { io: Some(io), active_turn: turn, used: false, depth, failed: None });
+                self.map.insert(id, Session { io: Some(io), active_turn: turn, used: false, depth, misuse: None, stream_error: None });
                 Ok((id, turn, None))
             }
         }
     }
 
-    fn pop_turn(&mut self, id: u64, turn: u64, saved: Option<SavedTurn>) -> (Option<IO>, bool, Option<(String, String)>) {
+    fn pop_turn(&mut self, id: u64, turn: u64, saved: Option<SavedTurn>) -> TurnOutcome<IO> {
         match saved {
             Some(prev) => {
                 let s = self.map.get_mut(&id).expect("outer codec session");
-                let out = (s.io.take(), s.active_turn == turn && !s.used, s.failed.take());
-                (s.active_turn, s.used, s.depth) = (prev.turn, prev.used, prev.depth);
+                let out = TurnOutcome {
+                    io: s.io.take(),
+                    unused: s.active_turn == turn && !s.used,
+                    misuse: s.misuse.take(),
+                    stream_error: s.stream_error.take(),
+                };
+                (s.active_turn, s.used, s.depth, s.misuse, s.stream_error) =
+                    (prev.turn, prev.used, prev.depth, prev.misuse, prev.stream_error);
                 out
             }
             None => {
                 let mut s = self.map.remove(&id).expect("top codec session");
-                (s.io.take(), s.active_turn == turn && !s.used, s.failed.take())
+                TurnOutcome {
+                    io: s.io.take(),
+                    unused: s.active_turn == turn && !s.used,
+                    misuse: s.misuse.take(),
+                    stream_error: s.stream_error.take(),
+                }
             }
         }
     }
@@ -637,28 +758,26 @@ struct CodecSessions {
     decode: SessionMap<Box<dyn ErasedSource>>,
 }
 
-/// Claims the session I/O for `(session_id, turn)`, runs `f`, and restores the I/O.
-fn with_session<IO, R>(
+/// Claims the session I/O for `handle`, runs `f`, and restores the I/O.
+fn with_session<D: SessionDirection, R>(
     context: &mut CallContext,
-    select: fn(&mut CodecSessions) -> &mut SessionMap<IO>,
-    session_id: u64,
-    turn: u64,
-    misuse: [&str; 2],
-    f: impl FnOnce(&mut CallContext, IO, usize) -> (Option<IO>, CodecResult<R>),
+    handle: VmVal<D>,
+    f: impl FnOnce(&mut CallContext, u64, D::Io, usize) -> (Option<D::Io>, CodecResult<R>),
 ) -> CodecResult<R> {
+    let (session_id, turn) = handle.get(&context.vm().heap)?.session_turn();
     let (io, depth) = {
-        let map = select(context.vm_mut().native_state::<CodecSessions>());
+        let map = D::map(context.vm_mut().native_state::<CodecSessions>());
         let Some(session) = map.map.get_mut(&session_id) else {
-            return Err(HostError::new("invalid", misuse[0]));
+            return Err(HostError::new("invalid", D::MISUSE[0]));
         };
         let depth = session.depth;
-        (session.claim(turn, misuse)?, depth)
+        (session.claim(turn, D::MISUSE)?, depth)
     };
-    let (io_back, result) = f(context, io, depth);
-    if let Some(session) = select(context.vm_mut().native_state::<CodecSessions>()).map.get_mut(&session_id) {
+    let (io_back, result) = f(context, session_id, io, depth);
+    if let Some(session) = D::map(context.vm_mut().native_state::<CodecSessions>()).map.get_mut(&session_id) {
         session.io = io_back;
         if let Err(err) = &result {
-            session.record_error(err);
+            session.record_stream_error(err);
         }
     }
     result
@@ -673,21 +792,10 @@ impl Encoder {
         encoder: VmVal<Encoder>,
         write: impl FnOnce(&mut CallContext, &mut dyn EncodeSink) -> CodecResult<T>,
     ) -> CodecResult<T> {
-        let (session_id, turn) = {
-            let handle = encoder.get(&context.vm().heap)?;
-            (handle.session, handle.turn)
-        };
-        with_session(
-            context,
-            |s| &mut s.encode,
-            session_id,
-            turn,
-            ENCODER_MISUSE,
-            |context, mut sink, _| {
-                let res = write(context, &mut *sink);
-                (Some(sink), res)
-            },
-        )
+        with_session(context, encoder, |context, _, mut sink, _| {
+            let res = write(context, &mut *sink);
+            (Some(sink), res)
+        })
     }
 }
 
@@ -701,41 +809,53 @@ impl Decoder {
         decoder: VmVal<Decoder>,
         read: impl FnOnce(&mut CallContext, &mut dyn DecodeSource) -> CodecResult<T>,
     ) -> CodecResult<T> {
-        let (session_id, turn) = {
-            let handle = decoder.get(&context.vm().heap)?;
-            (handle.session, handle.turn)
-        };
-        with_session(
-            context,
-            |s| &mut s.decode,
-            session_id,
-            turn,
-            DECODER_MISUSE,
-            |context, mut source, _| {
-                let res = read(context, &mut *source);
-                (Some(source), res)
-            },
-        )
+        with_session(context, decoder, |context, _, mut source, _| {
+            let res = read(context, &mut *source);
+            (Some(source), res)
+        })
     }
+}
+
+trait WalkIo<D: SessionDirection>: Sized {
+    fn into_io(self) -> D::Io;
+    fn from_io(io: D::Io) -> Result<Self, Fail>;
+}
+
+impl<S: WalkSink> WalkIo<Encoder> for S {
+    fn into_io(self) -> Box<dyn ErasedSink> {
+        self.into_erased()
+    }
+    fn from_io(io: Box<dyn ErasedSink>) -> Result<Self, Fail> {
+        Self::from_erased(io)
+    }
+}
+
+impl<S: WalkSource> WalkIo<Decoder> for S {
+    fn into_io(self) -> Box<dyn ErasedSource> {
+        self.into_erased()
+    }
+    fn from_io(io: Box<dyn ErasedSource>) -> Result<Self, Fail> {
+        Self::from_erased(io)
+    }
+}
+
+struct CustomCallResult {
+    value: VmValue,
+    unused: bool,
+    stream_error: Option<(String, String)>,
 }
 
 /// Runs a custom Sand or native codec callback with automatic session cleanup.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn run_custom_callback<S, IO>(
+fn run_custom_callback<D: SessionDirection, S: WalkIo<D>>(
     context: &mut CallContext,
     plan: &WalkPlan,
     spec_id: u32,
     extra_arg: Option<VmValue>,
     io_slot: &mut Option<S>,
-    outer_session: Option<u64>,
-    depth: usize,
-    select: fn(&mut CodecSessions) -> &mut SessionMap<IO>,
-    into_io: fn(S) -> IO,
-    from_io: fn(IO) -> Result<S, Fail>,
-    make_handle: fn(&mut Vm, u64, u64) -> Result<VmValue, Fail>,
-) -> CodecResult<(VmValue, bool)> {
+    outer: (Option<u64>, usize),
+) -> CodecResult<CustomCallResult> {
     let mark = context.root_mark();
     let extra_root = extra_arg.map(|v| context.root(v));
     let dict_val = plan.materialize(context, spec_id)?;
@@ -743,10 +863,10 @@ fn run_custom_callback<S, IO>(
     let callee = context.vm().heap.field(dict_val, 0).ok_or_else(|| Fail::internal("a codec dictionary is empty"))?;
     let callee_root = context.root(callee);
 
-    let io = into_io(io_slot.take().ok_or_else(|| Fail::internal("codec: missing stream"))?);
-    let (session_id, turn, saved) = select(context.vm_mut().native_state::<CodecSessions>()).push_turn(outer_session, io, depth)?;
+    let io = io_slot.take().ok_or_else(|| Fail::internal("codec: missing stream"))?.into_io();
+    let (session_id, turn, saved) = D::map(context.vm_mut().native_state::<CodecSessions>()).push_turn(outer.0, io, outer.1)?;
 
-    let call_res = match context.step(|vm| make_handle(vm, session_id, turn)) {
+    let call_res = match context.step(|vm| D::make_handle(vm, session_id, turn)) {
         Ok(handle_val) => match extra_root {
             Some(val_root) => context.call(context.value(callee_root), &[context.value(dict_root), context.value(val_root), handle_val]),
             None => context.call(context.value(callee_root), &[context.value(dict_root), handle_val]),
@@ -754,17 +874,17 @@ fn run_custom_callback<S, IO>(
         Err(err) => Err(err),
     };
 
-    let (recovered, unused, failed) = select(context.vm_mut().native_state::<CodecSessions>()).pop_turn(session_id, turn, saved);
-    if let Some(io_back) = recovered {
-        *io_slot = Some(from_io(io_back)?);
+    let outcome = D::map(context.vm_mut().native_state::<CodecSessions>()).pop_turn(session_id, turn, saved);
+    if let Some(io_back) = outcome.io {
+        *io_slot = Some(S::from_io(io_back)?);
     }
     context.truncate_roots(mark);
 
-    let result_val = call_res?;
-    if let Some((kind, message)) = failed {
-        return Err(HostError::new(kind, message));
+    let value = call_res?;
+    if let Some(message) = outcome.misuse {
+        return Err(HostError::new("invalid", message));
     }
-    Ok((result_val, unused))
+    Ok(CustomCallResult { value, unused: outcome.unused, stream_error: outcome.stream_error })
 }
 
 // ------------------------------------------------------------------
@@ -779,20 +899,25 @@ struct EncodeWalk<'a, 'c, S> {
     unchecked: u32,
 }
 
-impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
-    fn sink(&mut self) -> CodecResult<&mut S> {
-        self.sink.as_mut().ok_or_else(|| Fail::internal("encode: missing sink").into())
+impl<S: WalkSink> EncodeWalk<'_, '_, S> {
+    fn sink(&mut self) -> CodecResult<&mut S::Target> {
+        self.sink.as_mut().map(WalkSink::target_mut).ok_or_else(|| Fail::internal("encode: missing sink").into())
+    }
+
+    fn ensure_memory(&mut self, value: VmValue, bytes: usize) -> Result<VmValue, Fail> {
+        let mark = self.context.root_mark();
+        let scratch = self.context.root(value);
+        self.context.step(|vm| vm.check_memory(bytes))?;
+        let val = self.context.value(scratch);
+        self.context.truncate_roots(mark);
+        Ok(val)
     }
 
     fn visit(&mut self, mut value: VmValue, mut node_id: u32, depth: usize) -> CodecResult {
         let mut some_layers = 0usize;
         loop {
             if self.unchecked == 0 {
-                let mark = self.context.root_mark();
-                let scratch = self.context.root(value);
-                self.context.step(|vm| vm.check_memory(NODE_BYTES))?;
-                value = self.context.value(scratch);
-                self.context.truncate_roots(mark);
+                value = self.ensure_memory(value, NODE_BYTES)?;
                 self.unchecked = CHECKED_VALUES;
             }
             self.unchecked -= 1;
@@ -813,14 +938,22 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
                         (ShapeKind::Float, VmValue::Float(num)) => self.sink()?.float(num)?,
                         (ShapeKind::Duration, VmValue::Dur(nanos)) => self.sink()?.duration(nanos)?,
                         (ShapeKind::Str, _) => {
+                            let len = self.context.vm().heap.str(value).len();
+                            if len >= 1024 {
+                                value = self.ensure_memory(value, len)?;
+                            }
                             let text = self.context.vm().heap.str(value);
                             self.context.vm().charge_bytes(text.len())?;
-                            self.sink.as_mut().ok_or_else(|| Fail::internal("encode: missing sink"))?.str(text)?;
+                            self.sink.as_mut().ok_or_else(|| Fail::internal("encode: missing sink"))?.target_mut().str(text)?;
                         }
                         (ShapeKind::Bytes, _) => {
+                            let len = self.context.vm().heap.bytes(value).len();
+                            if len >= 1024 {
+                                value = self.ensure_memory(value, len)?;
+                            }
                             let bytes = self.context.vm().heap.bytes(value);
                             self.context.vm().charge_slow_bytes(bytes.len())?;
-                            self.sink.as_mut().ok_or_else(|| Fail::internal("encode: missing sink"))?.bytes(bytes)?;
+                            self.sink.as_mut().ok_or_else(|| Fail::internal("encode: missing sink"))?.target_mut().bytes(bytes)?;
                         }
                         (ShapeKind::Range, _) => match self.context.vm().heap.get(value) {
                             Obj::Range(start, end, inclusive) => {
@@ -833,6 +966,9 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
                             let Some(text) = self.context.vm().heap.get(value).value().map(|native| native.text()) else {
                                 return shape_mismatch();
                             };
+                            if text.len() >= 1024 {
+                                self.context.step(|vm| vm.check_memory(text.len()))?;
+                            }
                             self.context.vm().charge_bytes(text.len())?;
                             let name = &self.prog.types[*def as usize].desc().type_name;
                             self.sink()?.native(name, &text)?;
@@ -873,7 +1009,7 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
                             }
                             let len = fields.len();
                             let desc = self.prog.types[*def as usize].desc();
-                            self.sink.as_mut().ok_or_else(|| Fail::internal("encode: missing sink"))?.begin_struct(desc)?;
+                            self.sink.as_mut().ok_or_else(|| Fail::internal("encode: missing sink"))?.target_mut().begin_struct(desc)?;
                             self.visit_fields(value, node_id, 0, len, depth + 1)?;
                         }
                         (ShapeKind::Enum { def, first_variant }, _) => {
@@ -907,26 +1043,19 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
     #[cold]
     #[inline(never)]
     fn visit_custom(&mut self, value: VmValue, spec_id: u32, depth: usize) -> CodecResult {
-        let (result_val, unused) = run_custom_callback(
-            self.context,
-            self.plan,
-            spec_id,
-            Some(value),
-            self.sink,
-            self.outer_session,
-            depth,
-            |s| &mut s.encode,
-            |s| Box::new(s) as Box<dyn ErasedSink>,
-            |b| b.into_any().downcast::<S>().map(|s| *s).map_err(|_| Fail::internal("encode: sink type mismatch")),
-            |vm, session, turn| Encoder { session, turn }.into_vm_value(vm),
-        )?;
-        if let Some(err_val) = err_payload(self.context.vm(), result_val) {
-            return Err(host_error_from_sand(self.context.vm(), err_val)?);
+        let out = run_custom_callback::<Encoder, S>(self.context, self.plan, spec_id, Some(value), self.sink, (self.outer_session, depth))?;
+        match self.context.vm().as_result(out.value) {
+            Err(err_val) => Err(host_error_from_sand(self.context.vm(), err_val)?),
+            Ok(_) => {
+                if let Some((kind, message)) = out.stream_error {
+                    return Err(HostError::new(kind, message));
+                }
+                if out.unused {
+                    return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
+                }
+                Ok(())
+            }
         }
-        if unused {
-            return Err(HostError::new("invalid", "an `encode` method wrote no value to its `Encoder`"));
-        }
-        Ok(())
     }
 
     #[inline(never)]
@@ -939,7 +1068,7 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
             let elem_node = self.plan.resolve_part(self.context, self.prog, node_id, 0)?;
             let base = self.context.push_roots(1, value)?;
             for idx in 0..len {
-                let list_val = self.context.roots_slice(base..base + 1)[0];
+                let list_val = self.context.root_at(base);
                 let Some(&item) = self.context.vm().heap.list(list_val).get(idx) else { break };
                 self.visit(item, elem_node, depth + 1)?;
             }
@@ -960,7 +1089,7 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
             if self.plan.is_known_scalar(self.prog, elem_node) {
                 let mut slot = 0;
                 loop {
-                    let set_val = self.context.roots_slice(base..base + 1)[0];
+                    let set_val = self.context.root_at(base);
                     let Obj::Set(set) = self.context.vm().heap.get(set_val) else { return shape_mismatch() };
                     let Some((off, &Some(elem))) = set.entries[slot..].iter().enumerate().find(|(_, e)| e.is_some()) else { break };
                     slot += off + 1;
@@ -968,12 +1097,12 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
                 }
             } else {
                 self.context.step(|vm| vm.check_memory(NODE_BYTES))?;
-                let set_val = self.context.roots_slice(base..base + 1)[0];
+                let set_val = self.context.root_at(base);
                 let iter = self.context.vm_mut().container_iter(set_val)?;
                 self.context.set_root(base, iter);
                 let mut elem = VmValue::Unit;
                 loop {
-                    let iter = self.context.roots_slice(base..base + 1)[0];
+                    let iter = self.context.root_at(base);
                     if !self.context.vm_mut().set_step(iter, &mut elem) {
                         break;
                     }
@@ -998,7 +1127,7 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
                 let base = self.context.push_roots(1, value)?;
                 let mut slot = 0;
                 loop {
-                    let map_val = self.context.roots_slice(base..base + 1)[0];
+                    let map_val = self.context.root_at(base);
                     let Obj::Map(map) = self.context.vm().heap.get(map_val) else { return shape_mismatch() };
                     let Some((off, &Some((k, v)))) = map.entries[slot..].iter().enumerate().find(|(_, e)| e.is_some()) else { break };
                     slot += off + 1;
@@ -1010,18 +1139,18 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
                 let base = self.context.push_roots(2, VmValue::Unit)?;
                 self.context.set_root(base, value);
                 self.context.step(|vm| vm.check_memory(NODE_BYTES))?;
-                let map_val = self.context.roots_slice(base..base + 1)[0];
+                let map_val = self.context.root_at(base);
                 let iter = self.context.vm_mut().container_iter(map_val)?;
                 self.context.set_root(base, iter);
                 let mut pair = [VmValue::Unit; 2];
                 loop {
-                    let iter = self.context.roots_slice(base..base + 1)[0];
+                    let iter = self.context.root_at(base);
                     if !self.context.vm_mut().map_step(iter, &mut pair) {
                         break;
                     }
                     self.context.set_root(base + 1, pair[1]);
                     self.visit(pair[0], key_node, depth + 1)?;
-                    let entry_val = self.context.roots_slice(base + 1..base + 2)[0];
+                    let entry_val = self.context.root_at(base + 1);
                     self.visit(entry_val, val_node, depth + 1)?;
                 }
                 self.context.truncate_roots(base);
@@ -1035,7 +1164,7 @@ impl<S: EncodeSink + 'static> EncodeWalk<'_, '_, S> {
         if len > 0 {
             let base = self.context.push_roots(1, value)?;
             for idx in 0..len {
-                let container = self.context.roots_slice(base..base + 1)[0];
+                let container = self.context.root_at(base);
                 let field_val =
                     self.context.vm().heap.field(container, idx).ok_or_else(|| Fail::internal("encode: field out of bounds"))?;
                 let child_node = self.plan.resolve_part(self.context, self.prog, node_id, part_base + idx)?;
@@ -1062,7 +1191,7 @@ pub(crate) fn encode<S: EncodeSink + 'static, R>(
     finish(context, sink)
 }
 
-fn encode_inner<S: EncodeSink + 'static>(
+fn encode_inner<S: WalkSink>(
     context: &mut CallContext,
     sink_slot: &mut Option<S>,
     outer_session: Option<u64>,
@@ -1123,9 +1252,9 @@ struct DecodeWalk<'a, 'c, S> {
     unchecked: u32,
 }
 
-impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
-    fn source(&mut self) -> CodecResult<&mut S> {
-        self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source").into())
+impl<S: WalkSource> DecodeWalk<'_, '_, S> {
+    fn source(&mut self) -> CodecResult<&mut S::Target> {
+        self.source.as_mut().map(WalkSource::target_mut).ok_or_else(|| Fail::internal("decode: missing source").into())
     }
 
     fn visit(&mut self, mut node_id: u32, depth: usize) -> CodecResult<VmValue> {
@@ -1154,7 +1283,7 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
                         ShapeKind::Float => VmValue::Float(self.source()?.float()?),
                         ShapeKind::Duration => VmValue::Dur(self.source()?.duration()?),
                         ShapeKind::Str => {
-                            let text = self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?.str()?;
+                            let text = self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?.target_mut().str()?;
                             self.context.vm().charge_bytes(text.len())?;
                             self.context.step(|vm| {
                                 vm.check_memory(NODE_BYTES.saturating_add(text.len()))?;
@@ -1162,7 +1291,8 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
                             })?
                         }
                         ShapeKind::Bytes => {
-                            let bytes = self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?.bytes()?;
+                            let bytes =
+                                self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?.target_mut().bytes()?;
                             self.context.vm().charge_bytes(bytes.len())?;
                             self.context.step(|vm| {
                                 vm.check_memory(NODE_BYTES.saturating_add(bytes.len()))?;
@@ -1171,14 +1301,29 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
                         }
                         ShapeKind::Range => {
                             let (start, end, inclusive) = self.source()?.range()?;
-                            self.context.vm_mut().heap.alloc(Obj::Range(start, end, inclusive))
+                            self.context.step(|vm| {
+                                vm.check_memory(NODE_BYTES)?;
+                                Ok::<_, Fail>(vm.heap.alloc(Obj::Range(start, end, inclusive)))
+                            })?
                         }
                         ShapeKind::Native(def, parse) => {
                             let type_name = &self.prog.types[*def as usize].desc().type_name;
-                            let text = self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?.native(type_name)?;
+                            let text = self
+                                .source
+                                .as_mut()
+                                .ok_or_else(|| Fail::internal("decode: missing source"))?
+                                .target_mut()
+                                .native(type_name)?;
                             self.context.vm().charge_bytes(text.len())?;
                             match parse(&text) {
-                                Ok(obj) => self.context.vm_mut().heap.alloc(obj),
+                                Ok(obj) => {
+                                    let size = obj.size();
+                                    let mut obj = Some(obj);
+                                    self.context.step(|vm| {
+                                        vm.check_memory(size)?;
+                                        Ok::<_, Fail>(vm.heap.alloc(obj.take().expect("native object")))
+                                    })?
+                                }
                                 Err(msg) => {
                                     drop(text);
                                     return parse_error(self.source()?, msg);
@@ -1216,7 +1361,7 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
             self.source()?.end()?;
             self.context.set_root(self.scratch, value);
             self.context.step(|vm| vm.check_memory(NODE_BYTES))?;
-            let inner = self.context.roots_slice(self.scratch..self.scratch + 1)[0];
+            let inner = self.context.root_at(self.scratch);
             value = self.context.vm_mut().some(inner);
         }
         Ok(value)
@@ -1225,27 +1370,28 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
     #[cold]
     #[inline(never)]
     fn visit_custom(&mut self, spec_id: u32, depth: usize) -> CodecResult<VmValue> {
-        let (result_val, unread) = run_custom_callback(
-            self.context,
-            self.plan,
-            spec_id,
-            None,
-            self.source,
-            self.outer_session,
-            depth,
-            |s| &mut s.decode,
-            |s| Box::new(s) as Box<dyn ErasedSource>,
-            |b| b.into_any().downcast::<S>().map(|s| *s).map_err(|_| Fail::internal("decode: source type mismatch")),
-            |vm, session, turn| Decoder { session, turn }.into_vm_value(vm),
-        )?;
-        let source = self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?;
-        if let Some(err_val) = err_payload(self.context.vm(), result_val) {
-            return Err(with_source_path(host_error_from_sand(self.context.vm(), err_val)?, source));
+        let out = run_custom_callback::<Decoder, S>(self.context, self.plan, spec_id, None, self.source, (self.outer_session, depth))?;
+        match self.context.vm().as_result(out.value) {
+            Err(err_val) => {
+                let err = host_error_from_sand(self.context.vm(), err_val)?;
+                if let Some((kind, message)) = &out.stream_error
+                    && err.sand_error() == Some((kind.as_str(), message.as_str()))
+                {
+                    return Err(err);
+                }
+                let source = self.source.as_ref().ok_or_else(|| Fail::internal("decode: missing source"))?.target();
+                Err(with_source_path(err, source))
+            }
+            Ok(ok_val) => {
+                if let Some((kind, message)) = out.stream_error {
+                    return Err(HostError::new(kind, message));
+                }
+                if out.unused {
+                    self.source()?.skip()?;
+                }
+                Ok(ok_val)
+            }
         }
-        if unread {
-            source.skip()?;
-        }
-        Ok(self.context.vm().heap.variant_payload_if(&result_val, self.prog.ids.ok))
     }
 
     #[inline(never)]
@@ -1254,18 +1400,21 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
         self.source()?.begin_list()?;
         let elem_node = self.plan.resolve_part(self.context, self.prog, node_id, 0)?;
         let base = self.context.push_roots(1, VmValue::Unit)?;
-        let list = self.context.vm_mut().heap.new_list(Vec::new());
+        let list = self.context.step(|vm| {
+            vm.check_memory(NODE_BYTES)?;
+            Ok::<_, Fail>(vm.heap.new_list(Vec::new()))
+        })?;
         self.context.set_root(base, list);
         while self.source()?.next()? {
             let elem = self.visit(elem_node, depth + 1)?;
             self.context.set_root(self.scratch, elem);
-            let list = self.context.roots_slice(base..base + 1)[0];
+            let list = self.context.root_at(base);
             check_list_growth(self.context, list)?;
-            let elem = self.context.roots_slice(self.scratch..self.scratch + 1)[0];
+            let elem = self.context.root_at(self.scratch);
             self.context.vm_mut().heap.list_push(list, elem).map_err(Fail::limit)?;
         }
         self.source()?.end()?;
-        let out = self.context.roots_slice(base..base + 1)[0];
+        let out = self.context.root_at(base);
         self.context.truncate_roots(base);
         Ok(out)
     }
@@ -1276,18 +1425,21 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
         self.source()?.begin_list()?;
         let elem_node = self.plan.resolve_part(self.context, self.prog, node_id, 0)?;
         let base = self.context.push_roots(1, VmValue::Unit)?;
-        let set = self.context.vm_mut().heap.alloc(Obj::Set(Box::<SetObj>::default()));
+        let set = self.context.step(|vm| {
+            vm.check_memory(NODE_BYTES)?;
+            Ok::<_, Fail>(vm.heap.alloc(Obj::Set(Box::<SetObj>::default())))
+        })?;
         self.context.set_root(base, set);
         while self.source()?.next()? {
             let elem = self.visit(elem_node, depth + 1)?;
             self.context.set_root(self.scratch, elem);
-            let set = self.context.roots_slice(base..base + 1)[0];
+            let set = self.context.root_at(base);
             self.context.step(|vm| check_set_or_map_growth(vm, set, elem))?;
-            let elem = self.context.roots_slice(self.scratch..self.scratch + 1)[0];
+            let elem = self.context.root_at(self.scratch);
             self.context.vm_mut().set_add(set, elem)?;
         }
         self.source()?.end()?;
-        let out = self.context.roots_slice(base..base + 1)[0];
+        let out = self.context.root_at(base);
         self.context.truncate_roots(base);
         Ok(out)
     }
@@ -1299,7 +1451,10 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
         let key_node = self.plan.resolve_part(self.context, self.prog, node_id, 0)?;
         let val_node = self.plan.resolve_part(self.context, self.prog, node_id, 1)?;
         let base = self.context.push_roots(2, VmValue::Unit)?;
-        let map = self.context.vm_mut().heap.alloc(Obj::Map(Box::<MapObj>::default()));
+        let map = self.context.step(|vm| {
+            vm.check_memory(NODE_BYTES)?;
+            Ok::<_, Fail>(vm.heap.alloc(Obj::Map(Box::<MapObj>::default())))
+        })?;
         self.context.set_root(base, map);
         while self.source()?.next()? {
             let key = self.visit(key_node, depth + 1)?;
@@ -1309,11 +1464,11 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
             let pair = self.context.roots_slice(base..base + 2);
             let (map, key) = (pair[0], pair[1]);
             self.context.step(|vm| check_set_or_map_growth(vm, map, key))?;
-            let entry_val = self.context.roots_slice(self.scratch..self.scratch + 1)[0];
+            let entry_val = self.context.root_at(self.scratch);
             self.context.vm_mut().map_insert(map, key, entry_val)?;
         }
         self.source()?.end()?;
-        let out = self.context.roots_slice(base..base + 1)[0];
+        let out = self.context.root_at(base);
         self.context.truncate_roots(base);
         Ok(out)
     }
@@ -1346,8 +1501,12 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
     fn visit_enum(&mut self, node_id: u32, shape_idx: u32, def: u32, first_variant: u32, depth: usize) -> CodecResult<VmValue> {
         let first = first_variant as usize;
         let enum_rt = &self.prog.types[def as usize];
-        let name =
-            self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?.begin_variant(&enum_rt.desc().type_name)?;
+        let name = self
+            .source
+            .as_mut()
+            .ok_or_else(|| Fail::internal("decode: missing source"))?
+            .target_mut()
+            .begin_variant(&enum_rt.desc().type_name)?;
         let found = self.prog.variants[first..].iter().take_while(|v| v.def == def).position(|v| v.name == *name);
         let Some(variant_offset) = found else {
             let name = crate::stdlib::truncate(&name, 64).to_string();
@@ -1392,7 +1551,7 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
             Some(names) => {
                 let mut guess = 0usize;
                 loop {
-                    let next = self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?.next_field()?;
+                    let next = self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?.target_mut().next_field()?;
                     let Some(name) = next else { break };
                     let found = match &shape.slot_index {
                         Some(index) if !matches!(target, SlotTarget::Variant { .. }) => index.get(&*name).map(|&s| s as usize),
@@ -1414,6 +1573,8 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
                         }
                         None => {
                             drop(name);
+                            let consumed = self.source()?.take_consumed_bytes();
+                            self.context.vm().charge(1 + (consumed / SLOW_BYTES_PER_FUEL_UNIT) as u64)?;
                             self.source()?.skip()?;
                         }
                     }
@@ -1496,7 +1657,7 @@ impl<S: DecodeSource + 'static> DecodeWalk<'_, '_, S> {
                 let res = self.context.call(self.context.vm().consts[init.func as usize], &args)?;
                 self.context.truncate_roots(dict_base);
                 if let Some(err_val) = err_payload(self.context.vm(), res) {
-                    let source = self.source.as_mut().ok_or_else(|| Fail::internal("decode: missing source"))?;
+                    let source = self.source.as_ref().ok_or_else(|| Fail::internal("decode: missing source"))?.target();
                     Err(with_source_path(host_error_from_sand(self.context.vm(), err_val)?, source))
                 } else if self.context.vm().heap.variant_id(res) == self.prog.ids.ok {
                     Ok(self.context.vm().heap.variant_payload_if(&res, self.prog.ids.ok))
@@ -1524,7 +1685,7 @@ pub(crate) fn decode<S: DecodeSource + 'static, R>(
     finish(context, value, source)
 }
 
-fn decode_inner<S: DecodeSource + 'static>(
+fn decode_inner<S: WalkSource>(
     context: &mut CallContext,
     source_slot: &mut Option<S>,
     outer_session: Option<u64>,
@@ -1690,41 +1851,19 @@ pub(crate) fn from_value(context: &mut CallContext, value: Value, dict: VmValue)
 }
 
 fn encode_with_encoder(context: &mut CallContext, dict: VmValue, value: VmValue, encoder: VmVal<Encoder>) -> CodecResult {
-    let (session_id, turn) = {
-        let handle = encoder.get(&context.vm().heap)?;
-        (handle.session, handle.turn)
-    };
-    with_session(
-        context,
-        |s| &mut s.encode,
-        session_id,
-        turn,
-        ENCODER_MISUSE,
-        |context, sink, depth| {
-            let mut slot = Some(BoxedSink(sink));
-            let res = encode_inner(context, &mut slot, Some(session_id), depth, value, dict);
-            (slot.take().map(|b| b.0), res)
-        },
-    )
+    with_session(context, encoder, |context, session_id, sink, depth| {
+        let mut slot = Some(ErasedSinkRef(sink));
+        let res = encode_inner(context, &mut slot, Some(session_id), depth, value, dict);
+        (slot.take().map(|b| b.0), res)
+    })
 }
 
 fn decode_with_decoder(context: &mut CallContext, dict: VmValue, decoder: VmVal<Decoder>) -> CodecResult<Param<0>> {
-    let (session_id, turn) = {
-        let handle = decoder.get(&context.vm().heap)?;
-        (handle.session, handle.turn)
-    };
-    with_session(
-        context,
-        |s| &mut s.decode,
-        session_id,
-        turn,
-        DECODER_MISUSE,
-        |context, source, depth| {
-            let mut slot = Some(BoxedSource(source));
-            let res = decode_inner(context, &mut slot, Some(session_id), depth, dict);
-            (slot.take().map(|b| b.0), res.map(Param::from_raw))
-        },
-    )
+    with_session(context, decoder, |context, session_id, source, depth| {
+        let mut slot = Some(ErasedSourceRef(source));
+        let res = decode_inner(context, &mut slot, Some(session_id), depth, dict);
+        (slot.take().map(|b| b.0), res.map(Param::from_raw))
+    })
 }
 
 /// Registers prelude types and native functions for `Encode` and `Decode`.
