@@ -1,48 +1,16 @@
-//! Enforces execution limits and cancellation.
+//! Enforces execution limits and cancellation through a fuel counter.
 //!
-//! Checking system clocks and atomic flags on every bytecode instruction is
-//! expensive. [`VmMeter`] amortizes checks through a single fuel counter that
-//! enforces instruction, CPU-time, and wall-clock limits.
-//!
-//! ## How Fuel Works
-//!
-//! - [`VmMeter`] counts total fuel spent upward in `total_fuel`.
-//! - At the start of a fiber turn, the scheduler sets `slice_end_fuel` and
-//!   `next_check_fuel` to `total_fuel + SLICE_FUEL`, capped at
-//!   `max_instructions`.
-//! - The interpreter keeps a local countdown (`next_check_fuel - total_fuel`)
-//!   in a register and deducts fuel at calls and loop jumps. Before a native
-//!   call or at the end of a slice, it commits spent bytecode fuel back into
-//!   `total_fuel`. After a native call, it reloads its countdown.
-//! - If `total_fuel` exceeds `next_check_fuel`, the meter checks the interrupt
-//!   flag, instruction limit, and CPU and wall-clock deadlines, then advances
-//!   `next_check_fuel` by [`LIMIT_CHECK_FUEL_INTERVAL`].
-//! - Because `slice_end_fuel` is tracked separately from `next_check_fuel`,
-//!   synchronous callbacks can keep running past the slice limit while the
-//!   outer fiber still preempts after the native call returns.
+//! [`VmMeter`] checks for interrupts and execution limits at fixed fuel intervals.
 //!
 //! ## Cost Model
 //!
-//! A fuel unit corresponds to a simple bytecode loop iteration. Native
-//! functions and runtime helpers must charge fuel in proportion to their work
-//! so they cannot bypass execution limits.
+//! A fuel unit equals a bytecode loop iteration. Native functions and
+//! runtime helpers must charge fuel in proportion to their work.
 //!
-//! - [`VmMeter::charge`] charges a unit for each logical item processed, such as
-//!   a container element, traversal node, or match.
-//! - [`VmMeter::charge_bytes`] charges a unit per [`BYTES_PER_FUEL_UNIT`] bytes
-//!   for bulk memory work such as copying, comparing, or scanning.
-//! - [`VmMeter::charge_slow_bytes`] charges a unit per
-//!   [`SLOW_BYTES_PER_FUEL_UNIT`] bytes for per-byte algorithms such as
-//!   hashing, regex search, and encoding.
-//!
-//! Charge the estimated cost of an uninterruptible operation before starting
-//! it. The operation then stops immediately if the remaining budget is too
-//! small. If you cannot estimate cost in advance, meter the operation by
-//! elapsed time. See `stdlib/regex.rs` for an example.
-//!
-//! Shared substructure can cause formatting, encoding, or comparison to expand
-//! a small heap graph exponentially. Charge fuel as you traverse nodes or emit
-//! output rather than by the input's heap size.
+//! - Charge uninterruptible work before it starts. If you cannot estimate cost
+//!   up front, meter by elapsed time. See `stdlib/regex.rs`.
+//! - Charge while traversing nodes or emitting output. Shared heap values can
+//!   expand exponentially.
 
 use super::Fail;
 use crate::engine::LimitKind;
