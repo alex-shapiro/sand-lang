@@ -157,7 +157,8 @@ global evil_outer
 
 fn Evil.encode(self, enc) {
     gget outer evil_outer
-    pop _ outer
+    pop inner outer
+    unit inner
     native _ vm.collect
     field x self Evil.x
     native _ enc.int enc x

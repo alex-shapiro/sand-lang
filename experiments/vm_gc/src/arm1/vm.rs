@@ -493,7 +493,7 @@ impl Vm {
         }
         self.stack[base..base + args.len()].copy_from_slice(args);
         self.sync_depth += 1;
-        let result = self.enter(func, closure, base, regs).and_then(|_| self.execute(depth));
+        let result = self.enter(func, closure, base, args.len(), regs).and_then(|_| self.execute(depth));
         self.sync_depth -= 1;
         self.frames.truncate(depth);
         match result? {
@@ -503,12 +503,10 @@ impl Vm {
     }
 
     /// Pushes a frame whose arguments are already at `base`.
-    fn enter(&mut self, func: u16, closure: Value, base: usize, regs: usize) -> Result<()> {
+    fn enter(&mut self, func: u16, closure: Value, base: usize, argc: usize, regs: usize) -> Result<()> {
         self.push_frame(Frame { func, base: base as u32, pc: 0, ret: 0, closure })?;
         self.ensure_stack(base + regs)?;
-        if self.stack.len() < base + regs {
-            self.stack.resize(base + regs, Value::Unit);
-        }
+        self.clear_locals(base + argc, base + regs);
         Ok(())
     }
 
@@ -686,6 +684,9 @@ impl Vm {
                         if self.frames.len() == entry_depth {
                             return Ok(Exit::Return(v));
                         }
+                        let caller = *self.frames.last().expect("a caller");
+                        let caller_top = caller.base as usize + program.funcs[caller.func as usize].regs as usize;
+                        self.stack[frame.base as usize..caller_top].fill(Value::Unit);
                         self.stack[frame.ret as usize] = v;
                         continue 'frame;
                     }
@@ -845,9 +846,7 @@ impl Vm {
         let base = caller_base + b as usize;
         self.push_frame(Frame { func, base: base as u32, pc: 0, ret: (caller_base + dst as usize) as u32, closure })?;
         self.ensure_stack(base + regs)?;
-        if self.stack.len() < base + regs {
-            self.stack.resize(base + regs, Value::Unit);
-        }
+        self.clear_locals(base + argc as usize, base + regs);
         Ok(())
     }
 
@@ -867,6 +866,16 @@ impl Vm {
         s.push_str(self.str(&a)?);
         s.push_str(self.str(&b)?);
         Ok(self.insert(Obj::Str(s.into_boxed_str())))
+    }
+
+    /// Sets registers `start..end` of a new frame to `Unit`, so that
+    /// collections do not keep stale handles from earlier frames alive.
+    #[inline(always)]
+    fn clear_locals(&mut self, start: usize, end: usize) {
+        if self.stack.len() < end {
+            self.stack.resize(end, Value::Unit);
+        }
+        self.stack[start..end].fill(Value::Unit);
     }
 
     fn map_set(&mut self, map: Value, key: Value, value: Value) -> Result<()> {
@@ -1036,9 +1045,7 @@ impl Vm {
 }
 
 /// Returns the registers of every frame in `frames`. Registers above them
-/// may hold stale handles, so collections do not trace them. Registers of a
-/// frame may hold stale handles from an earlier frame, which collections
-/// keep alive until the frame overwrites them.
+/// hold stale handles, so collections do not trace them.
 fn live_registers<'a>(program: &Program, stack: &'a [Value], frames: &[Frame]) -> &'a [Value] {
     let top = frames.last().map_or(0, |f| f.base as usize + program.funcs[f.func as usize].regs as usize);
     &stack[..top.min(stack.len())]
