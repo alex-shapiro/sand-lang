@@ -538,7 +538,7 @@ fn decode_callback<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, func: u16
         d.pos = cx.pos;
         d.scratch = std::mem::take(&mut cx.scratch);
     }
-    let result = vm.call_function(func, Value::Unit, &[decoder.clone()]);
+    let result = vm.call_function(func, Value::Unit, std::slice::from_ref(&decoder));
     let mut d = decoder_obj(&decoder)?.lock()?;
     cx.pos = d.pos;
     cx.scratch = std::mem::take(&mut d.scratch);
@@ -663,9 +663,7 @@ pub fn core_module() -> NativeModule {
         })
     });
     m.function("dec.close_variant", |vm, args| with_decoder(vm, args, |_, r, src, pos, _| r.close_variant(src, pos)).map(|_| Value::Unit));
-    m.function("dec.skip", |vm, args| {
-        with_decoder(vm, args, |vm, r, src, pos, _| r.skip(src, pos, &mut vm.fuel)).map(|_| Value::Unit)
-    });
+    m.function("dec.skip", |vm, args| with_decoder(vm, args, |vm, r, src, pos, _| r.skip(src, pos, &mut vm.fuel)).map(|_| Value::Unit));
     m.function("dec.value", |vm, args| {
         let decoder = vm.arg(args, 0).clone();
         let ty = int_arg(vm, args, 1)? as u16;

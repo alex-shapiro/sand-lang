@@ -627,11 +627,7 @@ impl<'a> FuncAssembler<'a> {
                 match m {
                     "call" | "closure" => {
                         let func = self.asm.program.func(&symbol).ok_or_else(|| format!("unknown function `{symbol}`"))?;
-                        if m == "call" {
-                            Op::Call { dst, func, base, argc: count }
-                        } else {
-                            Op::Closure { dst, func, base, count }
-                        }
+                        if m == "call" { Op::Call { dst, func, base, argc: count } } else { Op::Closure { dst, func, base, count } }
                     }
                     "callm" => Op::CallMethod { dst, method: self.asm.method(&symbol), base, argc: count },
                     "native" => Op::CallNative { dst, native: self.asm.native(&symbol), base, argc: count },

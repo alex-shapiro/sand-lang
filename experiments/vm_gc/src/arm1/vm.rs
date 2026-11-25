@@ -1026,7 +1026,6 @@ impl Vm {
     pub fn live_objects(&self) -> usize {
         self.heap.live_objects
     }
-
 }
 
 /// Returns the registers of every frame in `frames`. Registers above them

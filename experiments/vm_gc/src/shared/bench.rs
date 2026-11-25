@@ -42,16 +42,106 @@ struct Operation {
 }
 
 const OPERATIONS: &[Operation] = &[
-    Operation { group: "B1", name: "build_walk", variant: Variant::Structural, setup: &[], function: "build_walk", arg: Some(USERS), items: USERS, cleanup: true },
-    Operation { group: "B1", name: "micro", variant: Variant::Structural, setup: &[], function: "micro", arg: Some(MICRO_ITERS), items: MICRO_ITERS, cleanup: true },
-    Operation { group: "B2", name: "encode", variant: Variant::Structural, setup: &[("setup_doc", Some(USERS))], function: "bench_encode", arg: None, items: USERS, cleanup: false },
-    Operation { group: "B2", name: "decode", variant: Variant::Structural, setup: &[("setup_text", Some(USERS))], function: "bench_decode", arg: None, items: USERS, cleanup: true },
-    Operation { group: "B2", name: "small_encode", variant: Variant::Structural, setup: &[("setup_address", None)], function: "bench_small_encode", arg: Some(SMALL_ITERS), items: SMALL_ITERS, cleanup: true },
-    Operation { group: "B2", name: "small_decode", variant: Variant::Structural, setup: &[("setup_address", None)], function: "bench_small_decode", arg: Some(SMALL_ITERS), items: SMALL_ITERS, cleanup: true },
-    Operation { group: "B3", name: "encode", variant: Variant::Custom, setup: &[("setup_doc", Some(USERS))], function: "bench_encode", arg: None, items: USERS, cleanup: false },
-    Operation { group: "B3", name: "decode", variant: Variant::Custom, setup: &[("setup_text", Some(USERS))], function: "bench_decode", arg: None, items: USERS, cleanup: true },
-    Operation { group: "B3", name: "small_encode", variant: Variant::Custom, setup: &[("setup_address", None)], function: "bench_small_encode", arg: Some(SMALL_ITERS), items: SMALL_ITERS, cleanup: true },
-    Operation { group: "B3", name: "small_decode", variant: Variant::Custom, setup: &[("setup_address", None)], function: "bench_small_decode", arg: Some(SMALL_ITERS), items: SMALL_ITERS, cleanup: true },
+    Operation {
+        group: "B1",
+        name: "build_walk",
+        variant: Variant::Structural,
+        setup: &[],
+        function: "build_walk",
+        arg: Some(USERS),
+        items: USERS,
+        cleanup: true,
+    },
+    Operation {
+        group: "B1",
+        name: "micro",
+        variant: Variant::Structural,
+        setup: &[],
+        function: "micro",
+        arg: Some(MICRO_ITERS),
+        items: MICRO_ITERS,
+        cleanup: true,
+    },
+    Operation {
+        group: "B2",
+        name: "encode",
+        variant: Variant::Structural,
+        setup: &[("setup_doc", Some(USERS))],
+        function: "bench_encode",
+        arg: None,
+        items: USERS,
+        cleanup: false,
+    },
+    Operation {
+        group: "B2",
+        name: "decode",
+        variant: Variant::Structural,
+        setup: &[("setup_text", Some(USERS))],
+        function: "bench_decode",
+        arg: None,
+        items: USERS,
+        cleanup: true,
+    },
+    Operation {
+        group: "B2",
+        name: "small_encode",
+        variant: Variant::Structural,
+        setup: &[("setup_address", None)],
+        function: "bench_small_encode",
+        arg: Some(SMALL_ITERS),
+        items: SMALL_ITERS,
+        cleanup: true,
+    },
+    Operation {
+        group: "B2",
+        name: "small_decode",
+        variant: Variant::Structural,
+        setup: &[("setup_address", None)],
+        function: "bench_small_decode",
+        arg: Some(SMALL_ITERS),
+        items: SMALL_ITERS,
+        cleanup: true,
+    },
+    Operation {
+        group: "B3",
+        name: "encode",
+        variant: Variant::Custom,
+        setup: &[("setup_doc", Some(USERS))],
+        function: "bench_encode",
+        arg: None,
+        items: USERS,
+        cleanup: false,
+    },
+    Operation {
+        group: "B3",
+        name: "decode",
+        variant: Variant::Custom,
+        setup: &[("setup_text", Some(USERS))],
+        function: "bench_decode",
+        arg: None,
+        items: USERS,
+        cleanup: true,
+    },
+    Operation {
+        group: "B3",
+        name: "small_encode",
+        variant: Variant::Custom,
+        setup: &[("setup_address", None)],
+        function: "bench_small_encode",
+        arg: Some(SMALL_ITERS),
+        items: SMALL_ITERS,
+        cleanup: true,
+    },
+    Operation {
+        group: "B3",
+        name: "small_decode",
+        variant: Variant::Custom,
+        setup: &[("setup_address", None)],
+        function: "bench_small_decode",
+        arg: Some(SMALL_ITERS),
+        items: SMALL_ITERS,
+        cleanup: true,
+    },
 ];
 
 fn call<E: ArmEngine>(e: &mut E, name: &str, arg: Option<i64>) -> HostValue {
@@ -89,7 +179,14 @@ pub fn run<E: ArmEngine>(runs: usize, reps: usize, filter: &str) -> Vec<Row> {
                 }
             }
         }
-        rows.push(Row { group: op.group, name: op.name, items: op.items, op: best.0, cleanup: op.cleanup.then_some(best.1), total: best.2 });
+        rows.push(Row {
+            group: op.group,
+            name: op.name,
+            items: op.items,
+            op: best.0,
+            cleanup: op.cleanup.then_some(best.1),
+            total: best.2,
+        });
     }
     rows
 }

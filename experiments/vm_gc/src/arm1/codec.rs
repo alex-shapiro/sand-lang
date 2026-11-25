@@ -425,7 +425,7 @@ fn decode_map<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, p: &Program, v
     }
     let n = (vm.root_mark() - mark) / 2;
     vm.reserve_object(n * size_of::<(Value, Value)>())?;
-    let entries = vm.roots_from(mark).chunks_exact(2).map(|kv| (kv[0], kv[1])).collect();
+    let entries = vm.roots_from(mark).as_chunks::<2>().0.iter().map(|kv| (kv[0], kv[1])).collect();
     vm.truncate_roots(mark);
     Ok(vm.insert(Obj::Map(entries)))
 }
@@ -687,19 +687,15 @@ pub fn core_module() -> NativeModule {
     m.function("dec.open_map", |vm, args| with_decoder(vm, args, |r, src, pos, _, _| r.open_map(src, pos)).map(|_| Value::Unit));
     m.function("dec.open_list", |vm, args| with_decoder(vm, args, |r, src, pos, _, _| r.open_list(src, pos)).map(|_| Value::Unit));
     m.function("dec.next_item", |vm, args| Ok(Value::Bool(with_decoder(vm, args, |r, src, pos, _, _| r.next_item(src, pos))?)));
-    m.function("dec.next_key", |vm, args| {
-        match with_decoder(vm, args, |r, src, pos, scratch, _| r.next_key(src, pos, scratch))? {
-            Some(span) => span_to_str(vm, args, span),
-            None => Ok(Value::None),
-        }
+    m.function("dec.next_key", |vm, args| match with_decoder(vm, args, |r, src, pos, scratch, _| r.next_key(src, pos, scratch))? {
+        Some(span) => span_to_str(vm, args, span),
+        None => Ok(Value::None),
     });
     m.function("dec.open_variant", |vm, args| {
         let span = with_decoder(vm, args, |r, src, pos, scratch, _| r.open_variant(src, pos, scratch))?.0;
         span_to_str(vm, args, span)
     });
-    m.function("dec.close_variant", |vm, args| {
-        with_decoder(vm, args, |r, src, pos, _, _| r.close_variant(src, pos)).map(|_| Value::Unit)
-    });
+    m.function("dec.close_variant", |vm, args| with_decoder(vm, args, |r, src, pos, _, _| r.close_variant(src, pos)).map(|_| Value::Unit));
     m.function("dec.skip", |vm, args| with_decoder(vm, args, |r, src, pos, _, fuel| r.skip(src, pos, fuel)).map(|_| Value::Unit));
     m.function("dec.value", |vm, args| {
         let decoder = vm.arg(args, 0);
@@ -709,4 +705,3 @@ pub fn core_module() -> NativeModule {
     });
     m
 }
-

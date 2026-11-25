@@ -43,12 +43,21 @@ pub enum Obj {
     /// A free slot and the next free slot.
     Free(u32),
     Str(Box<str>),
-    Struct { ty: u16, fields: Box<[Value]> },
-    Variant { tag: u16, fields: Box<[Value]> },
+    Struct {
+        ty: u16,
+        fields: Box<[Value]>,
+    },
+    Variant {
+        tag: u16,
+        fields: Box<[Value]>,
+    },
     List(Vec<Value>),
     /// Entries in insertion order.
     Map(Vec<(Value, Value)>),
-    Closure { func: u16, captures: Box<[Value]> },
+    Closure {
+        func: u16,
+        captures: Box<[Value]>,
+    },
     Cell(Value),
     Encoder(Box<EncoderObj>),
     Decoder(Box<DecoderObj>),

@@ -187,7 +187,10 @@ pub fn b2_b3_codec<E: ArmEngine>(variant: Variant) {
 
     let doc_ty = program(variant).types.iter().position(|t| *t == super::isa::Ty::Struct(program(variant).struct_id("Doc").unwrap()));
     let doc_ty = doc_ty.expect("a Doc type operand") as i64;
-    let reordered = FIRST_USERS_JSON.replace(r#""street":"1 Main St","city":"Springfield""#, r#""city":"Springfield", "extra": [1, {"x": null}], "street":"1 Main St""#);
+    let reordered = FIRST_USERS_JSON.replace(
+        r#""street":"1 Main St","city":"Springfield""#,
+        r#""city":"Springfield", "extra": [1, {"x": null}], "street":"1 Main St""#,
+    );
     assert_eq!(call_str(&mut e, "reencode", &[Arg::Str(reordered), int(doc_ty)]), FIRST_USERS_JSON);
     let escaped = FIRST_USERS_JSON.replace("user 1", r#"user \"1\""#);
     assert_eq!(call_str(&mut e, "reencode", &[Arg::Str(escaped), int(doc_ty)]), FIRST_USERS_JSON.replace("user 1", r#"user \"1\""#));
@@ -368,7 +371,8 @@ pub fn b8_two_engines<E: ArmEngine>() {
         assert_eq!(call_str(&mut a, "roundtrip_text_of_doc", &[]), ta);
         assert_eq!(call_str(&mut b, "roundtrip_text_of_doc", &[]), tb);
     }
-    let threads = [std::thread::spawn(move || call_str(&mut a, "encode_doc", &[])), std::thread::spawn(move || call_str(&mut b, "encode_doc", &[]))];
+    let threads =
+        [std::thread::spawn(move || call_str(&mut a, "encode_doc", &[])), std::thread::spawn(move || call_str(&mut b, "encode_doc", &[]))];
     let [ta, tb] = threads.map(|t| t.join().unwrap());
     assert!(tb.len() > ta.len());
 }

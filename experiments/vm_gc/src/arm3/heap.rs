@@ -319,7 +319,8 @@ impl Heap {
     pub fn insert_struct(&mut self, ty: u16, fields: Box<[Value]>, mutable: bool, bytes: usize) -> Value {
         let slot = self.next_slot();
         let obj = StructObj { ty, fields };
-        let v = if mutable { Value::MutStruct(Arc::new(Shared::new(slot, obj))) } else { Value::Struct(Arc::new(Frozen { slot, data: obj })) };
+        let v =
+            if mutable { Value::MutStruct(Arc::new(Shared::new(slot, obj))) } else { Value::Struct(Arc::new(Frozen { slot, data: obj })) };
         self.register(&v, bytes);
         v
     }
@@ -448,10 +449,11 @@ impl Heap {
         }
         // Break the unreachable cycles.
         for i in 0..n {
-            if refs[i] != REACHABLE && refs[i] != DEAD {
-                if let Some(weak) = &entries[i].weak {
-                    weak.clear();
-                }
+            if refs[i] != REACHABLE
+                && refs[i] != DEAD
+                && let Some(weak) = &entries[i].weak
+            {
+                weak.clear();
             }
         }
         for i in 0..n {

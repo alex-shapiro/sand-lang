@@ -4,9 +4,9 @@
 
 use super::codec::{DecoderObj, EncoderObj};
 use crate::shared::{Fail, Result, ShortStr, Tracker};
+use parking_lot::{Mutex, MutexGuard};
 use std::any::Any;
 use std::mem::size_of;
-use parking_lot::{Mutex, MutexGuard};
 use std::sync::Arc;
 
 /// Bytes of the reference counts at the start of every `Arc` allocation.
@@ -147,7 +147,7 @@ impl std::fmt::Debug for Value {
             Value::Float(x) => write!(f, "{x}"),
             Value::Tag(t) => write!(f, "Tag({t})"),
             Value::Short(s) => write!(f, "{s:?}"),
-            Value::Str(s) => write!(f, "{:?}", &s.text),
+            Value::Str(s) => write!(f, "{:?}", s.text),
             _ => write!(f, "object"),
         }
     }

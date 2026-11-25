@@ -66,7 +66,10 @@ fn measure<E: ArmEngine>() {
 
 fn main() {
     println!("5,000 live users; collection pause is the fastest of 5");
-    println!("{:<5} {:>14} {:>13} {:>14} {:>13} {:>10}", "arm", "tracked bytes", "VM objects", "process bytes", "process allocs", "pause ms");
+    println!(
+        "{:<5} {:>14} {:>13} {:>14} {:>13} {:>10}",
+        "arm", "tracked bytes", "VM objects", "process bytes", "process allocs", "pause ms"
+    );
     measure::<vm_gc::arm1::Engine>();
     measure::<vm_gc::arm3::Engine>();
 }

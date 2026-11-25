@@ -276,9 +276,10 @@ impl FormatReader for Json {
         let mut value: i64 = 0;
         while let Some(&b @ b'0'..=b'9') = bytes.get(i) {
             let digit = (b - b'0') as i64;
-            value = value.checked_mul(10).and_then(|v| if negative { v.checked_sub(digit) } else { v.checked_add(digit) }).ok_or_else(|| {
-                Fail::error(format!("json: integer out of range at byte {pos}"))
-            })?;
+            value = value
+                .checked_mul(10)
+                .and_then(|v| if negative { v.checked_sub(digit) } else { v.checked_add(digit) })
+                .ok_or_else(|| Fail::error(format!("json: integer out of range at byte {pos}")))?;
             i += 1;
         }
         if i == digits || matches!(bytes.get(i), Some(b'.' | b'e' | b'E')) {

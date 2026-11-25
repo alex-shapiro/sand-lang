@@ -7,90 +7,293 @@ pub type Reg = u16;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Op {
     /// `dst = consts[idx]`.
-    Const { dst: Reg, idx: u16 },
-    Int { dst: Reg, value: i32 },
-    Unit { dst: Reg },
-    None { dst: Reg },
-    Bool { dst: Reg, value: bool },
+    Const {
+        dst: Reg,
+        idx: u16,
+    },
+    Int {
+        dst: Reg,
+        value: i32,
+    },
+    Unit {
+        dst: Reg,
+    },
+    None {
+        dst: Reg,
+    },
+    Bool {
+        dst: Reg,
+        value: bool,
+    },
     /// `dst` = the payload-less variant with global tag `tag`.
-    Tag { dst: Reg, tag: u16 },
-    Move { dst: Reg, src: Reg },
+    Tag {
+        dst: Reg,
+        tag: u16,
+    },
+    Move {
+        dst: Reg,
+        src: Reg,
+    },
 
-    Add { dst: Reg, a: Reg, b: Reg },
-    Sub { dst: Reg, a: Reg, b: Reg },
-    Mul { dst: Reg, a: Reg, b: Reg },
-    Div { dst: Reg, a: Reg, b: Reg },
-    Rem { dst: Reg, a: Reg, b: Reg },
-    FAdd { dst: Reg, a: Reg, b: Reg },
-    FSub { dst: Reg, a: Reg, b: Reg },
-    FMul { dst: Reg, a: Reg, b: Reg },
-    ToFloat { dst: Reg, src: Reg },
-    Lt { dst: Reg, a: Reg, b: Reg },
-    Le { dst: Reg, a: Reg, b: Reg },
+    Add {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    Sub {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    Mul {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    Div {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    Rem {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    FAdd {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    FSub {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    FMul {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    ToFloat {
+        dst: Reg,
+        src: Reg,
+    },
+    Lt {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    Le {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
     /// Equality of scalars and strings.
-    Eq { dst: Reg, a: Reg, b: Reg },
-    Not { dst: Reg, src: Reg },
+    Eq {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    Not {
+        dst: Reg,
+        src: Reg,
+    },
 
-    Jump { target: u32 },
-    JumpIf { cond: Reg, target: u32 },
-    JumpIfNot { cond: Reg, target: u32 },
+    Jump {
+        target: u32,
+    },
+    JumpIf {
+        cond: Reg,
+        target: u32,
+    },
+    JumpIfNot {
+        cond: Reg,
+        target: u32,
+    },
 
     /// Calls `funcs[func]` with the `argc` arguments in registers `base..`.
     /// The callee frame starts at register `base`.
-    Call { dst: Reg, func: u16, base: Reg, argc: u8 },
+    Call {
+        dst: Reg,
+        func: u16,
+        base: Reg,
+        argc: u8,
+    },
     /// Calls the closure in register `callee`.
-    CallClosure { dst: Reg, callee: Reg, base: Reg, argc: u8 },
+    CallClosure {
+        dst: Reg,
+        callee: Reg,
+        base: Reg,
+        argc: u8,
+    },
     /// Calls the implementation of `methods[method]` for the type of the
     /// receiver in register `base`.
-    CallMethod { dst: Reg, method: u16, base: Reg, argc: u8 },
+    CallMethod {
+        dst: Reg,
+        method: u16,
+        base: Reg,
+        argc: u8,
+    },
     /// Calls the linked native function `natives[native]`.
-    CallNative { dst: Reg, native: u16, base: Reg, argc: u8 },
-    Return { src: Reg },
+    CallNative {
+        dst: Reg,
+        native: u16,
+        base: Reg,
+        argc: u8,
+    },
+    Return {
+        src: Reg,
+    },
 
     /// Creates a closure over `funcs[func]` that captures registers `base..base + count`.
-    Closure { dst: Reg, func: u16, base: Reg, count: u8 },
+    Closure {
+        dst: Reg,
+        func: u16,
+        base: Reg,
+        count: u8,
+    },
     /// Reads capture `idx` of the running closure.
-    Capture { dst: Reg, idx: u16 },
-    NewCell { dst: Reg, src: Reg },
-    CellGet { dst: Reg, cell: Reg },
-    CellSet { cell: Reg, src: Reg },
+    Capture {
+        dst: Reg,
+        idx: u16,
+    },
+    NewCell {
+        dst: Reg,
+        src: Reg,
+    },
+    CellGet {
+        dst: Reg,
+        cell: Reg,
+    },
+    CellSet {
+        cell: Reg,
+        src: Reg,
+    },
 
     /// Creates a struct of type `structs[ty]` from registers `base..base + count`.
-    Struct { dst: Reg, ty: u16, base: Reg, count: u8 },
-    Field { dst: Reg, obj: Reg, idx: u16 },
-    SetField { obj: Reg, idx: u16, src: Reg },
+    Struct {
+        dst: Reg,
+        ty: u16,
+        base: Reg,
+        count: u8,
+    },
+    Field {
+        dst: Reg,
+        obj: Reg,
+        idx: u16,
+    },
+    SetField {
+        obj: Reg,
+        idx: u16,
+        src: Reg,
+    },
     /// Creates the variant with global tag `tag` and payload registers `base..base + count`.
-    Variant { dst: Reg, tag: u16, base: Reg, count: u8 },
+    Variant {
+        dst: Reg,
+        tag: u16,
+        base: Reg,
+        count: u8,
+    },
     /// `dst` = the index of the variant in its enum declaration.
-    VariantIndex { dst: Reg, src: Reg },
-    VariantField { dst: Reg, src: Reg, idx: u16 },
-    IsNone { dst: Reg, src: Reg },
+    VariantIndex {
+        dst: Reg,
+        src: Reg,
+    },
+    VariantField {
+        dst: Reg,
+        src: Reg,
+        idx: u16,
+    },
+    IsNone {
+        dst: Reg,
+        src: Reg,
+    },
 
     /// Creates a list from registers `base..base + count`.
-    List { dst: Reg, base: Reg, count: u8 },
+    List {
+        dst: Reg,
+        base: Reg,
+        count: u8,
+    },
     /// Creates an empty list with the capacity in register `cap`.
-    ListWithCapacity { dst: Reg, cap: Reg },
-    Push { list: Reg, src: Reg },
-    Pop { dst: Reg, list: Reg },
-    Index { dst: Reg, list: Reg, idx: Reg },
-    SetIndex { list: Reg, idx: Reg, src: Reg },
+    ListWithCapacity {
+        dst: Reg,
+        cap: Reg,
+    },
+    Push {
+        list: Reg,
+        src: Reg,
+    },
+    Pop {
+        dst: Reg,
+        list: Reg,
+    },
+    Index {
+        dst: Reg,
+        list: Reg,
+        idx: Reg,
+    },
+    SetIndex {
+        list: Reg,
+        idx: Reg,
+        src: Reg,
+    },
     /// Length of a list, map, or string.
-    Len { dst: Reg, src: Reg },
-    Map { dst: Reg },
-    MapSet { map: Reg, key: Reg, value: Reg },
+    Len {
+        dst: Reg,
+        src: Reg,
+    },
+    Map {
+        dst: Reg,
+    },
+    MapSet {
+        map: Reg,
+        key: Reg,
+        value: Reg,
+    },
     /// `dst` = the value for `key`, or `None`.
-    MapGet { dst: Reg, map: Reg, key: Reg },
+    MapGet {
+        dst: Reg,
+        map: Reg,
+        key: Reg,
+    },
     /// `dst` = the key of entry `idx` in insertion order.
-    MapKey { dst: Reg, map: Reg, idx: Reg },
+    MapKey {
+        dst: Reg,
+        map: Reg,
+        idx: Reg,
+    },
     /// `dst` = the value of entry `idx` in insertion order.
-    MapValue { dst: Reg, map: Reg, idx: Reg },
+    MapValue {
+        dst: Reg,
+        map: Reg,
+        idx: Reg,
+    },
 
-    Concat { dst: Reg, a: Reg, b: Reg },
-    IntToStr { dst: Reg, src: Reg },
+    Concat {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    IntToStr {
+        dst: Reg,
+        src: Reg,
+    },
     /// `dst` = string `s` repeated `n` times.
-    Repeat { dst: Reg, s: Reg, n: Reg },
-    Global { dst: Reg, idx: u16 },
-    SetGlobal { idx: u16, src: Reg },
+    Repeat {
+        dst: Reg,
+        s: Reg,
+        n: Reg,
+    },
+    Global {
+        dst: Reg,
+        idx: u16,
+    },
+    SetGlobal {
+        idx: u16,
+        src: Reg,
+    },
 }
 
 const _: () = assert!(std::mem::size_of::<Op>() == 8);
