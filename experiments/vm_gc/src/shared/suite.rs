@@ -271,25 +271,27 @@ pub const B4_MAX_MEMORY: usize = 48 << 20;
 pub const B4_USERS: i64 = 5000;
 
 /// The B2 and B3 work that B4 repeats under a cap.
-fn b4_workload<E: ArmEngine>(e: &mut E) {
-    call_ok(e, "setup_text", &[int(B4_USERS)]);
-    assert_eq!(call_ok(e, "bench_decode", &[]), HostValue::Int(B4_USERS - 1));
-    call_ok(e, "clear_out", &[]);
-    call_ok(e, "setup_doc", &[int(B4_USERS)]);
-    let encoded = call_ok(e, "bench_encode", &[]);
-    assert!(matches!(encoded, HostValue::Int(n) if n > 1_000_000), "{encoded:?}");
+pub fn b4_workload<E: ArmEngine>(e: &mut E, users: i64) -> Result<()> {
+    e.call("setup_text", &[int(users)])?;
+    assert_eq!(e.call("bench_decode", &[])?, HostValue::Int(users - 1));
+    e.call("clear_out", &[])?;
+    e.call("setup_doc", &[int(users)])?;
+    let encoded = e.call("bench_encode", &[])?;
+    assert!(matches!(encoded, HostValue::Int(n) if n > 200 * users), "{encoded:?}");
+    Ok(())
 }
 
-/// Runs B2 and B3 under a cap after filling 70% of it with `generator`
-/// garbage while automatic collections are paused. The cap is 1.5 times the
-/// bytes that the workload tracks on an empty heap without collecting, so the
-/// run must reclaim the garbage to finish.
+/// The cap of the B4 dead-garbage runs, shared by every arm. Every arm
+/// tracks more than 30% of it while it runs the workload without
+/// collecting, so each run must reclaim the garbage to finish.
+pub const B4_DEAD_CAP: usize = 32 << 20;
+
+/// Runs B2 and B3 under [`B4_DEAD_CAP`] after filling 70% of it with
+/// `generator` garbage while automatic collections are paused.
 pub fn b4_dead_garbage<E: ArmEngine>(generator: &str) -> Vec<B4Run> {
     let mut runs = Vec::new();
     for variant in [Variant::Structural, Variant::Custom] {
-        let mut roomy: E = engine(variant, roomy_limits());
-        b4_workload(&mut roomy);
-        let cap = roomy.stats().tracked_bytes * 3 / 2;
+        let cap = B4_DEAD_CAP;
         let limits = Limits { max_memory: cap, gc_min_threshold: cap, ..Limits::default() };
         let mut e: E = engine(variant, limits);
         e.pause_gc(true);
@@ -299,7 +301,7 @@ pub fn b4_dead_garbage<E: ArmEngine>(generator: &str) -> Vec<B4Run> {
         e.pause_gc(false);
         let before = e.stats().collections;
         let start = std::time::Instant::now();
-        b4_workload(&mut e);
+        b4_workload(&mut e, B4_USERS).unwrap_or_else(|err| panic!("{}: {err}", E::NAME));
         let elapsed = start.elapsed();
         let collections = e.stats().collections - before;
         assert!(collections > 0, "{}: the run must reclaim the garbage", E::NAME);
@@ -307,6 +309,18 @@ pub fn b4_dead_garbage<E: ArmEngine>(generator: &str) -> Vec<B4Run> {
         runs.push(B4Run { variant, cap, collections, elapsed });
     }
     runs
+}
+
+/// Returns the smallest cap, to 64 KB, at which the B4 workload for `users`
+/// users finishes on an empty heap.
+pub fn b4_smallest_cap<E: ArmEngine>(variant: Variant, users: i64) -> usize {
+    let (mut low, mut high) = (1usize << 20, 256usize << 20);
+    while high - low > 64 << 10 {
+        let cap = low + (high - low) / 2;
+        let mut e: E = engine(variant, Limits { max_memory: cap, gc_min_threshold: 1 << 20, ..Limits::default() });
+        if b4_workload(&mut e, users).is_ok() { high = cap } else { low = cap }
+    }
+    high
 }
 
 /// What one B4 run under a cap needed.

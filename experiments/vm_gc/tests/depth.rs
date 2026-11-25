@@ -52,6 +52,13 @@ fn b4_report<E: ArmEngine>() {
             );
         }
     }
+    for users in [4000, 5000] {
+        println!(
+            "{} smallest cap for {users} users: {} bytes",
+            E::NAME,
+            vm_gc::shared::suite::b4_smallest_cap::<E>(Variant::Structural, users)
+        );
+    }
     let run = b4_garbage_callback::<E>();
     println!("{} garbage callback: cap {} bytes, {} collections during one decode, {:?}", E::NAME, run.cap, run.collections, run.elapsed);
 }

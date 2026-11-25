@@ -199,11 +199,11 @@ pub struct Footprint {
     pub pause: Duration,
 }
 
-/// Builds `USERS` users, keeps them live, and times one full collection.
-pub fn footprint<E: ArmEngine>(e: &mut E) -> Footprint {
+/// Builds `users` users, keeps them live, and times one full collection.
+pub fn footprint<E: ArmEngine>(e: &mut E, users: i64) -> Footprint {
     let base = e.stats().tracked_bytes;
     let base_objects = e.stats().live_objects;
-    call(e, "setup_doc", Some(USERS));
+    call(e, "setup_doc", Some(users));
     e.collect();
     let mut pause = Duration::MAX;
     for _ in 0..5 {
@@ -212,11 +212,4 @@ pub fn footprint<E: ArmEngine>(e: &mut E) -> Footprint {
         pause = pause.min(start.elapsed());
     }
     Footprint { tracked_bytes: e.stats().tracked_bytes - base, live_objects: e.stats().live_objects - base_objects, pause }
-}
-
-pub fn print_rows(arm: &str, rows: &[Row]) {
-    for r in rows {
-        let cleanup = r.cleanup.map_or("-".to_string(), |c| format!("{:.1}", r.per_item(c)));
-        println!("{arm:<5} {:<3} {:<13} {:>9.1} {:>9} {:>9.1}", r.group, r.name, r.per_item(r.op), cleanup, r.per_item(r.total));
-    }
 }

@@ -1,4 +1,4 @@
-//! B7: memory footprint and collection pause for 5,000 live users.
+//! B7: memory footprint and collection pause for live users.
 //!
 //! `cargo run --release --bin footprint`. This binary counts every process
 //! allocation with a global allocator, so it never runs B1 to B3 timings.
@@ -47,14 +47,14 @@ fn live() -> (isize, isize) {
     (LIVE_BYTES.load(Ordering::Relaxed), LIVE_ALLOCS.load(Ordering::Relaxed))
 }
 
-fn measure<E: ArmEngine>() {
+fn measure<E: ArmEngine>(users: i64) {
     let mut e: E = engine(Variant::Structural, roomy_limits());
     e.collect();
     let (bytes_before, allocs_before) = live();
-    let f = footprint(&mut e);
+    let f = footprint(&mut e, users);
     let (bytes_after, allocs_after) = live();
     println!(
-        "{:<5} {:>14} {:>13} {:>14} {:>13} {:>10.2}",
+        "{:<5} {users:>6} {:>14} {:>13} {:>14} {:>13} {:>10.2}",
         E::NAME,
         f.tracked_bytes,
         f.live_objects,
@@ -65,12 +65,14 @@ fn measure<E: ArmEngine>() {
 }
 
 fn main() {
-    println!("5,000 live users; collection pause is the fastest of 5");
+    println!("live users; collection pause is the fastest of 5");
     println!(
-        "{:<5} {:>14} {:>13} {:>14} {:>13} {:>10}",
-        "arm", "tracked bytes", "VM objects", "process bytes", "process allocs", "pause ms"
+        "{:<5} {:>6} {:>14} {:>13} {:>14} {:>13} {:>10}",
+        "arm", "users", "tracked bytes", "VM objects", "process bytes", "process allocs", "pause ms"
     );
-    measure::<vm_gc::arm1::Engine>();
-    measure::<vm_gc::arm2::Engine>();
-    measure::<vm_gc::arm3::Engine>();
+    for users in [1000, 4000, 4900, 5000, 6000, 10_000] {
+        measure::<vm_gc::arm1::Engine>(users);
+        measure::<vm_gc::arm2::Engine>(users);
+        measure::<vm_gc::arm3::Engine>(users);
+    }
 }
