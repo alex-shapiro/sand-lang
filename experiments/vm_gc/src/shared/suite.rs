@@ -321,7 +321,7 @@ pub fn b6_async<E: ArmEngine>() {
     let future = e.run_fibers();
     assert_send(&future);
     let results = block_on(future);
-    assert_eq!(results[0], Ok(HostValue::Str(format!("user 7|u7@example.com|{HELD_STRING}"))));
+    assert_eq!(results[0], Ok(HostValue::Str(format!("user 7|u7@example.com|b2|{HELD_STRING}"))));
     assert_eq!(results[1], Ok(HostValue::Unit));
     assert!(e.stats().collections > before + 1, "fiber 2 must collect while fiber 1 waits");
     assert_send(&e);

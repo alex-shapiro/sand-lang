@@ -103,14 +103,14 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
         let held = vm.new_str(HELD_STRING)?;
         Ok(Box::pin(async move {
             YieldNow::default().await;
-            let text = match &user {
-                Value::Struct(u) => {
-                    let (name, email) = (u.data.fields[1].str().unwrap_or_default(), u.data.fields[2].str().unwrap_or_default());
-                    format!("{name}|{email}|{}", held.str().unwrap_or_default())
-                }
-                _ => String::new(),
-            };
-            let resume: AsyncResume = Box::new(move |vm: &mut Vm| vm.new_str(&text));
+            let text = (|| {
+                let Value::Struct(u) = &user else { return Err(type_error("User")) };
+                let Value::List(tags) = &u.data.fields[5] else { return Err(type_error("tags")) };
+                let tag = tags.lock()?.0.get(1).and_then(|t| t.str().map(str::to_string)).ok_or_else(|| Fail::error("missing tag"))?;
+                let (name, email) = (u.data.fields[1].str().unwrap_or_default(), u.data.fields[2].str().unwrap_or_default());
+                Ok(format!("{name}|{email}|{tag}|{}", held.str().unwrap_or_default()))
+            })();
+            let resume: AsyncResume = Box::new(move |vm: &mut Vm| vm.new_str(&text?));
             resume
         }))
     });

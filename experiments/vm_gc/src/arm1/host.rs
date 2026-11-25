@@ -90,8 +90,9 @@ pub fn host_module(config: &HostConfig) -> NativeModule {
             YieldNow::default().await;
             let resume: AsyncResume = Box::new(move |vm: &mut Vm| {
                 let (user, held) = (vm.take_async_root(user), vm.take_async_root(held));
-                let (name, email) = (vm.field(user, 1)?, vm.field(user, 2)?);
-                let text = format!("{}|{}|{}", vm.str(&name)?, vm.str(&email)?, vm.str(&held)?);
+                let (name, email, tags) = (vm.field(user, 1)?, vm.field(user, 2)?, vm.field(user, 5)?);
+                let tag = vm.list_get(tags, 1)?.ok_or_else(|| Fail::error("missing tag"))?;
+                let text = format!("{}|{}|{}|{}", vm.str(&name)?, vm.str(&email)?, vm.str(&tag)?, vm.str(&held)?);
                 vm.new_str(&text)
             });
             resume
