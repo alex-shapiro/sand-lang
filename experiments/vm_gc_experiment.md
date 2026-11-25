@@ -48,7 +48,7 @@ We want a runtime model that meets these requirements:
 All six arms follow the same language semantics:
 
 - Primitive values (`int`, `float`, `bool`, unit, and payload-less enum tags) stay unboxed inside `VmValue`.
-- Each arm uses its natural string layout (`CompactString` inside the heap string object for Arms 1 to 4, `EcoString` for Arm 5, and a matching non-atomic inline string or `Rc<str>` for Arm 6) instead of double-boxing strings. Note inline-string effects separately in B7.
+- Each arm uses its natural string layout (`CompactString` inside the heap string object for Arms 1 to 4, `EcoString` for Arm 5, and a matching 15-byte non-atomic inline string for Arm 6) instead of double-boxing strings. Note inline-string effects separately in B1 to B3 and B7.
 - Immutable heap types: `str`, `bytes`, tuples, enums, and structs without `var` fields.
 - Mutable heap types: `list`, `map`, structs with `var` fields, and closure capture cells.
 
@@ -84,11 +84,11 @@ Each immutable heap object lives behind `Arc<T>`, strings use `EcoString` (inlin
 
 Cloning a string handle takes constant time without copying bytes. Natives hold an owned `EcoString` across allocations, callbacks, and `.await`, and borrow `&str` from it with zero manual rooting and without `Staging`.
 
-For cycles, every mutable container registers a `Weak` pointer in a per-engine list. On memory pressure, the VM traces from VM roots through both immutable objects and mutable containers, clears the inner elements of any live unmarked mutable container so reference counting frees the cycle, and prunes dead `Weak` entries. Implement iterative `Drop` on linked values so deep drops fit on a 512 KB stack.
+For cycles, every container that can hold child objects registers a `Weak` pointer in a per-engine list. On memory pressure, the VM runs a Python-style cycle sweep: it copies each container's `Weak::strong_count` into a scratch map, subtracts internal links between tracked containers, marks containers with remaining count above zero (and everything reachable from them) as live, clears the inner elements of any live unmarked mutable container to break unreachable loops, and prunes dead `Weak` entries. Implement iterative `Drop` on linked values so deep drops fit on a 512 KB stack.
 
 ### Arm 6: `Rc` with Cycle Collector
 
-Same design as Arm 5, using non-atomic `Rc<T>` for immutable objects, a matching non-atomic inline string (or `Rc<str>`) for strings, and `Rc<RefCell<T>>` for mutable objects. 100% safe Rust and `!Send`.
+Same design as Arm 5, using non-atomic `Rc<T>` for immutable objects, a matching 15-byte non-atomic inline string for strings, and `Rc<RefCell<T>>` for mutable objects. 100% safe Rust and `!Send`.
 
 Arm 6 runs the async fiber yield test in B6 without the compile-time `Send` assertion and records `!Send` as a relaxed requirement. If selected, SandLang would either relax `Engine: Send` or add an isolated `unsafe` single-engine `Send` wrapper.
 
@@ -104,7 +104,7 @@ Keep measurements fair across all six arms:
 - Let Arm 3 suspend and resume bytecode execution across turn boundaries without forcing state-machine overhead onto other arms.
 - Share one strict byte tracker checked before every allocation. Count object headers, inner container buffers, root stacks, and cycle-collector tables. Wrap `Gc::new` in Arms 2 and 3 so allocations fail cleanly at `max_memory`.
 - Do not build a second structural-only fast-path codec beside the general callback codec in any arm. Give every arm one equal review and tuning pass before recording final numbers.
-- Use the same GC trigger policy across Arms 1 to 4 (such as collecting if allocated bytes reach 2x the last post-GC live set, plus emergency collection at `max_memory`) so B1 to B3 compare equal collection cadence.
+- Use the same GC trigger policy across Arms 1 to 4 (collecting if allocated bytes reach the larger of 2x the last post-GC live set or a shared minimum threshold, plus emergency collection at `max_memory`) so B1 to B3 compare equal collection cadence without thrashing on small workloads.
 - In B1, B2, and B3, report both operation time (including any GC triggered during the run) and post-run cleanup time (one full collection for Arms 1 to 4; dropping the output for Arms 5 and 6) separately.
 
 ### Dataset and Baseline
