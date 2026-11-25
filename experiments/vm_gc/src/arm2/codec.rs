@@ -222,6 +222,7 @@ fn encode_map<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, v
 #[cold]
 #[inline(never)]
 fn encode_callback<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, func: u16, v: Value<'_>, mut gc: GcScope<'_, '_>) -> Result<()> {
+    vm.count_custom_call();
     let mut v = v.bind(gc.nogc());
     let mut encoder = vm.root(cx.encoder, gc.nogc());
     if encoder.is_unit() {
@@ -545,6 +546,7 @@ fn decode_callback<'a, 's, R: FormatReader>(
     func: u16,
     mut gc: GcScope<'a, 's>,
 ) -> Result<Value<'a>> {
+    vm.count_custom_call();
     let mut decoder = vm.root(cx.decoder, gc.nogc());
     if decoder.is_unit() {
         let input = cx.input.get(vm, gc.nogc()).raw();

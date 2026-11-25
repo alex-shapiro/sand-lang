@@ -231,6 +231,7 @@ fn encode_map<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, m
 #[cold]
 #[inline(never)]
 fn encode_callback<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, func: u16, v: &Value) -> Result<()> {
+    vm.custom_calls += 1;
     let encoder = match &cx.encoder {
         Some(e) => e.clone(),
         None => {
@@ -558,6 +559,7 @@ fn decode_enum<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, src: &str, p:
 #[cold]
 #[inline(never)]
 fn decode_callback<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, func: u16) -> Result<Value> {
+    vm.custom_calls += 1;
     let decoder = match &cx.decoder {
         Some(d) => d.clone(),
         None => {

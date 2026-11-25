@@ -93,6 +93,8 @@ pub struct Vm {
     pub program: Arc<Program>,
     natives: Arc<[Native]>,
     pub fuel: u64,
+    /// Calls of custom `encode` and `decode` methods that codec walkers made.
+    pub custom_calls: u64,
     /// Rust stack address at the outermost interpreter entry.
     stack_base: usize,
     /// Nesting depth of synchronous calls into the interpreter.
@@ -124,6 +126,7 @@ impl Vm {
             program: program.clone(),
             natives: natives.into(),
             fuel: limits.fuel,
+            custom_calls: 0,
             stack_base: stack_address(),
             sync_depth: 0,
         };

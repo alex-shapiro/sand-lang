@@ -201,6 +201,7 @@ fn encode_map<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, p: &Program, h
 #[cold]
 #[inline(never)]
 fn encode_callback<W: FormatWriter>(vm: &mut Vm, cx: &mut EncodeCx<W>, func: u16, v: Value) -> Result<()> {
+    vm.custom_calls += 1;
     let mut encoder = vm.root(cx.encoder);
     if encoder == Value::Unit {
         let mark = vm.push_root(v)?;
@@ -506,6 +507,7 @@ fn new_str_from_span<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, span: S
 #[cold]
 #[inline(never)]
 fn decode_callback<R: FormatReader>(vm: &mut Vm, cx: &mut DecodeCx<R>, func: u16) -> Result<Value> {
+    vm.custom_calls += 1;
     let mut decoder = vm.root(cx.decoder);
     if decoder == Value::Unit {
         vm.reserve_object(size_of::<DecoderObj>())?;

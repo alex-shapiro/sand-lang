@@ -37,6 +37,7 @@ impl ArmEngine for Engine {
             tracked_bytes: self.vm.heap.tracker.used(),
             live_objects: self.vm.heap.live_objects,
             collections: self.vm.heap.policy.collections,
+            custom_calls: self.vm.custom_calls,
         }
     }
 

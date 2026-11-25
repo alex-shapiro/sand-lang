@@ -1,6 +1,5 @@
 # B5: `Node` implements `Encode` and `Decode` by recursing through the codec.
 fn Node.encode(self, enc) {
-    call _ count_callback
     int two 2
     native _ enc.open_map enc two
     str k "value"
@@ -17,7 +16,6 @@ fn Node.encode(self, enc) {
 }
 
 fn Node.decode(dec) {
-    call _ count_callback
     native _ dec.open_map dec
     int value 0
     none next

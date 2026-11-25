@@ -1,6 +1,5 @@
 # B3: `Address` and `Status` implement `Encode` and `Decode` in bytecode.
 fn Address.encode(self, enc) {
-    call _ count_callback
     int three 3
     native _ enc.open_map enc three
     str k "street"
@@ -27,7 +26,6 @@ fn Address.encode(self, enc) {
 }
 
 fn Address.decode(dec) {
-    call _ count_callback
     native _ dec.open_map dec
     str street ""
     str city ""
@@ -64,7 +62,6 @@ fn Address.decode(dec) {
 }
 
 fn Status.encode(self, enc) {
-    call _ count_callback
     vindex i self
     int one 1
     int two 2
@@ -102,7 +99,6 @@ fn Status.encode(self, enc) {
 }
 
 fn Status.decode(dec) {
-    call _ count_callback
     native name dec.open_variant dec
     str s "Active"
     eq c name s

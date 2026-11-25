@@ -41,6 +41,8 @@ pub struct MemStats {
     pub tracked_bytes: usize,
     pub live_objects: usize,
     pub collections: u64,
+    /// Calls of custom `encode` and `decode` methods that a codec walker made.
+    pub custom_calls: u64,
 }
 
 /// One engine of an arm.
@@ -186,7 +188,7 @@ pub const FIRST_USERS_JSON: &str = concat!(
 /// Checks encoding and decoding of the dataset with `variant`'s codec methods.
 pub fn b2_b3_codec<E: ArmEngine>(variant: Variant) {
     let mut e: E = engine(variant, Limits::default());
-    // Each custom `Address` and `Status` method call adds 1 to `callbacks`.
+    // The walker calls custom `Address` and `Status` methods.
     let per_user = if variant == Variant::Custom { 2 } else { 0 };
     let per_address = if variant == Variant::Custom { 1 } else { 0 };
     call_ok(&mut e, "setup_doc", &[int(3)]);
@@ -224,11 +226,8 @@ pub fn b2_b3_codec<E: ArmEngine>(variant: Variant) {
     assert!(e.call("reencode", &[Arg::Str(broken), int(doc_ty)]).is_err());
 }
 
-fn callback_count<E: ArmEngine>(e: &mut E) -> i64 {
-    match call_ok(e, "callback_count", &[]) {
-        HostValue::Int(n) => n,
-        other => panic!("{}: callback_count returned {other:?}", E::NAME),
-    }
+fn callback_count<E: ArmEngine>(e: &mut E) -> u64 {
+    e.stats().custom_calls
 }
 
 /// Runs the codec, host, and async checks while every allocation collects

@@ -9,8 +9,6 @@ global addr
 global atext
 # Keeps a benchmark output alive until `clear_out` so that cleanup is timed separately.
 global out
-# Counts custom `encode` and `decode` calls, so tests can prove that they ran.
-global callbacks
 
 fn make_user(i) {
     int zero 0
@@ -231,23 +229,4 @@ fn roundtrip_text_of_doc() {
     native back json.decode t ty
     native t2 json.encode back
     ret t2
-}
-
-fn callback_count() {
-    gget n callbacks
-    unit u
-    eq c n u
-    jf c @done
-    int n 0
-@done
-    ret n
-}
-
-fn count_callback() {
-    call n callback_count
-    int one 1
-    add n n one
-    gset callbacks n
-    unit u
-    ret u
 }

@@ -228,6 +228,11 @@ impl<'v> Vm<'v> {
         self.raw.charge(units)
     }
 
+    /// Counts a call of a custom `encode` or `decode` method.
+    pub(super) fn count_custom_call(&mut self) {
+        self.raw.custom_calls += 1;
+    }
+
     /// Charges fuel for the input bytes from `charged` to `pos`.
     #[inline(always)]
     pub fn charge_input(&mut self, charged: &mut usize, pos: usize) -> Result<()> {
