@@ -34,6 +34,7 @@ FAULTS = [
     ("arm1", "async native: held user not rooted", [
         (ARM1_HOST, "        let user = vm.async_root(user)?;\n", ""),
         (ARM1_HOST, "let (user, held) = (vm.take_async_root(user), vm.take_async_root(held));", "let held = vm.take_async_root(held);"),
+        (ARM1_HOST, "                vm.take_async_root(user);\n", ""),
     ]),
     ("arm1", "encoder: walked list not rooted", [
         ("src/arm1/codec.rs", "    let mark = vm.push_root(v)?;\n    let n = vm.list_len(v)?;", "    let mark = vm.root_mark();\n    let n = vm.list_len(v)?;"),
@@ -59,6 +60,7 @@ FAULTS = [
     ("arm2", "async native: held user not rooted", [
         (ARM2_HOST, "        let user = vm.call_function(make_user, &[Value::int(i)], gc.reborrow())?.unbind();\n        let user = vm.async_root(user, gc.reborrow())?;\n", "        let user = vm.call_function(make_user, &[Value::int(i)], gc.reborrow())?;\n"),
         (ARM2_HOST, "let (user, held) = (vm.take_async_root(user, gc.nogc()), vm.take_async_root(held, gc.nogc()));", "let held = vm.take_async_root(held, gc.nogc());"),
+        (ARM2_HOST, "                vm.take_async_root(user, gc.nogc());\n", ""),
     ]),
     ("arm2", "encoder: walked list not rooted", [
         ("src/arm2/codec.rs", "    let v = v.scope(vm, gc.reborrow())?;\n    let n = vm.list_len(v.get(gc.nogc()), gc.nogc())?;", "    let n = vm.list_len(v, gc.nogc())?;"),
@@ -86,6 +88,7 @@ FAULTS = [
     ("arm2 unbind", "async native: held user not rooted", [
         (ARM2_HOST, "        let user = vm.async_root(user, gc.reborrow())?;\n", ""),
         (ARM2_HOST, "let (user, held) = (vm.take_async_root(user, gc.nogc()), vm.take_async_root(held, gc.nogc()));", "let held = vm.take_async_root(held, gc.nogc());"),
+        (ARM2_HOST, "                vm.take_async_root(user, gc.nogc());\n", ""),
     ]),
     ("arm2 unbind", "decoder: items kept in a local vector", [
         ("src/arm2/codec.rs",
@@ -104,7 +107,7 @@ FAULTS = [
     ]),
     ("arm3", "encoder: list lock held across items", [
         ("src/arm3/codec.rs", "    let mut i = 0;\n    loop {\n        let Some(item) = l.lock()?.0.get(i).cloned() else { break };\n        encode_value(vm, cx, p, &item)?;\n        i += 1;\n    }\n    check_count(i, n)?;\n    write(vm, cx, Event::CloseList)",
-         "    let items = l.lock()?;\n    for item in items.0.iter() {\n        encode_value(vm, cx, p, item)?;\n    }\n    drop(items);\n    let _ = i;\n    write(vm, cx, Event::CloseList)"),
+         "    let items = l.lock()?;\n    for item in items.0.iter() {\n        encode_value(vm, cx, p, item)?;\n    }\n    drop(items);\n    write(vm, cx, Event::CloseList)"),
     ]),
     ("arm3", "host object: hook skips its callback", [
         (ARM3_HOST, "        f(&mut self.callback);", "        let _ = f;"),
