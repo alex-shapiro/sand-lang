@@ -18,7 +18,7 @@ Arm 2 has four costs:
 - **Stack depth:** 118 nested callback levels on a 512 KB stack, against 168 in Arm 1.
 
 **Arm 3 is the alternative.** It needs no rooting, and every planted mistake failed a test without the stress mode. It also has the fastest structural encode. But it has three costs:
-- **VM speed:** its VM is 1.4 to 1.7 times slower.
+- **VM speed:** its VM is 1.4 to 1.7 times slower in B1, and 1.5 to 1.7 times slower on four ported `bench/programs` workloads.
 - **Collection:** its cleanup is almost 3 times slower, and its full collection pauses about 5 times longer.
 - **Allocations:** it makes twice as many.
 
@@ -205,6 +205,21 @@ For Arm 3, the faults are locks held across a callback in `list.map`, `host.fire
 
 Arm 3 has one failure mode that no test covers. Its values are `Send` and `Sync`, so a native can move one to another thread. If that thread changes a container while the engine collects, the collector sees an inconsistent graph and can clear a live container. A reviewer reproduced this after 2,231 collections. A fix would tie mutable containers to their engine, so that only the engine thread can change them, and Arm 3 natives could then no longer read mutable containers inside a future.
 
+## Ports of `bench/programs`
+
+Four programs from `bench/programs` are ported to the prototype's bytecode in [programs/realistic/](programs/realistic). They run with the default GC settings, so the collector runs during the work, unlike in B1 to B3. Each port's output matches the output of the original program on the real `sand` binary. `cargo run --release --bin realistic` gives these times in milliseconds, the fastest of 5 runs:
+
+| Program | What it stresses | Arm 1 | Arm 2 | Arm 3 | Arm 3 / Arm 1 | `sand` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `binary_trees` (depth 15) | small struct allocation, recursion, GC | 442 | 443 | 748 | 1.69 | 283 |
+| `fannkuch` (n = 9) | small int lists, copies, in-place updates | 248 | 250 | 361 | 1.46 | 145 |
+| `nbody` (500,000 steps) | float math, mutable struct fields | 597 | 597 | 980 | 1.64 | 452 |
+| `richards` (40 iterations) | calls, `var` fields, Option links, enum dispatch | 628 | 629 | 1,065 | 1.70 | 306 |
+
+Arms 1 and 2 are equal, because they share the interpreter. Arm 3 is 1.5 to 1.7 times slower on every program, including `nbody` and `richards`, which allocate almost nothing. A profile of the whole run attributes about 10% of Arm 3's samples to mutex lock and unlock, because every field access of a struct with `var` fields takes a lock. About 17% goes to reference-count clones, drops, and immediate checks on register copies. Arm 1 spends 70% of its samples in the dispatch loop.
+
+The real `sand` is 1.4 to 2 times faster than every arm. Its time includes process start and compilation. Compare it only as a reference, not as a fourth arm: its compiler emits optimized bytecode, while the ports are hand-written and copy every call argument into an argument area.
+
 ## Findings for Every Arm
 
 These findings apply to whichever arm SandLang adopts.
@@ -237,6 +252,7 @@ Run these commands in `experiments/vm_gc`:
 cargo test                                                   # B1 to B6 and B8 for all arms, and conformance
 cargo run --release --bin bench                              # B1 to B3 timings
 cargo run --release --bin footprint                          # B7
+cargo run --release --bin realistic                          # ports of bench/programs
 cargo test --release --test depth -- --ignored --nocapture   # B4 caps
 cargo test --test depth nesting -- --ignored --nocapture     # B5 depth limits in the test profile
 python3 loc.py                                               # B8 line counts

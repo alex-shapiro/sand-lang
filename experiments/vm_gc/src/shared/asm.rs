@@ -396,9 +396,9 @@ fn shape(mnemonic: &str) -> Option<Shape> {
     use Shape::*;
     Some(match mnemonic {
         "unit" | "none" | "true" | "false" | "map" => Regs(0),
-        "mov" | "tofloat" | "not" | "itos" | "isnone" | "vindex" | "len" | "cell" | "cellget" | "listcap" | "pop" => Regs(1),
-        "add" | "sub" | "mul" | "div" | "rem" | "fadd" | "fsub" | "fmul" | "lt" | "le" | "eq" | "concat" | "repeat" | "index"
-        | "mapget" | "mapkey" | "mapval" => Regs(2),
+        "mov" | "sqrt" | "tofloat" | "not" | "itos" | "isnone" | "vindex" | "len" | "cell" | "cellget" | "listcap" | "pop" => Regs(1),
+        "add" | "sub" | "mul" | "div" | "rem" | "fadd" | "fsub" | "fmul" | "fdiv" | "shl" | "shr" | "band" | "bxor" | "lt" | "le"
+        | "eq" | "concat" | "repeat" | "index" | "mapget" | "mapkey" | "mapval" => Regs(2),
         "int" | "float" | "str" | "tag" | "cap" | "gget" => DstSymbol,
         "call" | "callm" | "native" | "closure" | "new" | "variant" => DstSymbolArgs,
         "list" => DstArgs,
@@ -541,6 +541,12 @@ impl<'a> FuncAssembler<'a> {
             "fadd" => Op::FAdd { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
             "fsub" => Op::FSub { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
             "fmul" => Op::FMul { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
+            "fdiv" => Op::FDiv { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
+            "sqrt" => Op::Sqrt { dst: r(self, 1)?, src: r(self, 2)? },
+            "shl" => Op::Shl { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
+            "shr" => Op::Shr { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
+            "band" => Op::BitAnd { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
+            "bxor" => Op::BitXor { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
             "lt" => Op::Lt { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
             "le" => Op::Le { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },
             "eq" => Op::Eq { dst: r(self, 1)?, a: r(self, 2)?, b: r(self, 3)? },

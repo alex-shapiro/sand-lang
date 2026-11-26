@@ -81,6 +81,37 @@ pub enum Op {
         a: Reg,
         b: Reg,
     },
+    FDiv {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    Sqrt {
+        dst: Reg,
+        src: Reg,
+    },
+    /// `dst = a << b`. Fails if `b` is not in `0..64`.
+    Shl {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    /// Arithmetic `dst = a >> b`. Fails if `b` is not in `0..64`.
+    Shr {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    BitAnd {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    BitXor {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
     ToFloat {
         dst: Reg,
         src: Reg,

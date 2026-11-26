@@ -410,6 +410,18 @@ impl Vm {
                     Op::FAdd { dst, a, b } => set!(dst, Value::Float(float!(a) + float!(b))),
                     Op::FSub { dst, a, b } => set!(dst, Value::Float(float!(a) - float!(b))),
                     Op::FMul { dst, a, b } => set!(dst, Value::Float(float!(a) * float!(b))),
+                    Op::FDiv { dst, a, b } => set!(dst, Value::Float(float!(a) / float!(b))),
+                    Op::Sqrt { dst, src } => set!(dst, Value::Float(float!(src).sqrt())),
+                    Op::Shl { dst, a, b } => {
+                        let shift = u32::try_from(int!(b)).ok().filter(|s| *s < 64).ok_or_else(overflow)?;
+                        set!(dst, Value::Int(int!(a) << shift))
+                    }
+                    Op::Shr { dst, a, b } => {
+                        let shift = u32::try_from(int!(b)).ok().filter(|s| *s < 64).ok_or_else(overflow)?;
+                        set!(dst, Value::Int(int!(a) >> shift))
+                    }
+                    Op::BitAnd { dst, a, b } => set!(dst, Value::Int(int!(a) & int!(b))),
+                    Op::BitXor { dst, a, b } => set!(dst, Value::Int(int!(a) ^ int!(b))),
                     Op::ToFloat { dst, src } => set!(dst, Value::Float(int!(src) as f64)),
                     Op::Lt { dst, a, b } => {
                         let r = match (&reg!(a), &reg!(b)) {

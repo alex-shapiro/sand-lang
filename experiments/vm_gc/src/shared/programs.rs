@@ -41,3 +41,17 @@ pub fn program_with(variant: Variant, extra_source: &str) -> Result<Arc<Program>
     let source = [DATASET, B1, B4, B6, B8, NODE, extra, extra_source].join("\n");
     assemble(&source).map(Arc::new)
 }
+
+/// Ports of four programs in `bench/programs`.
+pub const REALISTIC: &[(&str, &str)] = &[
+    ("binary_trees", include_str!("../../programs/realistic/binary_trees.sasm")),
+    ("fannkuch", include_str!("../../programs/realistic/fannkuch.sasm")),
+    ("nbody", include_str!("../../programs/realistic/nbody.sasm")),
+    ("richards", include_str!("../../programs/realistic/richards.sasm")),
+];
+
+/// Assembles the port of `bench/programs/{name}.sand`.
+pub fn realistic(name: &str) -> Arc<Program> {
+    let (_, source) = REALISTIC.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no port named `{name}`"));
+    Arc::new(assemble(source).unwrap_or_else(|e| panic!("{name}: {e}")))
+}

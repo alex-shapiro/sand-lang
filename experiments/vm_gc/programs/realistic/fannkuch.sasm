@@ -1,0 +1,121 @@
+# A port of bench/programs/fannkuch.sand: count prefix reversals over all
+# permutations. Stresses small integer lists: copying, in-place reversal,
+# and rotation.
+
+fn flip_count(perm) {
+    int flips 0
+    int zero 0
+    int one 1
+    index k perm zero
+@outer
+    eq c k zero
+    jt c @done
+    int i 0
+    mov j k
+@swap
+    lt c i j
+    jf c @swapped
+    index a perm i
+    index b perm j
+    setindex perm i b
+    setindex perm j a
+    add i i one
+    sub j j one
+    jmp @swap
+@swapped
+    add flips flips one
+    index k perm zero
+    jmp @outer
+@done
+    ret flips
+}
+
+fn copy_list(xs) {
+    len n xs
+    listcap out n
+    int i 0
+    int one 1
+@loop
+    lt c i n
+    jf c @done
+    index v xs i
+    push out v
+    add i i one
+    jmp @loop
+@done
+    ret out
+}
+
+# Returns the program's printed output for permutations of `0..n`.
+fn main(n) {
+    int zero 0
+    int one 1
+    listcap perm n
+    listcap count n
+    int i 0
+@init
+    lt c i n
+    jf c @start
+    push perm i
+    push count zero
+    add i i one
+    jmp @init
+@start
+    int max_flips 0
+    int checksum 0
+    int sign 1
+    mov r n
+@permutation
+    eq c r one
+    jt c @count
+    sub r1 r one
+    setindex count r1 r
+    sub r r one
+    jmp @permutation
+@count
+    call p copy_list perm
+    call flips flip_count p
+    lt c max_flips flips
+    jf c @signed
+    mov max_flips flips
+@signed
+    mul t sign flips
+    add checksum checksum t
+    sub sign zero sign
+@next
+    eq c r n
+    jt c @finish
+    # perm.insert(r, perm.remove(0)) rotates perm[0..=r] left by one.
+    index first perm zero
+    int k 0
+@rotate
+    lt c k r
+    jf c @rotated
+    add k1 k one
+    index v perm k1
+    setindex perm k v
+    mov k k1
+    jmp @rotate
+@rotated
+    setindex perm r first
+    index cr count r
+    sub cr cr one
+    setindex count r cr
+    lt c zero cr
+    jt c @permutation
+    add r r one
+    jmp @next
+@finish
+    itos out checksum
+    str s "\nPfannkuchen("
+    concat out out s
+    itos s n
+    concat out out s
+    str s ") = "
+    concat out out s
+    itos s max_flips
+    concat out out s
+    str s "\n"
+    concat out out s
+    ret out
+}

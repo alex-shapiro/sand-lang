@@ -8,6 +8,7 @@ pub mod format;
 pub mod isa;
 pub mod json;
 pub mod programs;
+pub mod realistic;
 pub mod sexpr;
 pub mod suite;
 

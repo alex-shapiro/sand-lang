@@ -1,0 +1,433 @@
+# A port of bench/programs/richards.sand: the Richards scheduler simulation.
+# Six tasks of four kinds pass packets through linked queues until the idle
+# task runs out. Stresses calls, `var` field mutation, Option links, and
+# enum dispatch.
+enum PacketKind { Device, Work }
+struct Packet { var link: Packet?, var id: int, kind: PacketKind, var a1: int, a2: [int] }
+struct IdleState { var v1: int, var count: int }
+struct WorkerState { var dest: int, var v2: int }
+struct HandlerState { var work: Packet?, var devices: Packet? }
+struct DeviceState { var pending: Packet? }
+enum Task { Idle(IdleState), Worker(WorkerState), Handler(HandlerState), Device(DeviceState) }
+struct Tcb { link: Tcb?, id: int, priority: int, var queue: Packet?, task: Task, var packet_pending: bool, var waiting: bool, var holding: bool }
+struct Scheduler { var list: Tcb?, blocks: [Tcb?], var current: Tcb?, var current_id: int, var queue_count: int, var hold_count: int }
+
+# Appends `self` to the end of `queue` and returns the queue's head.
+fn packet_add_to(self, queue) {
+    none n
+    setfield self Packet.link n
+    isnone c queue
+    jf c @some
+    ret self
+@some
+    mov next queue
+@walk
+    field peek next Packet.link
+    isnone c peek
+    jt c @end
+    mov next peek
+    jmp @walk
+@end
+    setfield next Packet.link self
+    ret queue
+}
+
+fn release(s, id) {
+    field blocks s Scheduler.blocks
+    index tcb blocks id
+    isnone c tcb
+    jf c @found
+    ret tcb
+@found
+    false f
+    setfield tcb Tcb.holding f
+    field current s Scheduler.current
+    field p1 tcb Tcb.priority
+    field p2 current Tcb.priority
+    lt c p2 p1
+    jf c @current
+    ret tcb
+@current
+    ret current
+}
+
+fn hold_current(s) {
+    int one 1
+    field hc s Scheduler.hold_count
+    add hc hc one
+    setfield s Scheduler.hold_count hc
+    field current s Scheduler.current
+    true t
+    setfield current Tcb.holding t
+    field l current Tcb.link
+    ret l
+}
+
+fn suspend_current(s) {
+    field current s Scheduler.current
+    true t
+    setfield current Tcb.waiting t
+    ret current
+}
+
+fn queue(s, packet) {
+    field blocks s Scheduler.blocks
+    field pid packet Packet.id
+    index t blocks pid
+    isnone c t
+    jf c @found
+    ret t
+@found
+    int one 1
+    field qc s Scheduler.queue_count
+    add qc qc one
+    setfield s Scheduler.queue_count qc
+    none n
+    setfield packet Packet.link n
+    field cid s Scheduler.current_id
+    setfield packet Packet.id cid
+    field current s Scheduler.current
+    call r tcb_check_priority_add t current packet
+    ret r
+}
+
+# Adds `packet` to the queue of `self`; returns the task that runs next.
+fn tcb_check_priority_add(self, current, packet) {
+    field q self Tcb.queue
+    isnone c q
+    jf c @some
+    setfield self Tcb.queue packet
+    true t
+    setfield self Tcb.packet_pending t
+    field p1 self Tcb.priority
+    field p2 current Tcb.priority
+    lt c p2 p1
+    jf c @current
+    ret self
+@some
+    call nq packet_add_to packet q
+    setfield self Tcb.queue nq
+@current
+    ret current
+}
+
+fn tcb_held_or_suspended(self) {
+    field h self Tcb.holding
+    jt h @yes
+    field pp self Tcb.packet_pending
+    jt pp @no
+    field w self Tcb.waiting
+    ret w
+@yes
+    true t
+    ret t
+@no
+    false f
+    ret f
+}
+
+fn tcb_run(self, s) {
+    none packet
+    field pp self Tcb.packet_pending
+    jf pp @run
+    field w self Tcb.waiting
+    jf w @run
+    field h self Tcb.holding
+    jt h @run
+    field p self Tcb.queue
+    field nq p Packet.link
+    setfield self Tcb.queue nq
+    isnone c nq
+    not c c
+    setfield self Tcb.packet_pending c
+    false f
+    setfield self Tcb.waiting f
+    mov packet p
+@run
+    field task self Tcb.task
+    call r task_run task s packet
+    ret r
+}
+
+fn task_run(task, s, packet) {
+    int zero 0
+    int one 1
+    vindex kind task
+    vfield t task 0
+    eq c kind zero
+    jt c @idle
+    eq c kind one
+    jt c @worker
+    int two 2
+    eq c kind two
+    jt c @handler
+    # Device
+    isnone c packet
+    jt c @device_none
+    setfield t DeviceState.pending packet
+    call r hold_current s
+    ret r
+@device_none
+    field v t DeviceState.pending
+    isnone c v
+    jf c @device_queue
+    call r suspend_current s
+    ret r
+@device_queue
+    none n
+    setfield t DeviceState.pending n
+    call r queue s v
+    ret r
+@idle
+    field count t IdleState.count
+    sub count count one
+    setfield t IdleState.count count
+    eq c count zero
+    jf c @idle_release
+    call r hold_current s
+    ret r
+@idle_release
+    field v1 t IdleState.v1
+    band b v1 one
+    eq c b zero
+    jf c @idle_odd
+    shr v1 v1 one
+    setfield t IdleState.v1 v1
+    int device_a 4
+    call r release s device_a
+    ret r
+@idle_odd
+    shr v1 v1 one
+    int mask 53256
+    bxor v1 v1 mask
+    setfield t IdleState.v1 v1
+    int device_b 5
+    call r release s device_b
+    ret r
+@worker
+    isnone c packet
+    jf c @work
+    call r suspend_current s
+    ret r
+@work
+    field dest t WorkerState.dest
+    int handler_a 2
+    int handler_b 3
+    eq c dest handler_a
+    jf c @to_a
+    mov dest handler_b
+    jmp @dest_set
+@to_a
+    mov dest handler_a
+@dest_set
+    setfield t WorkerState.dest dest
+    setfield packet Packet.id dest
+    setfield packet Packet.a1 zero
+    field a2 packet Packet.a2
+    int i 0
+    int data_size 4
+    int limit 26
+@fill
+    lt c i data_size
+    jf c @filled
+    field v2 t WorkerState.v2
+    add v2 v2 one
+    lt c limit v2
+    jf c @keep
+    mov v2 one
+@keep
+    setfield t WorkerState.v2 v2
+    setindex a2 i v2
+    add i i one
+    jmp @fill
+@filled
+    call r queue s packet
+    ret r
+@handler
+    isnone c packet
+    jt c @handler_work
+    field pk packet Packet.kind
+    tag work_kind PacketKind.Work
+    eq c pk work_kind
+    jf c @handler_device
+    field w t HandlerState.work
+    call nw packet_add_to packet w
+    setfield t HandlerState.work nw
+    jmp @handler_work
+@handler_device
+    field d t HandlerState.devices
+    call nd packet_add_to packet d
+    setfield t HandlerState.devices nd
+@handler_work
+    field work t HandlerState.work
+    isnone c work
+    jt c @handler_suspend
+    field count work Packet.a1
+    int data_size 4
+    lt c count data_size
+    jf c @handler_full
+    field dev t HandlerState.devices
+    isnone c dev
+    jt c @handler_suspend
+    field dl dev Packet.link
+    setfield t HandlerState.devices dl
+    field a2 work Packet.a2
+    index v a2 count
+    setfield dev Packet.a1 v
+    add c1 count one
+    setfield work Packet.a1 c1
+    call r queue s dev
+    ret r
+@handler_full
+    field wl work Packet.link
+    setfield t HandlerState.work wl
+    call r queue s work
+    ret r
+@handler_suspend
+    call r suspend_current s
+    ret r
+}
+
+fn add_task(s, id, priority, queue, task) {
+    field list s Scheduler.list
+    isnone c queue
+    not pending c
+    true waiting
+    false holding
+    new tcb Tcb list id priority queue task pending waiting holding
+    setfield s Scheduler.list tcb
+    field blocks s Scheduler.blocks
+    setindex blocks id tcb
+    setfield s Scheduler.current tcb
+    unit u
+    ret u
+}
+
+fn schedule(s) {
+    field next s Scheduler.list
+@loop
+    isnone c next
+    jt c @done
+    call held tcb_held_or_suspended next
+    jf held @run
+    field next next Tcb.link
+    jmp @loop
+@run
+    setfield s Scheduler.current next
+    field id next Tcb.id
+    setfield s Scheduler.current_id id
+    call next tcb_run next s
+    jmp @loop
+@done
+    unit u
+    ret u
+}
+
+fn make_queue(id, kind, n) {
+    none q
+    int i 0
+    int one 1
+    int zero 0
+@loop
+    lt c i n
+    jf c @done
+    list a2 zero zero zero zero
+    new p Packet q id kind zero a2
+    mov q p
+    add i i one
+    jmp @loop
+@done
+    ret q
+}
+
+fn run_richards() {
+    none n
+    int zero 0
+    int one 1
+    list blocks n n n n n n
+    new s Scheduler n blocks n zero zero zero
+    int count 10000
+    new idle IdleState one count
+    variant task Task.Idle idle
+    call _ add_task s zero zero n task
+    field current s Scheduler.current
+    false f
+    setfield current Tcb.waiting f
+    int id 1
+    int priority 1000
+    tag work PacketKind.Work
+    int two 2
+    call q make_queue id work two
+    int handler_a 2
+    new worker WorkerState handler_a zero
+    variant task Task.Worker worker
+    call _ add_task s id priority q task
+    int three 3
+    int device_a 4
+    int device_b 5
+    tag device PacketKind.Device
+    int priority 2000
+    call q make_queue device_a device three
+    new handler HandlerState n n
+    variant task Task.Handler handler
+    call _ add_task s handler_a priority q task
+    int handler_b 3
+    int priority 3000
+    call q make_queue device_b device three
+    new handler HandlerState n n
+    variant task Task.Handler handler
+    call _ add_task s handler_b priority q task
+    int priority 4000
+    new device_state DeviceState n
+    variant task Task.Device device_state
+    call _ add_task s device_a priority n task
+    int priority 5000
+    new device_state DeviceState n
+    variant task Task.Device device_state
+    call _ add_task s device_b priority n task
+    call _ schedule s
+    ret s
+}
+
+# Returns the program's printed output for `iterations` runs.
+fn main(iterations) {
+    int i 0
+    int one 1
+    int queued 0
+    int held 0
+    int expect_queued 23246
+    int expect_held 9297
+@loop
+    lt c i iterations
+    jf c @done
+    call s run_richards
+    field q s Scheduler.queue_count
+    field h s Scheduler.hold_count
+    eq c q expect_queued
+    jf c @wrong
+    eq c h expect_held
+    jf c @wrong
+    add queued queued q
+    add held held h
+    add i i one
+    jmp @loop
+@wrong
+    str m "wrong result"
+    native _ vm.fail m
+    ret m
+@done
+    str out "iterations: "
+    itos s iterations
+    concat out out s
+    str s "\npackets queued: "
+    concat out out s
+    itos s queued
+    concat out out s
+    str s "\nholds: "
+    concat out out s
+    itos s held
+    concat out out s
+    str s "\n"
+    concat out out s
+    ret out
+}

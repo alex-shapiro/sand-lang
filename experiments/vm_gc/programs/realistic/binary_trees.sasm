@@ -1,0 +1,100 @@
+# A port of bench/programs/binary_trees.sand: build and walk many perfect
+# binary trees. Stresses allocation of small structs, Option fields,
+# recursion, and the collector.
+struct Node { left: Node?, right: Node? }
+
+fn bottom_up(depth) {
+    int zero 0
+    eq leaf depth zero
+    jf leaf @inner
+    none n
+    new node Node n n
+    ret node
+@inner
+    int one 1
+    sub d depth one
+    call l bottom_up d
+    call r bottom_up d
+    new node Node l r
+    ret node
+}
+
+fn check(node) {
+    int one 1
+    field l node Node.left
+    isnone c l
+    jt c @leaf
+    field r node Node.right
+    isnone c r
+    jt c @leaf
+    call a check l
+    call b check r
+    add s a b
+    add s s one
+    ret s
+@leaf
+    ret one
+}
+
+# Returns the program's printed output for trees of depth 4 to `max_depth`.
+fn main(max_depth) {
+    int min_depth 4
+    int one 1
+    int two 2
+    str nl "\n"
+    str check_label "\t check: "
+    add stretch max_depth one
+    call tree bottom_up stretch
+    call c check tree
+    unit tree
+    str out "stretch tree of depth "
+    itos s stretch
+    concat out out s
+    concat out out check_label
+    itos s c
+    concat out out s
+    concat out out nl
+    call long bottom_up max_depth
+    mov depth min_depth
+@depths
+    le c depth max_depth
+    jf c @done
+    sub e max_depth depth
+    add e e min_depth
+    shl iterations one e
+    int i 0
+    int total 0
+@trees
+    lt c i iterations
+    jf c @report
+    call tree bottom_up depth
+    call k check tree
+    add total total k
+    add i i one
+    jmp @trees
+@report
+    unit tree
+    itos s iterations
+    concat out out s
+    str s "\t trees of depth "
+    concat out out s
+    itos s depth
+    concat out out s
+    concat out out check_label
+    itos s total
+    concat out out s
+    concat out out nl
+    add depth depth two
+    jmp @depths
+@done
+    call c check long
+    str s "long lived tree of depth "
+    concat out out s
+    itos s max_depth
+    concat out out s
+    concat out out check_label
+    itos s c
+    concat out out s
+    concat out out nl
+    ret out
+}

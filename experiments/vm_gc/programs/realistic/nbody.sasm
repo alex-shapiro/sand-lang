@@ -1,0 +1,270 @@
+# A port of bench/programs/nbody.sand: simulate the four Jovian planets
+# orbiting the sun. Stresses float arithmetic, mutable struct fields, and
+# nested list loops. The host formats the energies.
+struct Body { var x: float, var y: float, var z: float, var vx: float, var vy: float, var vz: float, mass: float }
+global bodies
+global solar_mass
+
+fn body(x, y, z, vx, vy, vz, mass) {
+    float days 365.24
+    gget solar solar_mass
+    fmul vx vx days
+    fmul vy vy days
+    fmul vz vz days
+    fmul mass mass solar
+    new b Body x y z vx vy vz mass
+    ret b
+}
+
+fn offset_momentum(bodies) {
+    float px 0.0
+    float py 0.0
+    float pz 0.0
+    float zero 0.0
+    len n bodies
+    int i 0
+    int one 1
+@loop
+    lt c i n
+    jf c @done
+    index b bodies i
+    field m b Body.mass
+    field v b Body.vx
+    fmul t v m
+    fadd px px t
+    field v b Body.vy
+    fmul t v m
+    fadd py py t
+    field v b Body.vz
+    fmul t v m
+    fadd pz pz t
+    add i i one
+    jmp @loop
+@done
+    int first 0
+    index sun bodies first
+    gget solar solar_mass
+    fsub v zero px
+    fdiv v v solar
+    setfield sun Body.vx v
+    fsub v zero py
+    fdiv v v solar
+    setfield sun Body.vy v
+    fsub v zero pz
+    fdiv v v solar
+    setfield sun Body.vz v
+    unit u
+    ret u
+}
+
+fn energy() {
+    gget bodies bodies
+    float e 0.0
+    float half 0.5
+    len n bodies
+    int i 0
+    int one 1
+@outer
+    lt c i n
+    jf c @done
+    index b bodies i
+    field m b Body.mass
+    field vx b Body.vx
+    field vy b Body.vy
+    field vz b Body.vz
+    fmul s vx vx
+    fmul t vy vy
+    fadd s s t
+    fmul t vz vz
+    fadd s s t
+    fmul t half m
+    fmul t t s
+    fadd e e t
+    add j i one
+@inner
+    lt c j n
+    jf c @next
+    index b2 bodies j
+    field a b Body.x
+    field a2 b2 Body.x
+    fsub dx a a2
+    field a b Body.y
+    field a2 b2 Body.y
+    fsub dy a a2
+    field a b Body.z
+    field a2 b2 Body.z
+    fsub dz a a2
+    fmul d dx dx
+    fmul t dy dy
+    fadd d d t
+    fmul t dz dz
+    fadd d d t
+    sqrt d d
+    field m2 b2 Body.mass
+    fmul t m m2
+    fdiv t t d
+    fsub e e t
+    add j j one
+    jmp @inner
+@next
+    add i i one
+    jmp @outer
+@done
+    ret e
+}
+
+fn advance(bodies, dt) {
+    len n bodies
+    int i 0
+    int one 1
+@outer
+    lt c i n
+    jf c @move
+    index b bodies i
+    add j i one
+@inner
+    lt c j n
+    jf c @next
+    index b2 bodies j
+    field a b Body.x
+    field a2 b2 Body.x
+    fsub dx a a2
+    field a b Body.y
+    field a2 b2 Body.y
+    fsub dy a a2
+    field a b Body.z
+    field a2 b2 Body.z
+    fsub dz a a2
+    fmul d2 dx dx
+    fmul t dy dy
+    fadd d2 d2 t
+    fmul t dz dz
+    fadd d2 d2 t
+    sqrt s d2
+    fmul den d2 s
+    fdiv mag dt den
+    field m b Body.mass
+    fmul bm m mag
+    field m2 b2 Body.mass
+    fmul b2m m2 mag
+    field v b Body.vx
+    fmul t dx b2m
+    fsub v v t
+    setfield b Body.vx v
+    field v b Body.vy
+    fmul t dy b2m
+    fsub v v t
+    setfield b Body.vy v
+    field v b Body.vz
+    fmul t dz b2m
+    fsub v v t
+    setfield b Body.vz v
+    field v b2 Body.vx
+    fmul t dx bm
+    fadd v v t
+    setfield b2 Body.vx v
+    field v b2 Body.vy
+    fmul t dy bm
+    fadd v v t
+    setfield b2 Body.vy v
+    field v b2 Body.vz
+    fmul t dz bm
+    fadd v v t
+    setfield b2 Body.vz v
+    add j j one
+    jmp @inner
+@next
+    add i i one
+    jmp @outer
+@move
+    int i 0
+@moving
+    lt c i n
+    jf c @done
+    index b bodies i
+    field p b Body.x
+    field v b Body.vx
+    fmul t dt v
+    fadd p p t
+    setfield b Body.x p
+    field p b Body.y
+    field v b Body.vy
+    fmul t dt v
+    fadd p p t
+    setfield b Body.y p
+    field p b Body.z
+    field v b Body.vz
+    fmul t dt v
+    fadd p p t
+    setfield b Body.z p
+    add i i one
+    jmp @moving
+@done
+    unit u
+    ret u
+}
+
+fn setup() {
+    float pi 3.141592653589793
+    float four 4.0
+    fmul solar four pi
+    fmul solar solar pi
+    gset solar_mass solar
+    float zero 0.0
+    float one 1.0
+    call sun body zero zero zero zero zero zero one
+    float x 4.84143144246472090e+00
+    float y -1.16032004402742839e+00
+    float z -1.03622044471123109e-01
+    float vx 1.66007664274403694e-03
+    float vy 7.69901118419740425e-03
+    float vz -6.90460016972063023e-05
+    float m 9.54791938424326609e-04
+    call jupiter body x y z vx vy vz m
+    float x 8.34336671824457987e+00
+    float y 4.12479856412430479e+00
+    float z -4.03523417114321381e-01
+    float vx -2.76742510726862411e-03
+    float vy 4.99852801234917238e-03
+    float vz 2.30417297573763929e-05
+    float m 2.85885980666130812e-04
+    call saturn body x y z vx vy vz m
+    float x 1.28943695621391310e+01
+    float y -1.51111514016986312e+01
+    float z -2.23307578892655734e-01
+    float vx 2.96460137564761618e-03
+    float vy 2.37847173959480950e-03
+    float vz -2.96589568540237556e-05
+    float m 4.36624404335156298e-05
+    call uranus body x y z vx vy vz m
+    float x 1.53796971148509165e+01
+    float y -2.59193146099879641e+01
+    float z 1.79258772950371181e-01
+    float vx 2.68067772490389322e-03
+    float vy 1.62824170038242295e-03
+    float vz -9.51592254519715870e-05
+    float m 5.15138902046611451e-05
+    call neptune body x y z vx vy vz m
+    list bodies sun jupiter saturn uranus neptune
+    call _ offset_momentum bodies
+    gset bodies bodies
+    unit u
+    ret u
+}
+
+# Advances the system `steps` times by 0.01.
+fn run(steps) {
+    gget bodies bodies
+    float dt 0.01
+    int i 0
+    int one 1
+@loop
+    lt c i steps
+    jf c @done
+    call _ advance bodies dt
+    add i i one
+    jmp @loop
+@done
+    unit u
+    ret u
+}

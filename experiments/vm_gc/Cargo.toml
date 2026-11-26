@@ -18,6 +18,10 @@ name = "bench"
 path = "src/bin/bench.rs"
 
 [[bin]]
+name = "realistic"
+path = "src/bin/realistic.rs"
+
+[[bin]]
 name = "footprint"
 path = "src/bin/footprint.rs"
 
