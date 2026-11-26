@@ -218,7 +218,19 @@ Four programs from `bench/programs` are ported to the prototype's bytecode in [p
 
 Arms 1 and 2 are equal, because they share the interpreter. Arm 3 is 1.5 to 1.7 times slower on every program, including `nbody` and `richards`, which allocate almost nothing. A profile of the whole run attributes about 10% of Arm 3's samples to mutex lock and unlock, because every field access of a struct with `var` fields takes a lock. About 17% goes to reference-count clones, drops, and immediate checks on register copies. Arm 1 spends 70% of its samples in the dispatch loop.
 
-The real `sand` is 1.4 to 2 times faster than every arm. Its time includes process start and compilation. Compare it only as a reference, not as a fourth arm: its compiler emits optimized bytecode, while the ports are hand-written and copy every call argument into an argument area.
+The real `sand` is 1.3 to 2.1 times faster than every arm, even though its time includes process start and compilation. Compare it only as a reference, not as a fourth arm. Two causes, measured with an instruction counter in a scratch copy of `sand`, account for the whole gap:
+
+| Program | Instructions: Arm 1 / `sand` | ns per instruction: Arm 1 / `sand` | Product | Measured gap |
+| --- | --- | --- | --- | --- |
+| `binary_trees` | 129.0 M / 96.7 M = 1.33 | 3.40 / 2.93 = 1.16 | 1.55 | 1.55 |
+| `fannkuch` | 103.2 M / 58.1 M = 1.78 | 2.39 / 2.50 = 0.96 | 1.70 | 1.70 |
+| `nbody` | 328.5 M / 293.5 M = 1.12 | 1.80 / 1.54 = 1.17 | 1.31 | 1.31 |
+| `richards` | 219.3 M / 180.6 M = 1.21 | 2.87 / 1.69 = 1.70 | 2.06 | 2.06 |
+
+- **More instructions.** The `sand` compiler emits fused compare-and-branch ops, ops with a constant operand, loop ops, and calls that need no argument copies. The hand-written ports load each constant into a register, compare and branch in two ops, and copy every argument. In `binary_trees`, `sand` runs 9 instructions on the inner path of `bottom_up`, against 13 in the port.
+- **Slower instructions.** The gap per instruction is largest in `richards`, which is mostly calls and field writes. A prototype call clears the callee's registers, and an Arm 1 field write also checks that the struct has `var` fields. The per-instruction fuel check costs only 2–5%.
+
+Both causes come from the prototype's maturity, not from its GC model, and they apply to every arm equally. A tuned compiler and interpreter would run fewer, cheaper instructions in every arm. That would make Arm 3's per-value reference-count and lock costs a larger share of its time.
 
 ## Findings for Every Arm
 
