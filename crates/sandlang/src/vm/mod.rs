@@ -1758,6 +1758,7 @@ impl Vm {
             }
             self.heap.stats.record(start.elapsed(), true);
         }
+        self.heap.io_memory.publish_heap(self.heap.used_bytes());
     }
 
     pub fn trace_of(&self, fiber: &Fiber, ip: Option<u32>) -> Vec<TraceFrame> {
