@@ -94,6 +94,10 @@ fn calls_module(log: &EventLog) -> NativeModule {
             context.root(VmValue::Int(i));
         }
     });
+    module.function("call_with_256_args", |context: &mut CallContext, callback: VmVal<fn() -> ()>| -> Result<(), Fail> {
+        context.call(callback.raw(), &[VmValue::Unit; 256])?;
+        Ok(())
+    });
     module.function("add_two", |a: i64, b: i64| a + b);
     module.function("add_two_ctx", |_context: &mut CallContext, a: i64, b: i64| a + b);
     module.function("call_missing_arg", |context: &mut CallContext, callback: VmVal<fn(i64, i64) -> i64>, x: i64| -> Result<i64, Fail> {
@@ -718,6 +722,15 @@ fn scheduler_yields_to_host_after_multi_slice_synchronous_callback() {
                   print(\"done\")";
     assert_eq!(run_ok(Config::new().clock(clock.clone()), source), "done\n");
     assert!(clock.yield_count.load(Ordering::SeqCst) > 0);
+}
+
+#[test]
+fn call_context_returns_a_limit_error_for_over_255_args() {
+    let (result, _) = run(Config::new(), &EventLog::default(), "calls.call_with_256_args(() => {})");
+    assert!(
+        matches!(&result, Err(Error::Runtime { message, .. }) if message.starts_with("limit: ") && message.contains("at most 255 arguments")),
+        "{result:?}"
+    );
 }
 
 #[test]
