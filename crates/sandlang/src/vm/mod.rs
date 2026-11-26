@@ -372,7 +372,8 @@ pub struct Fiber {
     pub waiters_prune_at: usize,
     /// Active async native calls on this fiber, ordered from outermost to innermost.
     pub(crate) native_calls: Vec<sched::ActiveNativeCall>,
-    /// Garbage-collection roots for [`CallContext`](crate::native::context::CallContext) calls and callback setup on this fiber.
+    /// Garbage-collection roots for the [`ScopedValue`](crate::native::scope::ScopedValue)s of
+    /// [`CallContext`](crate::native::context::CallContext) calls and for callback setup on this fiber.
     pub(crate) native_roots: Vec<VmValue>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,

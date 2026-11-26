@@ -2157,10 +2157,10 @@ module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 - **Synchronous with `&mut Vm` first.** The function accesses the VM
   synchronously. Each parameter after `&mut Vm` is an owned type or a VM handle
   such as `VmVal<T>`.
-- **Synchronous with `&mut CallContext` first.** The function can call Sand
-  functions synchronously on the calling task. Each parameter after
-  `&mut CallContext` is an owned type or a VM handle. It returns an
-  `IntoVmValue` type, `Result<T, Fail>`, or `Result<T, HostError<Fail>>`.
+- **Synchronous with `&mut CallContext` and `GcScope` first.** The function can
+  call Sand functions synchronously on the calling task. Each parameter after
+  `GcScope` is an owned type or a VM handle. It returns an `IntoVmValue` type,
+  `Result<T, Fail>`, or `Result<T, HostError<Fail>>`.
 - **Asynchronous.** The function returns a future. The engine suspends only the
   calling task. Its parameters, future, and future output are owned `Send`
   types.
@@ -2208,22 +2208,29 @@ call returns.
 
 The engine runs a `CallContext` function once per call on the calling task. If
 the function returns a limit error, the engine ends the run immediately.
-`CallContext` provides four operations:
 
-- `vm()` returns `&Vm` for shared read access.
-- `root(value)` keeps a heap value alive until the native call returns. It
-  returns a `RootedValue` handle. `value(rooted)` reads that `VmValue` from the
-  call's root stack.
-- `step(f)` runs `f` with `&mut Vm` under automatic retry for limit errors.
+The garbage collector runs only inside `call` and `step`. These two methods
+take a `GcScope`, and the other methods take a `NoGcScope` from `gc.nogc()`.
+Each heap value that `CallContext` returns is a `BoundValue`, which borrows its
+`NoGcScope`. The compiler therefore rejects a `BoundValue` that the function
+uses after it passes `gc.reborrow()` to `call` or `step`. `unbind()` returns
+the raw `VmValue`, which the compiler does not check. `CallContext` provides
+four operations:
+
+- `vm(gc)` returns a `VmReader` for shared read access. It dereferences to
+  `Vm`. Its `field` and `list_item` methods return `BoundValue`s.
+- `root(value, gc)` keeps a heap value alive until the native call returns. It
+  returns a `ScopedValue`. `value(scoped, gc)` reads it back as a `BoundValue`.
+- `step(f, gc)` runs `f` with `&mut Vm` under automatic retry for limit errors.
   After a memory or resource limit error, the engine collects garbage in place.
   It then runs `f` again. The engine rejects any permission prompt inside `f`
   with an `"invalid"` error.
-- `call(callee, args)` runs a Sand function with at most 255 arguments to
-  completion on the host thread. The garbage collector preserves the returned
-  `VmValue` until the next `call` or `step`. Inside `callee`,
-  `task.yield_now()` returns `()` immediately. During `callee`, the engine
-  rejects task waits, permission prompts, and self-cancellation with an
-  `"invalid"` error.
+- `call(callee, args, gc)` runs a Sand function with at most 255 arguments to
+  completion on the host thread. The engine roots `callee` and `args` during
+  the call. The garbage collector preserves the returned `BoundValue` until the
+  next `call` or `step`. Inside `callee`, `task.yield_now()` returns `()`
+  immediately. During `callee`, the engine rejects task waits, permission
+  prompts, and self-cancellation with an `"invalid"` error.
 
 `CallContext` records any run-ending outcome from `call` and any prompt error
 from `step`. Later `call` and `step` calls return that recorded `Fail`. After

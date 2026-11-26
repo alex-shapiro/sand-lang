@@ -2,6 +2,7 @@
 
 use super::context::{AsyncNativeCall, CallContext, NativeContext};
 use super::convert::{Conversion, FromVmValue, HostError, IntoVmValue, ok_vm_value};
+use super::scope::GcScope;
 use super::ty::{SandType, Type};
 use crate::vm::value::VmValue;
 use crate::vm::{ContextNativeFn, Ctl, Fail, Fiber, NativeFn, Vm, WaitKind};
@@ -37,6 +38,7 @@ impl Signature {
 /// ```
 /// # use sandlang::native::NativeModule;
 /// # use sandlang::native::context::CallContext;
+/// # use sandlang::native::scope::GcScope;
 /// # use sandlang::native::ty::VmVal;
 /// # use sandlang::vm::{Fail, Vm};
 /// let mut module = NativeModule::new("text");
@@ -45,8 +47,8 @@ impl Signature {
 ///     vm.check_memory(text.len())?;
 ///     Ok(text.len() as i64)
 /// });
-/// module.function("call", |context: &mut CallContext, sand_fn: VmVal<fn() -> i64>| -> Result<VmVal<i64>, Fail> {
-///     Ok(VmVal::from_raw(context.call(sand_fn.raw(), &[])?))
+/// module.function("call", |context: &mut CallContext, gc: GcScope, sand_fn: VmVal<fn() -> i64>| -> Result<VmVal<i64>, Fail> {
+///     Ok(VmVal::from_raw(context.call(sand_fn.raw(), &[], gc)?.unbind()))
 /// });
 /// module.function("fetch", |url: String| async move { url.len() as i64 });
 /// ```
@@ -57,10 +59,10 @@ impl Signature {
 ///   [`NativeParam`] types and output implements [`NativeReturn<Ctl>`]. Check
 ///   permissions and limits before side effects; the engine reruns the call
 ///   after prompts or GC retries. Return [`Later`] to suspend on a future.
-/// - **Synchronous with `&mut CallContext`.** Trailing parameters are owned
-///   [`NativeParam`] types and output implements [`NativeReturn<Fail>`]. Runs
-///   once per call; use [`CallContext::call`] for Sand callbacks and
-///   [`CallContext::step`] for GC-retried VM checks.
+/// - **Synchronous with `&mut CallContext` and [`GcScope`].** Trailing
+///   parameters are owned [`NativeParam`] types and output implements
+///   [`NativeReturn<Fail>`]. Runs once per call; use [`CallContext::call`] for
+///   Sand callbacks and [`CallContext::step`] for GC-retried VM checks.
 /// - **Asynchronous.** Returns a `Send` future with `Send` owned parameters and
 ///   `Send` [`NativeReturn<Fail>`] output. Suspends only the calling task.
 ///
@@ -103,8 +105,8 @@ impl Signature {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a native function",
     note = "each parameter must implement `NativeParam`",
-    note = "place `&mut Vm` or `&mut CallContext` first",
-    note = "parameters after `&mut Vm` or `&mut CallContext` must be owned types",
+    note = "place `&mut Vm`, or `&mut CallContext` and `GcScope`, first",
+    note = "parameters after `&mut Vm` or `GcScope` must be owned types",
     note = "plain synchronous and `&mut Vm` functions suspend the calling task with `Result<Later<T, E>, E>`",
     note = "an async function requires `Send` parameters, future, and output",
     note = "for `HostError` results, plain synchronous and `&mut Vm` functions use `HostError`",
@@ -250,7 +252,7 @@ pub struct SyncNativeFn;
 /// Synchronous [`NativeFunction`] with `&mut Vm` as its first parameter.
 pub struct VmNativeFn;
 
-/// Synchronous [`NativeFunction`] with `&mut CallContext` as its first parameter.
+/// Synchronous [`NativeFunction`] with `&mut CallContext` and [`GcScope`] as its first parameters.
 pub struct CallContextNativeFn;
 
 /// Asynchronous [`NativeFunction`] that returns a future.
@@ -501,7 +503,7 @@ macro_rules! fn_impls {
         #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments)]
         impl<F, R, $($param,)*> NativeFunction<(CallContextNativeFn, ($($param,)*))> for F
         where
-            F: Fn(&mut CallContext<'_>, $($param),*) -> R + Send + Sync + 'static,
+            F: Fn(&mut CallContext<'_>, GcScope<'_, '_>, $($param),*) -> R + Send + Sync + 'static,
             R: NativeReturn<Fail>,
             $($param: for<'a> NativeParam<Item<'a> = $param> + 'static,)*
         {
@@ -512,7 +514,7 @@ macro_rules! fn_impls {
                 BoxedNativeFn::Context(Box::new(move |vm: &mut Vm, fiber: &mut Fiber, args: std::ops::Range<usize>| -> Result<VmValue, Ctl> {
                     read_params!(vm, &fiber.stack[args], $($param),*);
                     let mut context = CallContext::new(vm, fiber);
-                    let output = self(&mut context, $($param),*);
+                    let output = self(&mut context, GcScope::new(), $($param),*);
                     context.finish(output)
                 }))
             }

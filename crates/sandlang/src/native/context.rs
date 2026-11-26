@@ -4,6 +4,7 @@
 //! [`Later::new`](super::func::Later::new) futures use [`NativeContext`].
 
 use super::func::{NativeError, NativeReturn};
+use super::scope::{BoundValue, GcScope, NoGcScope, ScopedValue, VmReader};
 use crate::policy::Capability;
 use crate::vm::bytecode::MAX_CALLBACK_ARGS;
 use crate::vm::sched::ProgramCode;
@@ -298,20 +299,23 @@ const MAX_IDLE_ROOT_SLOTS: usize = 1024;
 
 /// VM and callback handle for a synchronous native function.
 ///
-/// Functions taking `&mut CallContext` first run once per call. Use
-/// [`CallContext::call`] for Sand callbacks and [`CallContext::step`] for
-/// retryable VM operations.
+/// A function that takes `&mut CallContext` and a [`GcScope`] first runs once
+/// per call. Use [`CallContext::call`] for Sand callbacks and
+/// [`CallContext::step`] for retryable VM operations. See
+/// [`scope`](super::scope) for the rules that `GcScope` checks.
 ///
 /// ```
 /// # use sandlang::native::NativeModule;
 /// # use sandlang::native::context::CallContext;
+/// # use sandlang::native::scope::GcScope;
 /// # use sandlang::native::ty::{Param, VmVal};
 /// # use sandlang::vm::Fail;
 /// let mut module = NativeModule::new("calls");
 /// module.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
-/// module.function("twice", |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, input: Param<0>| -> Result<Param<0>, Fail> {
-///     let once = context.call(sand_fn.raw(), &[input.raw()])?;
-///     Ok(Param::from_raw(context.call(sand_fn.raw(), &[once])?))
+/// module.function("twice", |context: &mut CallContext, mut gc: GcScope, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, input: Param<0>| -> Result<Param<0>, Fail> {
+///     let once = context.call(sand_fn.raw(), &[input.raw()], gc.reborrow())?;
+///     let twice = context.call(sand_fn.raw(), &[once.unbind()], gc)?;
+///     Ok(Param::from_raw(twice.unbind()))
 /// });
 /// ```
 pub struct CallContext<'a> {
@@ -333,25 +337,27 @@ impl<'a> CallContext<'a> {
         CallContext { vm, fiber, roots_start, callback_state: None, run_ending: None }
     }
 
-    /// Returns shared read access to the [`Vm`].
+    /// Returns shared read access to the [`Vm`]. The heap values that it
+    /// reads are bound to `gc`.
     ///
     /// Use [`CallContext::step`] for `&mut Vm` and [`CallContext::root`] to
     /// keep heap values alive across `call` or `step`.
-    pub fn vm(&self) -> &Vm {
-        self.vm
+    pub fn vm<'gc>(&self, gc: NoGcScope<'gc, '_>) -> VmReader<'_, 'gc> {
+        VmReader::new(self.vm, gc)
     }
 
     /// Calls Sand function `callee` with `args` on the calling task.
     ///
-    /// Returns an unrooted [`VmValue`] valid until the next `call` or `step`.
-    /// Use [`CallContext::root`] to keep it longer. Task waits, permission
+    /// The engine roots `callee` and `args` during the call. Returns an
+    /// unrooted value valid until the next `call` or `step`. Use
+    /// [`CallContext::root`] to keep it longer. Task waits, permission
     /// prompts, and self-cancellation fail with an `"invalid"` error.
     ///
     /// A terminal run ending from `callee` is recorded, returned from this and
     /// all later `call` or `step` calls, and applied after the native call returns.
     /// Returns a `"limit"` error if `args.len()` exceeds 255.
     #[inline]
-    pub fn call(&mut self, callee: VmValue, args: &[VmValue]) -> Result<VmValue, Fail> {
+    pub fn call<'gc>(&mut self, callee: VmValue, args: &[VmValue], gc: GcScope<'gc, '_>) -> Result<BoundValue<'gc>, Fail> {
         if args.len() > MAX_CALLBACK_ARGS {
             return Err(Fail::runtime_error("limit", format!("a callback takes at most {MAX_CALLBACK_ARGS} arguments")));
         }
@@ -360,32 +366,40 @@ impl<'a> CallContext<'a> {
         }
         let (vm, fiber) = (&mut *self.vm, &mut *self.fiber);
         let (code, frame_base) = self.callback_state.get_or_insert_with(|| (vm.program_code(), fiber.live_top(&vm.prog)));
-        vm.run_callback(code, fiber, *frame_base, callee, args).map_err(|ending| {
-            self.run_ending = Some(ending.clone());
-            ending.into()
-        })
+        match vm.run_callback(code, fiber, *frame_base, callee, args) {
+            Ok(result) => Ok(result.bind(gc.into_nogc())),
+            Err(ending) => {
+                self.run_ending = Some(ending.clone());
+                Err(ending.into())
+            }
+        }
     }
 
     /// Roots `value` until this native call returns.
-    pub fn root(&mut self, value: VmValue) -> RootedValue {
+    pub fn root<'s>(&mut self, value: BoundValue<'_>, gc: NoGcScope<'_, 's>) -> ScopedValue<'s> {
         let roots = &mut self.fiber.native_roots;
         let capacity = roots.capacity();
-        roots.push(value);
+        roots.push(value.unbind());
         self.vm.heap.fiber_bytes += (roots.capacity() - capacity) * std::mem::size_of::<VmValue>();
-        RootedValue((roots.len() - 1) as u32)
+        ScopedValue::new(value.unbind(), gc)
     }
 
-    /// Returns the [`VmValue`] for `rooted` in this call.
-    pub fn value(&self, rooted: RootedValue) -> VmValue {
-        self.fiber.native_roots[rooted.0 as usize]
+    /// Returns the value that `rooted` keeps alive.
+    pub fn value<'gc, 's>(&self, rooted: ScopedValue<'s>, gc: NoGcScope<'gc, 's>) -> BoundValue<'gc> {
+        rooted.get(gc)
     }
 
     /// Runs `f` with `&mut Vm`, retrying once after garbage collection on
     /// memory or resource limits.
     ///
     /// Check limits in `f` before any side effect. Permission prompts fail with
-    /// an `"invalid"` error.
-    pub fn step<R, E: NativeError>(&mut self, mut f: impl FnMut(&mut Vm) -> Result<R, E>) -> Result<R, E::FutureError> {
+    /// an `"invalid"` error. The collection before a retry frees each unrooted
+    /// heap value, so root every heap value that `f` uses.
+    pub fn step<R, E: NativeError>(
+        &mut self,
+        mut f: impl FnMut(&mut Vm) -> Result<R, E>,
+        _gc: GcScope<'_, '_>,
+    ) -> Result<R, E::FutureError> {
         if let Some(ending) = &self.run_ending {
             return Err(Fail::from(ending.clone()).into());
         }

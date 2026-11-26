@@ -227,23 +227,31 @@ stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::R
 
 ### Calling Sand functions
 
-A native function can call a Sand function from the script. Take `&mut CallContext` as the first parameter. `CallContext::call` runs the Sand function on the calling task:
+A native function can call a Sand function from the script. Take `&mut CallContext` and a `GcScope` as the first two parameters. `CallContext::call` runs the Sand function on the calling task:
 
 ```rust
 use sandlang::native::NativeModule;
 use sandlang::native::context::CallContext;
+use sandlang::native::scope::GcScope;
 use sandlang::native::ty::{Param, VmVal};
 use sandlang::vm::Fail;
 
 let mut calls = NativeModule::new("calls");
 calls.source("pub native fn twice<T>(f: fn(T) -> T, x: T) -> T");
-calls.function("twice", |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, input: Param<0>| -> Result<Param<0>, Fail> {
-    let once = context.call(sand_fn.raw(), &[input.raw()])?;
-    Ok(Param::from_raw(context.call(sand_fn.raw(), &[once])?))
+calls.function("twice", |context: &mut CallContext, mut gc: GcScope, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, input: Param<0>| -> Result<Param<0>, Fail> {
+    let once = context.call(sand_fn.raw(), &[input.raw()], gc.reborrow())?;
+    let twice = context.call(sand_fn.raw(), &[once.unbind()], gc)?;
+    Ok(Param::from_raw(twice.unbind()))
 });
 ```
 
-`CallContext::call` returns an unrooted `VmValue`. `CallContext::root` keeps a `VmValue` alive across `CallContext::call` and `CallContext::step`. The garbage collector can free unrooted heap values during either method. Allocate heap values and resources inside `CallContext::step`. On a memory or resource limit, `CallContext::step` collects garbage in place. It then runs its closure again.
+The garbage collector can free unrooted heap values during `CallContext::call` and `CallContext::step`. These two methods take the `GcScope`, and the compiler checks how the function uses heap values around them:
+
+- `CallContext::call` and reads through `CallContext::vm` return a `BoundValue`. The compiler rejects a `BoundValue` that the function uses after a later `gc.reborrow()`.
+- `CallContext::root` keeps a value alive until the native function returns. It returns a `ScopedValue`. `CallContext::value` reads it back as a `BoundValue`.
+- `BoundValue::unbind` returns the raw `VmValue`. The compiler does not check raw values. `CallContext::call` takes raw values because it roots them before Sand code runs.
+
+Allocate heap values and resources inside `CallContext::step`. On a memory or resource limit, `CallContext::step` collects garbage in place. It then runs its closure again.
 
 The engine runs each callback to completion on the host thread. Set `max_wall_time` or `max_cpu_time` for untrusted scripts. During a `CallContext` call, the engine rejects task waits, permission prompts, and self-cancellation with a runtime error. Use `Later::new` if the call awaits host I/O or permission prompts. Inside the `Later::new` future, `NativeContext::call` runs Sand callbacks.
 

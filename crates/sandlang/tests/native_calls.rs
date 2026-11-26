@@ -9,6 +9,7 @@ use sandlang::native::NativeModule;
 use sandlang::native::context::{CallContext, NativeContext};
 use sandlang::native::convert::{HostError, IntoVmValue};
 use sandlang::native::func::Later;
+use sandlang::native::scope::GcScope;
 use sandlang::native::ty::{Param, VmVal};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::vm::value::VmValue;
@@ -81,65 +82,82 @@ fn calls_module(log: &EventLog) -> NativeModule {
     );
     module.function(
         "apply_sync",
-        |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, value: Param<0>, times: i64| -> Result<Param<0>, Fail> {
+        |context: &mut CallContext,
+         mut gc: GcScope,
+         sand_fn: VmVal<fn(Param<0>) -> Param<0>>,
+         value: Param<0>,
+         times: i64|
+         -> Result<Param<0>, Fail> {
             let mut current = value.raw();
             for _ in 0..times {
-                current = context.call(sand_fn.raw(), &[current])?;
+                current = context.call(sand_fn.raw(), &[current], gc.reborrow())?.unbind();
             }
             Ok(Param::from_raw(current))
         },
     );
-    module.function("root_many", |context: &mut CallContext, count: i64| {
+    module.function("root_many", |context: &mut CallContext, gc: GcScope, count: i64| {
         for i in 0..count {
-            context.root(VmValue::Int(i));
+            context.root(VmValue::Int(i).bind(gc.nogc()), gc.nogc());
         }
     });
-    module.function("call_with_256_args", |context: &mut CallContext, callback: VmVal<fn() -> ()>| -> Result<(), Fail> {
-        context.call(callback.raw(), &[VmValue::Unit; 256])?;
+    module.function("call_with_256_args", |context: &mut CallContext, gc: GcScope, callback: VmVal<fn() -> ()>| -> Result<(), Fail> {
+        context.call(callback.raw(), &[VmValue::Unit; 256], gc)?;
         Ok(())
     });
     module.function("add_two", |a: i64, b: i64| a + b);
-    module.function("add_two_ctx", |_context: &mut CallContext, a: i64, b: i64| a + b);
-    module.function("call_missing_arg", |context: &mut CallContext, callback: VmVal<fn(i64, i64) -> i64>, x: i64| -> Result<i64, Fail> {
-        let value = context.call(callback.raw(), &[VmValue::Int(x)])?;
-        Ok(match value {
-            VmValue::Int(n) => n,
-            _ => 0,
-        })
-    });
-    module.function("allocate_after", |context: &mut CallContext, callback: Callback, byte_count: i64| -> Result<i64, Fail> {
-        context.call(callback.raw(), &[])?;
-        context.step(|vm| -> Result<i64, Fail> {
-            let text = "x".repeat(byte_count as usize).into_vm_value(vm)?;
-            Ok(vm.str(text).len() as i64)
-        })
-    });
+    module.function("add_two_ctx", |_context: &mut CallContext, _gc: GcScope, a: i64, b: i64| a + b);
     module.function(
-        "collect_sync",
-        |context: &mut CallContext, callback: VmVal<fn(i64) -> String>, count: i64| -> Result<Vec<String>, Fail> {
-            let mut rooted_results = Vec::new();
-            for i in 0..count {
-                let result = context.call(callback.raw(), &[VmValue::Int(i)])?;
-                rooted_results.push(context.root(result));
-            }
-            Ok(rooted_results.into_iter().map(|rooted| context.vm().str(context.value(rooted)).to_string()).collect())
+        "call_missing_arg",
+        |context: &mut CallContext, gc: GcScope, callback: VmVal<fn(i64, i64) -> i64>, x: i64| -> Result<i64, Fail> {
+            let value = context.call(callback.raw(), &[VmValue::Int(x)], gc)?;
+            Ok(match value.unbind() {
+                VmValue::Int(n) => n,
+                _ => 0,
+            })
         },
     );
-    module.function("knock_and_ignore", |context: &mut CallContext| -> i64 {
-        let _ = context.step(|vm| vm.require(&Capability::Custom { name: "door".into(), detail: "back".into() }));
+    module.function(
+        "allocate_after",
+        |context: &mut CallContext, mut gc: GcScope, callback: Callback, byte_count: i64| -> Result<i64, Fail> {
+            context.call(callback.raw(), &[], gc.reborrow())?;
+            context.step(
+                |vm| -> Result<i64, Fail> {
+                    let text = "x".repeat(byte_count as usize).into_vm_value(vm)?;
+                    Ok(vm.str(text).len() as i64)
+                },
+                gc,
+            )
+        },
+    );
+    module.function(
+        "collect_sync",
+        |context: &mut CallContext, mut gc: GcScope, callback: VmVal<fn(i64) -> String>, count: i64| -> Result<Vec<String>, Fail> {
+            let mut rooted_results = Vec::new();
+            for i in 0..count {
+                let result = context.call(callback.raw(), &[VmValue::Int(i)], gc.reborrow())?.unbind().bind(gc.nogc());
+                rooted_results.push(context.root(result, gc.nogc()));
+            }
+            Ok(rooted_results.into_iter().map(|rooted| context.vm(gc.nogc()).str(context.value(rooted, gc.nogc())).to_string()).collect())
+        },
+    );
+    module.function("knock_and_ignore", |context: &mut CallContext, gc: GcScope| -> i64 {
+        let _ = context.step(|vm| vm.require(&Capability::Custom { name: "door".into(), detail: "back".into() }), gc);
         7
     });
-    module.function("ignore_errors", |context: &mut CallContext, callback: Callback| -> i64 {
-        let _ = context.call(callback.raw(), &[]);
+    module.function("ignore_errors", |context: &mut CallContext, gc: GcScope, callback: Callback| -> i64 {
+        let _ = context.call(callback.raw(), &[], gc);
         7
     });
     // `Heap::new_str` skips the heap limit check. Under `retry_stress`,
     // `Vm::begin_callback` triggers the first collection during stack growth.
-    module.function("call_with_fresh", |context: &mut CallContext, callback: VmVal<fn(String) -> String>| -> Result<String, Fail> {
-        let fresh = context.step(|vm| -> Result<_, Fail> { Ok(vm.heap.new_str("fresh")) })?;
-        let result = context.call(callback.raw(), &[fresh])?;
-        Ok(context.vm().str(result).to_string())
-    });
+    module.function(
+        "call_with_fresh",
+        |context: &mut CallContext, mut gc: GcScope, callback: VmVal<fn(String) -> String>| -> Result<String, Fail> {
+            let fresh = context.step(|vm| -> Result<_, Fail> { Ok(vm.heap.new_str("fresh")) }, gc.reborrow())?;
+            let result = context.call(callback.raw(), &[fresh], gc.reborrow())?.unbind().bind(gc.nogc());
+            Ok(context.vm(gc.nogc()).str(result).to_string())
+        },
+    );
     module.function("knock", |vm: &mut Vm, name: String| -> Result<String, HostError> {
         vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
         Ok(name)
@@ -267,9 +285,15 @@ fn calls_module(log: &EventLog) -> NativeModule {
     module
 }
 
+/// Runs `source` with the garbage collector at every safe point, so that a
+/// missing root in `calls_module` fails the test.
 fn run(config: Config, log: &EventLog, source: &str) -> (Result<i32, Error>, String) {
+    run_with_gc_stress(config, log, source, true)
+}
+
+fn run_with_gc_stress(config: Config, log: &EventLog, source: &str, gc_stress: bool) -> (Result<i32, Error>, String) {
     let stdout = MemorySink::new();
-    let config = config.host_modules(HostModules::new([calls_module(log)]).unwrap()).stdout(stdout.clone());
+    let config = config.host_modules(HostModules::new([calls_module(log)]).unwrap()).stdout(stdout.clone()).gc_stress(gc_stress);
     let result = rt().block_on(Engine::new(config).run_source("main.sand", &format!("import calls\n{source}")));
     (result.map(|outcome| outcome.exit_code), stdout.contents())
 }
@@ -309,13 +333,13 @@ fn collector_keeps_rooted_values_during_callbacks() {
                       var xs: [str] = []\n\
                       for i in 0..2000 { xs.push(\"garbage \\(i)\") }\n\
                   }))";
-    assert_eq!(run_ok(Config::new().gc_stress(true), source), "kept\n");
+    assert_eq!(run_ok(Config::new(), source), "kept\n");
 }
 
 #[test]
 fn engine_enforces_call_depth_limit_across_nested_callbacks() {
     let source = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply(down, n - 1, 1) + 1 } }\nprint(down(100))";
-    assert_eq!(run_ok(Config::new().gc_stress(true), source), "100\n");
+    assert_eq!(run_ok(Config::new(), source), "100\n");
 
     let limits = Limits { max_call_depth: 50, ..Limits::default() };
     let (result, _) = run(Config::new().limits(limits), &EventLog::default(), source);
@@ -397,7 +421,8 @@ fn engine_retries_step_resource_checks_after_collection() {
 
 #[test]
 fn engine_counts_callback_results_against_memory_limit() {
-    let (result, _) = run(memory_limit(16 << 20), &EventLog::default(), "calls.apply((x) => x + 1, 0, 1200000)");
+    // A collection at each of the 1,200,000 callbacks takes minutes.
+    let (result, _) = run_with_gc_stress(memory_limit(16 << 20), &EventLog::default(), "calls.apply((x) => x + 1, 0, 1200000)", false);
     assert!(matches!(result, Err(Error::Limit(LimitKind::Memory))), "{result:?}");
 }
 
@@ -469,7 +494,7 @@ fn call_context_returns_callback_results() {
 #[test]
 fn call_context_runs_nested_callbacks() {
     let source = "fn down(n: int) -> int { if n == 0 { 0 } else { calls.apply_sync(down, n - 1, 1) + 1 } }\nprint(down(4))";
-    assert_eq!(run_ok(Config::new().gc_stress(true), source), "4\n");
+    assert_eq!(run_ok(Config::new(), source), "4\n");
 
     let limits = Limits { max_call_depth: 6, ..Limits::default() };
     let (result, _) = run(Config::new().limits(limits), &EventLog::default(), source);
@@ -601,7 +626,7 @@ fn collector_keeps_rooted_values_across_synchronous_callbacks() {
                       for j in 0..200 { junk.push(\"garbage \\(j)\") }\n\
                       \"item \\(i)\"\n\
                   }, 4))";
-    for config in [Config::new().gc_stress(true), Config::new().retry_stress(true)] {
+    for config in [Config::new(), Config::new().retry_stress(true)] {
         assert_eq!(run_ok(config, source), "[\"item 0\", \"item 1\", \"item 2\", \"item 3\"]\n");
     }
 }

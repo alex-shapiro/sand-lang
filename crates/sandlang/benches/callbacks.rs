@@ -8,6 +8,7 @@ use sandlang::engine::{Config, Engine, HostModules, MemorySink};
 use sandlang::native::NativeModule;
 use sandlang::native::context::CallContext;
 use sandlang::native::func::Later;
+use sandlang::native::scope::GcScope;
 use sandlang::native::ty::{Param, VmVal};
 use sandlang::vm::{Fail, WaitKind};
 use std::time::{Duration, Instant};
@@ -39,10 +40,15 @@ fn calls_module() -> NativeModule {
     );
     module.function(
         "apply",
-        |context: &mut CallContext, sand_fn: VmVal<fn(Param<0>) -> Param<0>>, value: Param<0>, times: i64| -> Result<Param<0>, Fail> {
+        |context: &mut CallContext,
+         mut gc: GcScope,
+         sand_fn: VmVal<fn(Param<0>) -> Param<0>>,
+         value: Param<0>,
+         times: i64|
+         -> Result<Param<0>, Fail> {
             let mut current = value.raw();
             for _ in 0..times {
-                current = context.call(sand_fn.raw(), &[current])?;
+                current = context.call(sand_fn.raw(), &[current], gc.reborrow())?.unbind();
             }
             Ok(Param::from_raw(current))
         },

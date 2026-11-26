@@ -3,6 +3,7 @@
 pub mod context;
 pub mod convert;
 pub mod func;
+pub mod scope;
 pub mod ty;
 
 use crate::check::ModKind;

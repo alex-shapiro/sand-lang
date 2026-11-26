@@ -12,7 +12,10 @@ use std::sync::{Arc, OnceLock};
 /// Unrooted heap handles stay valid only until the next callback, `step` retry,
 /// or async wait. Root them across those points with
 /// [`CallContext::root`](crate::native::context::CallContext::root) or
-/// [`NativeContext::root`](crate::native::context::NativeContext::root).
+/// [`NativeContext::root`](crate::native::context::NativeContext::root). In a
+/// [`CallContext`](crate::native::context::CallContext) function, a
+/// [`BoundValue`](crate::native::scope::BoundValue) lets the compiler check
+/// these points.
 ///
 /// Variants `VUnit` through `VObj` store a single payload inline if that
 /// payload is not itself an inline variant. Build and inspect variants through
